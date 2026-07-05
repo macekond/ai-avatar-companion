@@ -221,7 +221,7 @@ def voice_loop(config: Config, pipeline: LLMPipeline) -> None:
     tts.speak(greeting)
 
     while True:
-        print(f"{DIM}Hold {BOLD}SPACE{RESET}{DIM} to talk, release to send…{RESET}")
+        print(f"{DIM}Press {BOLD}SPACE{RESET}{DIM} to start talking, press {BOLD}SPACE{RESET}{DIM} again to send…{RESET}")
         try:
             audio = stt.record()
         except RuntimeError as exc:

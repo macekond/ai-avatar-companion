@@ -6,6 +6,5 @@ python-dotenv>=1.0.0
 # Phase 2 — voice loop
 faster-whisper>=1.0.0
 numpy>=1.24.0
-pynput>=1.7.6
 sounddevice>=0.4.6
 piper-tts>=1.2.0

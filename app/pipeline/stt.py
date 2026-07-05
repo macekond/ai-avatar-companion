@@ -2,16 +2,20 @@
 
 Interface:
     stt = STTPipeline(config)
-    audio = stt.record()           # blocks: hold Space → record → release
+    audio = stt.record()           # blocks: Space to start, Space to stop
     text  = stt.transcribe(audio)  # returns "" if no speech / low confidence
 
-This module is intentionally self-contained so it can be swapped out in
-later phases without touching the caller (e.g. when barge-in / VAD
-auto-stop is added in Phase 3).
+Recording uses tty/termios raw mode (stdlib only) so no macOS Accessibility
+permission is required. The hold-Space mechanic in the design document is
+for the final Tauri shell UI; in the terminal prototype, a toggle (press
+once to start, press once to stop) is the correct interaction model.
 """
 from __future__ import annotations
 
+import sys
+import termios
 import threading
+import tty
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -22,9 +26,12 @@ if TYPE_CHECKING:
 SAMPLE_RATE = 16_000   # Whisper requires 16 kHz
 MIN_DURATION_S = 0.3   # recordings shorter than this are silently discarded
 
+_STOP_KEYS = {' ', '\r', '\n'}  # Space or Enter = stop recording
+_QUIT_KEYS = {'\x03', '\x1b', 'q', 'Q'}  # Ctrl-C, Escape, q = exit
+
 
 class STTPipeline:
-    """Wraps faster-whisper with push-to-talk recording via pynput."""
+    """Wraps faster-whisper with toggle-mode recording via tty raw input."""
 
     def __init__(self, config: Config) -> None:
         self._config = config
@@ -35,57 +42,60 @@ class STTPipeline:
     # ------------------------------------------------------------------
 
     def record(self) -> np.ndarray:
-        """Block until the user holds Space, record audio, return on release.
+        """Toggle-mode recording via terminal raw input — no permissions required.
 
-        Returns a float32 mono array at SAMPLE_RATE.
-        Returns an empty array if Space was tapped too briefly.
+        Press Space (or Enter) to START recording.
+        Press Space (or Enter) again to STOP and return the audio.
+        Ctrl-C / Escape / q exits the voice loop (raises KeyboardInterrupt).
 
-        Raises RuntimeError if the keyboard listener cannot start (most
-        commonly: macOS Accessibility permission not granted).
+        Returns a float32 mono array at SAMPLE_RATE, or an empty array if
+        the recording was too short to be useful.
         """
         import sounddevice as sd
-        from pynput import keyboard
+
+        if not sys.stdin.isatty():
+            raise RuntimeError("stdin is not a TTY — cannot read keystrokes.")
 
         chunks: list[np.ndarray] = []
-        started = threading.Event()
-        done = threading.Event()
+        capturing = threading.Event()
 
         def _audio_cb(indata: np.ndarray, frames: int, time, status) -> None:
-            if started.is_set() and not done.is_set():
+            if capturing.is_set():
                 chunks.append(indata.copy())
 
-        def _on_press(key) -> None:
-            if key == keyboard.Key.space:
-                started.set()
-
-        def _on_release(key):
-            if key == keyboard.Key.space and started.is_set():
-                done.set()
-                return False  # stop the listener
+        fd = sys.stdin.fileno()
+        saved = termios.tcgetattr(fd)
 
         try:
-            # Start audio stream before waiting for keypress so the first
-            # frames are captured without a latency gap.
+            tty.setraw(fd)
+
+            # Audio stream always open; we only collect when capturing is set,
+            # so the first frame is never dropped by stream startup latency.
             with sd.InputStream(
                 samplerate=SAMPLE_RATE,
                 channels=1,
                 dtype="float32",
                 callback=_audio_cb,
             ):
-                with keyboard.Listener(
-                    on_press=_on_press,
-                    on_release=_on_release,
-                ) as listener:
-                    done.wait()
-        except Exception as exc:
-            msg = str(exc)
-            if "accessibility" in msg.lower() or "CGEventTap" in msg:
-                raise RuntimeError(
-                    "pynput needs Accessibility permission on macOS.\n"
-                    "  System Settings → Privacy & Security → Accessibility\n"
-                    "  → add Terminal (or your app) and try again."
-                ) from exc
-            raise
+                # --- wait for START key ---
+                while True:
+                    ch = sys.stdin.read(1)
+                    if ch in _QUIT_KEYS:
+                        raise KeyboardInterrupt
+                    if ch in _STOP_KEYS:
+                        capturing.set()
+                        break
+
+                # --- wait for STOP key ---
+                while True:
+                    ch = sys.stdin.read(1)
+                    if ch in _QUIT_KEYS:
+                        raise KeyboardInterrupt
+                    if ch in _STOP_KEYS:
+                        break
+
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, saved)
 
         if not chunks:
             return np.zeros(0, dtype=np.float32)
