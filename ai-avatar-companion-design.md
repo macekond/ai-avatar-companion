@@ -95,6 +95,35 @@ The same pose (different label, e.g. "My brain is napping…") covers backend fa
 - Optional: always-on-top mode, minimal title bar
 - On iPad or tablet: fullscreen, no status bar intrusions
 
+### 2.8 First-Run & Startup
+
+The app has three startup phases on every launch; the UI reflects each one so the child (or parent) is never left staring at a blank screen.
+
+**Phase A — Prerequisite check** (< 1 s, silent on success):
+- Is Ollama reachable at `localhost:11434`? → if not: show *Setup screen* (see below)
+- Is `llama3.2:3b` already pulled in Ollama? → if not: offer to pull it
+- Are STT and TTS model files present on disk? → if not: trigger Phase B download
+
+**Phase B — Model download** (first run only; skipped on subsequent launches):
+- Per-model progress bars (STT model ~240 MB, LLM ~2 GB, TTS voice ~60 MB) with estimated time remaining
+- Progress is polled from the Python sidecar; the Tauri webview updates without blocking
+- Cancellable and resumable: Ollama pull is checkpointed; STT/TTS files use HTTP range requests
+- After all assets are present: proceeds to Phase C automatically
+
+**Phase C — Model warm-up** (5–15 s, every launch):
+- Avatar shown in a dim, sleepy state with label *"Nova is waking up…"*
+- Python sidecar sends a minimal no-op prompt to the LLM and discards the reply
+- When the first token arrives: warm-up is complete → transition to Idle state
+- The first real reply may still be 1–2 s slower than subsequent ones (model paging into GPU memory);
+  a `cold_start: true` flag is written into the first JSONL log turn for latency debugging
+
+**Setup screen** (shown when Phase A fails):
+- Friendly illustration — no error codes or terminal output visible to the child
+- Text: *"Nova needs Ollama to think. Please open Ollama and tap 'Try again'."*
+- Single *"Try again"* button that re-runs Phase A
+- A bundled `setup-guide.html` (local file, no internet required) explains Ollama installation
+  in plain language; linked from this screen for the parent
+
 ---
 
 ## 3. Backend Architecture
@@ -165,6 +194,33 @@ Implementation (local):
 
 Mock (for UI dev without mic):
   returns preset transcripts from a small test list
+
+Audio edge cases:
+
+  Mic device:
+    Default: OS default input device — works for built-in mic and most headsets.
+    If multiple devices are present and the default is wrong, config.yaml accepts an
+    optional audio.input_device key (substring-matched against system device names,
+    e.g. "AirPods"). No in-app selector UI — device choice is a parent-level concern.
+
+  Ambient noise / confidence:
+    Whisper returns per-segment no_speech_prob. If no_speech_prob > 0.6 for the full
+    recording, treat the result as empty → trigger "didn't catch that" instead of
+    forwarding garbage text to the LLM. Threshold tunable via stt.no_speech_threshold
+    in config. Background TV and music are the primary risk; test at the child's real
+    environment in Phase 2 — this is easier to tune empirically than to predict.
+
+  Echo during barge-in:
+    When Space is pressed mid-TTS, the mic opens while the speaker is still audible
+    for ~50–100 ms. Without cancellation, Whisper may transcribe the avatar's own voice.
+    Mitigation layers (apply in order; stop when the problem is solved):
+      1. Hard-stop audio playback before the mic opens — introduce a deliberate ~50 ms
+         silent gap on every barge-in press so the speaker has settled
+      2. Check whether OS-level AEC (acoustic echo cancellation) is already active —
+         on macOS and Windows it is on by default via the system audio stack; verify
+         this before implementing any software AEC
+      3. Fallback: discard any transcript with Levenshtein similarity > 0.8 to the
+         avatar's last utterance (cheap string check, catches verbatim echo)
 ```
 
 #### LLM (`pipeline/llm/`)
@@ -291,6 +347,7 @@ models:
   stt:
     engine: faster-whisper
     model: small.en
+    no_speech_threshold: 0.6    # discard transcript if Whisper's no_speech_prob exceeds this
   llm:
     engine: ollama
     model: llama3.2:3b
@@ -303,6 +360,9 @@ models:
     fallback:
       - engine: xtts-v2
       - engine: elevenlabs-api   # requires API key AND privacy.allow_cloud_fallback
+
+audio:
+  input_device: ""              # empty = OS default; substring-match to override (e.g. "AirPods")
 
 avatar:
   model: nova/live2d/nova.model3.json

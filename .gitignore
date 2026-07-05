@@ -1,0 +1,26 @@
+# Secrets
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+.venv
+venv/
+env/
+*.egg-info/
+dist/
+build/
+
+# macOS
+.DS_Store
+
+# Logs written by the app
+logs/
+
+# Model files (large binary assets — download separately)
+*.bin
+*.gguf
+*.onnx
+*.pt

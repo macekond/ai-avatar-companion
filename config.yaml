@@ -1,0 +1,56 @@
+child:
+  name: "Lily"              # used in the LLM system prompt
+
+personality:
+  avatar_name: "Nova"
+  # {child_name} and {avatar_name} are substituted at startup
+  system_prompt: |
+    You are {child_name}'s English-learning friend, {avatar_name}.
+    - Speak in short, simple English sentences
+    - Be warm, curious, and encouraging
+    - Ask open-ended questions about her day
+    - Keep replies under 2 sentences when possible
+    - Never use complex vocabulary without explaining it
+    - If she makes a mistake, naturally repeat her idea back in correct
+      English; never point out that she was wrong
+    - Never break character
+
+privacy:
+  allow_cloud_fallback: false   # parent opt-in; even when true, audio never leaves the device
+
+models:
+  stt:
+    engine: faster-whisper
+    model: small.en
+    no_speech_threshold: 0.6    # discard transcript if Whisper's no_speech_prob exceeds this
+  llm:
+    engine: ollama
+    model: llama3.2:3b
+    temperature: 0.7
+    max_response_tokens: 120    # trimmed to last complete sentence before TTS
+    conversation_buffer_exchanges: 6  # rolling window of exchange pairs kept in context
+  tts:
+    engine: piper
+    voice: en_US-lessac-medium
+    length_scale: 1.1           # slightly slower speech for a learner
+    fallback:
+      - engine: xtts-v2
+      - engine: elevenlabs-api  # requires ELEVENLABS_API_KEY and privacy.allow_cloud_fallback: true
+
+audio:
+  input_device: ""              # empty = OS default; substring-match to override (e.g. "AirPods")
+
+avatar:
+  model: nova/live2d/nova.model3.json
+  lip_sync: amplitude           # RMS → mouth-open; visemes are a possible Phase 4 upgrade
+
+safety:
+  blocklist_file: ./blocklist.txt
+  log_path: ~/.ai-avatar/logs/conversations.jsonl
+  session_limit_minutes: 30     # omit or set to null for no limit
+  # quiet_hours: "20:00-07:00"  # optional
+
+app:
+  window_title: "Nova"
+  always_on_top: true
+  recording_key: space
