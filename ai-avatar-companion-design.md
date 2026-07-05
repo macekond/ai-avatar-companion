@@ -41,26 +41,35 @@ Just: listen → talk → repeat.
 
 ### 2.2 States
 
-The UI has exactly **four states**, shown both on the avatar and via a small label below:
+The UI has exactly **five states**, shown both on the avatar and via a small label below:
 
 | State | Avatar visual | Label | Appears when |
 |---|---|---|---|
 | **Idle** | Neutral smile, gentle breathing idle animation | "Tap to talk!" | Waiting for input |
 | **Listening** | Avatar looks attentive, eyes focused, subtle lean-in | "Listening…" | Child is holding mic / Space is held |
 | **Thinking** | Eyes slightly closed or looking up, subtle pause pose | "Hmm…" | STT done, LLM generating |
-| **Speaking** | Full lip-sync animation, expressive gestures | *(avatar's reply shown as text)* | TTS playing |
+| **Speaking** | Mouth animation, expressive gestures | *(avatar's reply shown as text)* | TTS playing |
+| **Didn't catch that** | Friendly puzzled head-tilt | "I didn't hear you — try again?" | STT returned nothing usable, or a pipeline stage failed |
+
+The last state matters more than it looks: a child speaking non-native English into local STT
+will produce empty or garbage transcripts *often*. It must feel like a friendly shrug, never an error.
+The same pose (different label, e.g. "My brain is napping…") covers backend failures such as Ollama not running.
 
 ### 2.3 Avatar Character
 
 - **Style:** 2D, warm, illustrated — think friendly cartoon rather than realistic
 - **Single model only** — no switching characters (avoids choice paralysis, keeps asset count small)
-- **Built in Live2D** (or Spine) so the same rig supports all four states
-- **Expressions:** idle smile, listening attentive, thinking, happy speaking — four expressions, each with looping animation
+- **Built in Live2D** (or Spine) so the same rig supports all five states
+- **Expressions:** idle smile, listening attentive, thinking, happy speaking, friendly-puzzled — five expressions, each with looping animation
 
 ### 2.4 Controls
 
 - **One control:** tap / click / hold `Space` = talk
 - Release to stop recording and let the pipeline flow
+- **Push-to-talk only in v1** — recording starts on press, ends on release. No VAD auto-stop
+  (explicit and predictable for a child; hands-free VAD mode is a possible future addition)
+- **Barge-in:** pressing Space while the avatar is speaking or thinking always interrupts —
+  TTS stops immediately and the app transitions to listening. Kids will do this constantly.
 - Nothing else to click
 - Escape key: soft-stop current response, return to idle
 
@@ -69,6 +78,9 @@ The UI has exactly **four states**, shown both on the avatar and via a small lab
 - After the avatar speaks, the last sentence appears in a gentle text bubble above or below the avatar
 - Helps with reading comprehension, especially for language learning
 - Fades out after a few seconds or on next interaction
+- **Also show what the app heard:** after the child speaks, briefly flash the recognized
+  transcript ("You said: …"). She sees her own English in writing, and mishears become
+  visible instead of confusing.
 
 ### 2.6 Visual Style
 
@@ -99,7 +111,24 @@ The UI has exactly **four states**, shown both on the avatar and via a small lab
                     (avatar drives lip-sync from TTS)
 ```
 
-All four stages run **locally**. No data leaves the machine.
+All four stages run **locally by default**. Cloud fallbacks exist for LLM and TTS but are
+**off by default and require explicit parent opt-in** in config. Raw audio **never** leaves
+the machine under any setting — the child's voice is the one thing with no cloud path.
+
+**End-to-end latency budget** (release Space → first audio heard), the number that actually
+matters for a child's attention:
+
+```
+STT finalize transcript      ≤ 400 ms
+LLM first sentence ready     ≤ 700 ms   (streamed — see below)
+TTS first audio frame        ≤ 400 ms
+─────────────────────────────────────
+Total target                 ≤ 1.5 s
+```
+
+The key trick: the LLM **streams sentences** to TTS. The avatar starts speaking the first
+sentence while the rest of the reply is still generating, so perceived latency is
+time-to-first-sentence, not time-to-full-reply.
 
 ### 3.2 Service Boundaries
 
@@ -125,10 +154,15 @@ Interface:
   stop_listening()   → returns transcript (str)
   
 Implementation (local):
-  faster-whisper small, device auto-detect (MPS on Apple Silicon)
-  VAD (voice activity detection) to auto-stop on silence
+  faster-whisper small.en (or distil-whisper), device auto-detect (MPS on Apple Silicon)
+  Recording window = while Space is held (push-to-talk; no VAD in v1)
   Streaming: fire partial transcript every ~1s so UI can show "I hear you…"
-  
+  Empty / low-confidence transcript → "didn't catch that" state, never a silent failure
+
+  ⚠ Known risk: Whisper is measurably weaker on children's speech, and weaker again on
+  non-native accents. Test with the actual child's voice EARLY (Phase 2 exit criterion).
+  If small.en isn't good enough, try medium before reaching for anything exotic.
+
 Mock (for UI dev without mic):
   returns preset transcripts from a small test list
 ```
@@ -137,19 +171,26 @@ Mock (for UI dev without mic):
 
 ```
 Interface:
-  chat(user_message, conversation_history) → assistant_message (str)
-  
+  chat(user_message, conversation_history) → yields sentences (streaming)
+
+  Streaming, not blocking: tokens stream from Ollama, the pipeline cuts at each
+  sentence boundary and hands the sentence onward (safety filter → TTS) while
+  generation continues. This is the single biggest latency win in the whole app.
+
 Implementation (local):
   Llama 3.2 3B Instruct via Ollama
   System prompt baked in at startup — defines:
     - Name, age, personality
     - Speaking style (short sentences, simple English)
     - Topic boundaries (no scary stuff, keep it light)
+    - Gentle recasting: repeat the child's idea back in correct English naturally;
+      NEVER say "that's wrong" or explicitly correct grammar
     - Never break character
   
   Conversation: short-term rolling buffer (last 6-8 exchanges)
   Temperature: 0.7 (slightly playful but coherent)
-  Max tokens per response: 80 (keeps replies short for TTS latency)
+  Max tokens per response: 120, then trim to the last complete sentence before TTS
+  (prompt for brevity; a hard 80-token cap chops replies mid-sentence)
   
   Content filter (safety/):
     - Blocked word list (child-inappropriate terms)
@@ -161,49 +202,66 @@ Implementation (local):
 
 ```
 Interface:
-  speak(text) → yields audio chunks + phoneme timestamps
-  
+  speak(text) → yields audio chunks
+  (no phoneme-timestamp contract — lip-sync is amplitude-driven, see Avatar below)
+
 Implementation (local):
   Piper TTS, single warm voice (child-friendly pitch, e.g. "en_US-lessac-medium")
-  Streaming synthesis: as soon as first phoneme is ready, start avatar animation
-  
-  Latency target: < 400ms from LLM finish to first audio frame
+  length_scale slightly > 1.0 — a touch slower than native speed, for a learner
+  Streaming synthesis: called per-sentence as the LLM streams; start audio
+  (and avatar mouth) as soon as the first chunk is ready
+
+  Latency target: < 400ms from first sentence available to first audio frame
   
   Fallback chain:
     1. Piper (fast, offline, decent quality)
     2. XTTS v2 (slower, better quality — use if Piper unavailable)
-    3. ElevenLabs API (paid cloud fallback if both local fail)
+    3. ElevenLabs API — cloud, OFF by default; only if parent opt-in is set.
+       Sends reply text only, never audio, never the child's words.
 ```
 
 #### Avatar (`avatar/`)
 
 ```
 Interface:
-  set_state(state: idle / listening / thinking / speaking)
-  drive_from_audio(audio_stream, phoneme_timestamps)
+  set_state(state: idle / listening / thinking / speaking / didnt_catch)
+  drive_from_audio(audio_stream)
   render(window)
   
 Implementation:
-  Live2D model rendered via OpenGL (or WebGL if using Electron/Tauri)
-  
+  Live2D model rendered via WebGL in the app webview (pixi-live2d-display) —
+  the Cubism SDK's practical targets are Web and C++; WebGL is the sane path
+  with a Tauri/Electron shell.
+  ⚠ Check Live2D Cubism SDK license terms before distributing, even for a free app.
+
   State machine drives expression + idle animation
-  During speaking: phoneme timestamps from TTS drive mouth visemes
-    (map phoneme set → 5-8 key viseme shapes, interpolate between)
-  
+
+  Lip-sync: amplitude-based, not viseme-based.
+    Compute RMS energy over the playing audio → drive ParamMouthOpenY.
+    This is the standard Live2D approach, looks perfectly fine to a child,
+    and removes the phoneme-timestamp requirement from TTS entirely.
+    (Viseme mapping = optional Phase 4+ polish, only if mouth motion feels flat.)
+
   Synchronization:
-    - TTS yields (audio_chunk, timestamp_ms) pairs
-    - Avatar advances mouth shape to match
+    - Audio playback position is the clock; mouth follows measured amplitude
     - On audio complete → smooth transition back to idle
 ```
 
 ### 3.4 Safety Layer
 
 - Runs as a transparent middleware between LLM output and TTS input
+- Operates **per sentence** (the LLM streams sentences — the filter must too)
 - Two filters:
-  1. **Blocklist** — hard-coded terms, instant replace
-  2. **Tone check** (optional, Phase 2) — lightweight classifier that flags overly complex / confusing / upsetting replies
+  1. **Blocklist** — hard-coded terms, instant replace. Treat as a tripwire, not the
+     defense: it misses inappropriate content phrased in clean words and false-positives
+     on innocent ones (Scunthorpe problem). The real defense is the system prompt plus
+     the parent-review log.
+  2. **Tone check** (optional, Phase 4) — a second cheap LLM call ("Is this reply
+     appropriate and understandable for a young child? yes/no") rather than a custom
+     classifier. Same local model, tiny prompt, runs on the full reply.
 - Everything logged to `~/.ai-avatar/logs/` for parent review
 - Log format: JSONL, one object per turn, includes user text, model reply, filter action
+- Optional parental controls (config): daily session length limit, quiet hours
 
 ### 3.5 Configuration
 
@@ -214,38 +272,47 @@ child:
   name: "Lily"              # used in LLM system prompt
 
 personality:
+  avatar_name: "Nova"
+  # {child_name} / {avatar_name} are filled in with str.format at startup
   system_prompt: |
-    You are {child_name}'s English-learning friend.
+    You are {child_name}'s English-learning friend, {avatar_name}.
     - Speak in short, simple English sentences
     - Be warm, curious, encouraging
     - Ask open-ended questions about her day
     - Keep replies under 2 sentences when possible
     - Never use complex vocabulary without explaining it
-    avatar_name: "Nova"
+    - If she makes a mistake, naturally repeat her idea back in correct
+      English; never point out that she was wrong
+
+privacy:
+  allow_cloud_fallback: false   # parent opt-in; even when true, audio never leaves the device
 
 models:
   stt:
     engine: faster-whisper
-    model: small
+    model: small.en
   llm:
     engine: ollama
     model: llama3.2:3b
     temperature: 0.7
-    max_response_tokens: 80
+    max_response_tokens: 120    # trimmed to last complete sentence before TTS
   tts:
     engine: piper
     voice: en_US-lessac-medium
+    length_scale: 1.1           # slightly slower speech for a learner
     fallback:
       - engine: xtts-v2
-      - engine: elevenlabs-api   # requires API key
+      - engine: elevenlabs-api   # requires API key AND privacy.allow_cloud_fallback
 
 avatar:
   model: nova/live2d/nova.model3.json
-  lip_sync_visemes: true
+  lip_sync: amplitude            # RMS → mouth-open; visemes are a possible later upgrade
 
 safety:
   blocklist_file: ./blocklist.txt
   log_path: ~/.ai-avatar/logs/conversations.jsonl
+  session_limit_minutes: 30      # optional; omit for no limit
+  # quiet_hours: "20:00-07:00"   # optional
 
 app:
   window_title: "Nova"
@@ -260,31 +327,35 @@ app:
 ### Phase 1 — Working Prototype
 
 - Text-only LLM (no TTS, no avatar, no mic yet)
-- Chat window with Nova personality
-- Test conversations, tune prompt, tune temperature
+- Chat window with Nova personality, sentence-streaming from the start
+  (the streaming pipeline is the backbone — build it now, not as a retrofit)
+- Test conversations, tune prompt, tune temperature, verify recasting behavior
 - Goal: good conversational quality
 
-### Phase 2 — Voice
+### Phase 2 — Full Voice Loop
 
-- Add Piper TTS
-- Replace chat window with audio playback on text reply
-- Voice-only: PC speaker output, no avatar yet
-- Goal: < 1s latency from text reply to spoken audio
+- Add faster-whisper STT with push-to-talk (hold Space) **and** Piper TTS
+- Complete hands-free-of-keyboard-except-Space loop: talk → hear reply. No avatar yet.
+- This front-loads the two riskiest unknowns — end-to-end latency and
+  STT accuracy on the child's actual speech — before any Live2D investment
+- Exit criteria (both must pass):
+  1. Release-Space → first audio ≤ 1.5 s
+  2. STT recognizes the child's real speech acceptably (test with her, not with adult voices)
 
 ### Phase 3 — Avatar
 
-- Add Live2D model with idle animation
-- Add the 4-state state machine
-- Hook TTS timestamps to lip-sync visemes
-- Add recording key (Space) for voice input
-- Goal: child can sit down, hold space, talk, and get a responsive avatar reply
+- Add Live2D model with idle animation (WebGL in the app webview)
+- Add the 5-state state machine, including "didn't catch that" and barge-in
+- Amplitude-based lip-sync (RMS → mouth open)
+- Goal: child can sit down, hold space, talk, and get a responsive animated reply
 
 ### Phase 4 — Polish
 
-- Content filter
+- Content filter (blocklist + LLM tone check)
 - Conversation logging for parent review
-- Tune blocklist, add tone check
-- Package as standalone app (Tauri or Electron)
+- Session limits / quiet hours
+- Package as standalone app (Tauri shell + Python sidecar)
+- Optional: viseme-based lip-sync if amplitude motion feels flat
 
 ---
 
@@ -294,19 +365,23 @@ Decision needed before Phase 3:
 
 | Question | Options | Recommendation |
 |---|---|---|
-| **App framework** | Tauri (Rust) / Electron (JS) / Python (PyQt/GL) | Tauri: small binary, good native/game rendering, Rust backend fits well |
-| **Avatar format** | Live2D (.model3) / Spine / custom WebGL | Live2D: largest asset library, easiest to find a free child-friendly model |
-| **LLM runtime** | Ollama / llama.cpp directly | Ollama: simplest API, auto-updates models, GPT-4all-style UI out of the box |
+| **App architecture** | Tauri + Python sidecar / Electron + Python sidecar / all-Rust (whisper-rs, piper-rs) / all-Python (PyQt) | Tauri shell + **Python sidecar** for the pipeline, talking over a local websocket. The pipeline tools (faster-whisper, Piper, Ollama client) are all easiest from Python; the Rust-native ports are less mature. Live2D renders in the webview either way. |
+| **Avatar format** | Live2D (.model3) / Spine / custom WebGL | Live2D: largest asset library, easiest to find a free child-friendly model. Verify SDK license terms for distribution. |
+| **LLM runtime** | Ollama / llama.cpp directly | Ollama: simplest API, easy model management, streaming out of the box |
+
+Note the framework question is really a **process-boundary** question: the pipeline stack is
+Python-flavored while Tauri's backend is Rust. The sidecar pattern resolves the tension without
+rewriting anything.
 
 ---
 
 ## 6. Tech Stack Summary
 
-| Layer | Local | Cloud fallback |
+| Layer | Local | Cloud fallback (parent opt-in only) |
 |---|---|---|
-| STT | faster-whisper (small) | OpenAI Whisper API |
-| LLM | Llama 3.2 3B via Ollama | GPT-4o-mini |
-| TTS | Piper (lessac-medium) | ElevenLabs |
-| Avatar | Live2D | — |
-| Framework | Tauri (Rust) | — |
+| STT | faster-whisper (small.en) | — (audio never leaves the device) |
+| LLM | Llama 3.2 3B via Ollama | GPT-4o-mini (text only) |
+| TTS | Piper (lessac-medium) | ElevenLabs (reply text only) |
+| Avatar | Live2D (WebGL in webview) | — |
+| Framework | Tauri shell + Python sidecar | — |
 | Logging | JSONL → parent-readable file | — |
