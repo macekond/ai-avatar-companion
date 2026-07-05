@@ -11,7 +11,9 @@
 
 import './style.css'
 import * as PIXI from 'pixi.js'
-import { Live2DModel, MotionPriority } from 'pixi-live2d-display'
+// Import from the cubism4 subpath — this auto-registers the Cubism 4 plugin
+// and tells pixi-live2d-display to use live2dcubismcore.min.js (not live2d.min.js).
+import { Live2DModel, MotionPriority } from 'pixi-live2d-display/cubism4'
 
 // Register PIXI's ticker with Live2D so animations run
 Live2DModel.registerTicker(PIXI.Ticker)
