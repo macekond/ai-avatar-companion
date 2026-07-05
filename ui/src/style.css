@@ -83,6 +83,18 @@ html, body {
   opacity: 1;
 }
 
+/* ── Profile selector ─────────────────────────────────────── */
+#profile-selector {
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  display: flex;
+  gap: 6px;
+  z-index: 30;
+}
+
+/* Shared pill base — profile pills use the same class as level pills */
+
 /* ── Level selector ───────────────────────────────────────── */
 #level-selector {
   position: fixed;

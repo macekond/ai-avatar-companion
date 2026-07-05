@@ -224,7 +224,7 @@ class TestSetLevel:
         llm.chat.assert_called_once()
 
 
-# ── Non-ptt_start messages are ignored ────────────────────────────────────
+# ── Non-ptt_start messages are ignored ─────────────────────────────────
 
 class TestUnknownMessages:
     async def test_unknown_message_type_is_ignored(self, base_config):
@@ -232,3 +232,145 @@ class TestUnknownMessages:
         # Should complete without errors or state changes beyond greeting
         await _session(ws, base_config, mock_stt(), mock_llm(), mock_tts())
         assert ws.sent_states() == ["speaking", "idle"]
+
+
+# ── Memory — on-connect messages ───────────────────────────────────
+
+def _make_mem_mgr(tmp_path, slug="lily", memory=None):
+    from app.memory import MemoryManager
+    mgr = MemoryManager(tmp_path, slug)
+    if memory is not None:
+        mgr.save(memory)
+    return mgr
+
+
+def _make_memory(name="Lily", age=8):
+    from app.memory import ChildMemory, ChildProfile
+    return ChildMemory(profile=ChildProfile(name=name, age=age))
+
+
+class TestMemoryOnConnect:
+    async def test_profiles_message_sent_when_memory_manager_present(self, base_config, tmp_path):
+        mem_mgr = _make_mem_mgr(tmp_path, memory=_make_memory())
+        ws = MockWebSocket([])
+        await _session(ws, base_config, mock_stt(), mock_llm(), mock_tts(), mem_mgr)
+        profiles_msgs = ws.sent_of_type("profiles")
+        assert len(profiles_msgs) >= 1
+        assert "list" in profiles_msgs[0]
+        assert "active" in profiles_msgs[0]
+
+    async def test_no_profiles_message_without_memory_manager(self, base_config):
+        ws = MockWebSocket([])
+        await _session(ws, base_config, mock_stt(), mock_llm(), mock_tts())
+        assert ws.sent_of_type("profiles") == []
+
+    async def test_memory_loaded_sent_when_profile_exists(self, base_config, tmp_path):
+        mem_mgr = _make_mem_mgr(tmp_path, memory=_make_memory("Lily", 8))
+        ws = MockWebSocket([])
+        await _session(ws, base_config, mock_stt(), mock_llm(), mock_tts(), mem_mgr)
+        mem_msgs = ws.sent_of_type("memory_loaded")
+        assert len(mem_msgs) == 1
+        assert mem_msgs[0]["name"] == "Lily"
+        assert mem_msgs[0]["age"] == 8
+
+    async def test_onboarding_start_sent_when_no_profile(self, base_config, tmp_path):
+        mem_mgr = _make_mem_mgr(tmp_path)   # no memory saved
+        ws = MockWebSocket([])              # no PTT turns — onboarding will time out
+        await _session(ws, base_config, mock_stt(), mock_llm(), mock_tts(), mem_mgr)
+        types = [m.get("type") for m in ws.sent]
+        assert "onboarding_start" in types
+
+    async def test_no_onboarding_when_profile_exists(self, base_config, tmp_path):
+        mem_mgr = _make_mem_mgr(tmp_path, memory=_make_memory())
+        ws = MockWebSocket([])
+        await _session(ws, base_config, mock_stt(), mock_llm(), mock_tts(), mem_mgr)
+        types = [m.get("type") for m in ws.sent]
+        assert "onboarding_start" not in types
+        assert "memory_loaded" in types
+
+    async def test_greeting_uses_child_name_from_memory(self, base_config, tmp_path):
+        mem_mgr = _make_mem_mgr(tmp_path, memory=_make_memory("Mia", 7))
+        ws = MockWebSocket([])
+        await _session(ws, base_config, mock_stt(), mock_llm(), mock_tts(), mem_mgr)
+        sentences = ws.sent_sentences()
+        assert any("Mia" in s for s in sentences)
+
+
+# ── Memory — profile switching ──────────────────────────────────────
+
+class TestProfileSwitching:
+    def _cfg_with_dir(self, base_config, tmp_path):
+        """Override profiles_dir so server switch_profile uses tmp_path."""
+        base_config.memory.profiles_dir = str(tmp_path)
+        return base_config
+
+    async def test_switch_profile_sends_new_profiles_message(self, base_config, tmp_path):
+        cfg = self._cfg_with_dir(base_config, tmp_path)
+        mem_mgr = _make_mem_mgr(tmp_path, slug="lily", memory=_make_memory("Lily"))
+        from app.memory import MemoryManager
+        MemoryManager(tmp_path, "mia").save(_make_memory("Mia"))
+
+        ws = MockWebSocket([json.dumps({"type": "switch_profile", "slug": "mia"})])
+        await _session(ws, cfg, mock_stt(), mock_llm(), mock_tts(), mem_mgr)
+        profiles_msgs = ws.sent_of_type("profiles")
+        assert len(profiles_msgs) >= 2
+
+    async def test_switch_to_existing_profile_sends_memory_loaded(self, base_config, tmp_path):
+        cfg = self._cfg_with_dir(base_config, tmp_path)
+        mem_mgr = _make_mem_mgr(tmp_path, slug="lily", memory=_make_memory("Lily"))
+        from app.memory import MemoryManager
+        MemoryManager(tmp_path, "mia").save(_make_memory("Mia", 9))
+
+        ws = MockWebSocket([json.dumps({"type": "switch_profile", "slug": "mia"})])
+        await _session(ws, cfg, mock_stt(), mock_llm(), mock_tts(), mem_mgr)
+        mem_msgs = ws.sent_of_type("memory_loaded")
+        assert any(m["name"] == "Mia" for m in mem_msgs)
+
+    async def test_switch_to_unknown_profile_triggers_onboarding(self, base_config, tmp_path):
+        cfg = self._cfg_with_dir(base_config, tmp_path)
+        mem_mgr = _make_mem_mgr(tmp_path, slug="lily", memory=_make_memory("Lily"))
+        ws = MockWebSocket([json.dumps({"type": "switch_profile", "slug": "newkid"})])
+        await _session(ws, cfg, mock_stt(), mock_llm(), mock_tts(), mem_mgr)
+        types = [m.get("type") for m in ws.sent]
+        assert "onboarding_start" in types
+
+    async def test_switch_with_empty_slug_ignored(self, base_config, tmp_path):
+        cfg = self._cfg_with_dir(base_config, tmp_path)
+        mem_mgr = _make_mem_mgr(tmp_path, slug="lily", memory=_make_memory("Lily"))
+        ws = MockWebSocket([json.dumps({"type": "switch_profile", "slug": ""})])
+        await _session(ws, cfg, mock_stt(), mock_llm(), mock_tts(), mem_mgr)
+        assert ws.sent_of_type("profiles")
+
+
+# ── Memory — re-engagement trigger ────────────────────────────────
+
+class TestReEngagement:
+    async def test_short_response_increments_counter(self, base_config, tmp_path):
+        """Short transcript (≤ 3 words) — llm.chat() is still called normally.
+        Re-engagement hint should NOT fire (only 1 short turn, threshold is 3).
+        """
+        mem_mgr = _make_mem_mgr(tmp_path, memory=_make_memory())
+        # One short turn (streak=1, below threshold of 3)
+        ws = MockWebSocket(ptt_turn())
+        stt = mock_stt("yes")   # 1 word ≤ 3
+        llm = mock_llm()
+        await _session(ws, base_config, stt, llm, mock_tts(), mem_mgr)
+        # llm.chat called once (the normal PTT turn), no re-engagement hint set
+        assert llm.chat.call_count == 1
+        # The pending_hint was NOT set because streak < threshold
+        assert llm.set_hint.call_count == 0
+
+    async def test_long_response_after_short_resets_counter(self, base_config, tmp_path):
+        """A long response resets the consecutive_short counter."""
+        mem_mgr = _make_mem_mgr(tmp_path, memory=_make_memory())
+        messages = ptt_turn() + ptt_turn()
+        ws = MockWebSocket(messages)
+        # First turn: short; second turn: long (> 3 words)
+        call_count = [0]
+        def alternate_transcript():
+            call_count[0] += 1
+            return "yes" if call_count[0] == 1 else "I went to the park today with my family"
+        stt = mock_stt()
+        stt.transcribe.side_effect = lambda _: alternate_transcript()
+        await _session(ws, base_config, stt, mock_llm(), mock_tts(), mem_mgr)
+        # Should complete without error regardless of counter state
