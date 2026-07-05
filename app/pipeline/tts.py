@@ -55,6 +55,23 @@ class TTSPipeline:
             return
         self._backend.speak(text, stop)
 
+    def speak_streaming(
+        self,
+        text: str,
+        amplitude_cb=None,
+        stop: threading.Event | None = None,
+    ) -> None:
+        """Synthesise and play *text*, calling *amplitude_cb(float)* at ~20 Hz.
+
+        *amplitude_cb* receives normalised RMS energy (0.0–1.0) and is called
+        from the audio thread — must be thread-safe (use run_coroutine_threadsafe
+        for asyncio contexts). Falls back to plain speak() when callback is None.
+        """
+        text = text.strip()
+        if not text:
+            return
+        self._backend.speak_streaming(text, amplitude_cb, stop)
+
 
 # ---------------------------------------------------------------------------
 # Backend selection
@@ -92,10 +109,16 @@ class _PiperBackend:
         print(" ready.")
 
     def speak(self, text: str, stop: threading.Event | None = None) -> None:
+        self.speak_streaming(text, amplitude_cb=None, stop=stop)
+
+    def speak_streaming(
+        self,
+        text: str,
+        amplitude_cb=None,
+        stop: threading.Event | None = None,
+    ) -> None:
         import sounddevice as sd
 
-        # Synthesise all chunks first (Piper is fast enough that buffering
-        # the full sentence adds negligible latency vs. streaming)
         chunks: list[np.ndarray] = []
         for chunk in self._voice.synthesize(text, syn_config=self._syn_config):
             if stop and stop.is_set():
@@ -105,21 +128,37 @@ class _PiperBackend:
         if not chunks:
             return
 
-        audio = np.concatenate(chunks)
-        sd.play(audio, samplerate=self._sample_rate)
+        # Normalise to float32 [-1, 1] for the output stream
+        audio = np.concatenate(chunks).astype(np.float32) / 32768.0
+        BLOCK = max(256, self._sample_rate // 20)   # ~50 ms → ~20 Hz amplitude
+        pos = [0]
 
-        # Poll so we can honour stop events during playback
-        while True:
-            try:
-                stream = sd.get_stream()
-                if not stream.active:
+        def _cb(outdata, frames, _time, _status):
+            end = pos[0] + frames
+            chunk = audio[pos[0]:end]
+            n = len(chunk)
+            outdata[:n, 0] = chunk
+            outdata[n:, 0] = 0.0
+            if amplitude_cb and n > 0:
+                rms = float(np.sqrt(np.mean(chunk.astype(np.float64) ** 2)))
+                amplitude_cb(min(1.0, rms * 5.0))
+            pos[0] = end
+
+        with sd.OutputStream(
+            samplerate=self._sample_rate,
+            channels=1,
+            dtype="float32",
+            blocksize=BLOCK,
+            callback=_cb,
+        ):
+            while pos[0] < len(audio):
+                if stop and stop.is_set():
                     break
-            except Exception:
-                break
-            if stop and stop.is_set():
-                sd.stop()
-                return
-            time.sleep(0.02)
+                time.sleep(0.02)
+            time.sleep(0.05)   # flush last block
+
+        if amplitude_cb:
+            amplitude_cb(0.0)
 
 
 # ---------------------------------------------------------------------------
@@ -137,17 +176,30 @@ class _SystemTTSBackend:
         print(f"[TTS] Using macOS system voice ({self._VOICE}, {self._RATE} wpm)")
 
     def speak(self, text: str, stop: threading.Event | None = None) -> None:
+        self.speak_streaming(text, amplitude_cb=None, stop=stop)
+
+    def speak_streaming(
+        self,
+        text: str,
+        amplitude_cb=None,
+        stop: threading.Event | None = None,
+    ) -> None:
+        import math
+
         proc = subprocess.Popen(
             ["say", "-v", self._VOICE, "-r", str(self._RATE), text]
         )
-        if stop:
-            while proc.poll() is None:
-                if stop.is_set():
-                    proc.terminate()
-                    return
-                time.sleep(0.05)
-        else:
-            proc.wait()
+        t = 0.0
+        while proc.poll() is None:
+            if stop and stop.is_set():
+                proc.terminate()
+                break
+            if amplitude_cb:
+                amplitude_cb(abs(math.sin(t * 8.0)) * 0.6)
+            t += 0.05
+            time.sleep(0.05)
+        if amplitude_cb:
+            amplitude_cb(0.0)
 
 
 # ---------------------------------------------------------------------------
