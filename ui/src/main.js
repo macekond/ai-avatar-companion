@@ -193,6 +193,10 @@ function connectWS() {
   ws.onmessage = (e) => {
     const msg = JSON.parse(e.data)
     switch (msg.type) {
+      case 'init':
+        // Server tells us the current level on connect — sync the UI
+        setActiveLevel(msg.level)
+        break
       case 'state':
         applyState(msg.state)
         break
@@ -244,7 +248,24 @@ window.addEventListener('keyup', (e) => {
   }
 })
 
-// ── Bootstrap ─────────────────────────────────────────────────────────────
+// ── Level selector ────────────────────────────────────────────────
+const levelBtns = document.querySelectorAll('.level-btn')
+
+function setActiveLevel(level) {
+  levelBtns.forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.level === level)
+  })
+}
+
+levelBtns.forEach(btn => {
+  btn.addEventListener('click', () => {
+    const level = btn.dataset.level
+    setActiveLevel(level)
+    wsSend({ type: 'set_level', level })
+  })
+})
+
+// ── Bootstrap ────────────────────────────────────────────────
 initPixi()
 connectWS()
 loadModel()   // async; non-blocking

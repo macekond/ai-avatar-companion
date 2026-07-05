@@ -83,7 +83,47 @@ html, body {
   opacity: 1;
 }
 
-/* ── State-driven body classes ────────────────────────────────────────── */
+/* ── Level selector ───────────────────────────────────────── */
+#level-selector {
+  position: fixed;
+  top: 16px;
+  left: 16px;
+  display: flex;
+  gap: 6px;
+  z-index: 30;
+}
+
+.level-btn {
+  padding: 5px 11px;
+  border: 1.5px solid rgba(150, 120, 90, 0.35);
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.60);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  color: #7a6a5a;
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s, transform 0.1s;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.level-btn:hover {
+  background: rgba(255, 255, 255, 0.85);
+  border-color: rgba(150, 120, 90, 0.6);
+  color: #4a3a2a;
+}
+
+.level-btn.active {
+  background: rgba(90, 70, 50, 0.82);
+  border-color: transparent;
+  color: #fff;
+  transform: scale(1.05);
+}
+
+/* ── State-driven body classes ────────────────────────────────────── */
 body.listening  { background: radial-gradient(ellipse at 50% 30%, #eef8ff 0%, #d8eeff 60%, #b0d5f5 100%); }
 body.thinking   { background: radial-gradient(ellipse at 50% 30%, #f4eeff 0%, #e8d8ff 60%, #d0b0f5 100%); }
 body.didnt_catch { background: radial-gradient(ellipse at 50% 30%, #fff4ee 0%, #fde0d0 60%, #f5c0a0 100%); }

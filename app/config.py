@@ -30,6 +30,7 @@ def _filter(cls, data: dict) -> dict:
 @dataclass
 class ChildConfig:
     name: str = "Lily"
+    level: str = "A"   # CEFR level: Pre A | A | B | C1 | C2
 
 
 @dataclass

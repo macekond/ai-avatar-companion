@@ -94,8 +94,11 @@ async def _session(
     def amplitude_cb(value: float) -> None:
         send_from_thread({"type": "amplitude", "value": round(value, 3)})
 
-    # --- Greeting ---
+    # --- Init: tell the frontend the current level ---
     log.info("Client connected")
+    await send({"type": "init", "level": config.child.level})
+
+    # --- Greeting ---
     await send({"type": "state", "state": "speaking"})
     greeting = (
         f"Hi {child}! I'm {avatar}, your English practice friend. "
@@ -110,6 +113,14 @@ async def _session(
     try:
         async for raw in ws:
             msg = json.loads(raw)
+
+            # Level change — takes effect from the next LLM turn
+            if msg.get("type") == "set_level":
+                level = msg.get("level", "A")
+                llm.set_level(level)
+                log.info("Level changed to: %s", level)
+                continue
+
             if msg.get("type") != "ptt_start":
                 continue
 
