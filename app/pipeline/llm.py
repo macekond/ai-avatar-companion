@@ -47,6 +47,19 @@ def _extract_sentences(buffer: str) -> tuple[list[str], str]:
 # Pipeline
 # ---------------------------------------------------------------------------
 
+# Inject a pattern-review hint to the LLM every N conversation turns.
+# This costs nothing extra — it’s just one more system message in the
+# messages list. The LLM uses its own conversation history to decide
+# whether any mistake has actually repeated.
+_PATTERN_REVIEW_INTERVAL = 5
+_PATTERN_REVIEW_HINT = (
+    "Before replying, silently review the conversation history. "
+    "If the child has made the same grammatical mistake two or more times, "
+    "address it once in your reply — warmly, briefly, as a friendly tip. "
+    "If no pattern stands out, simply continue the conversation naturally."
+)
+
+
 class LLMPipeline:
     """Wraps Ollama streaming to yield reply sentences one at a time.
 
@@ -89,10 +102,13 @@ class LLMPipeline:
 
         self._history.append({"role": "user", "content": user_message})
 
-        messages = [
-            {"role": "system", "content": self._system_prompt},
-            *self._history,
-        ]
+        # Periodically inject a pattern-review hint so the LLM actively
+        # checks whether any grammatical mistake has been repeated.
+        turn = len(self._history) // 2  # complete exchanges so far
+        messages: list[dict[str, str]] = [{"role": "system", "content": self._system_prompt}]
+        if turn > 0 and turn % _PATTERN_REVIEW_INTERVAL == 0:
+            messages.append({"role": "system", "content": _PATTERN_REVIEW_HINT})
+        messages.extend(self._history)
 
         buffer = ""
         full_response = ""
