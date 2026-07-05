@@ -1,5 +1,6 @@
 child:
   name: "Lily"              # used in the LLM system prompt
+  level: "A"                # CEFR level: Pre A | A | B | C1 | C2
 
 personality:
   avatar_name: "Nova"

@@ -19,6 +19,8 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from app.config import Config
 
+from app.levels import instructions_for
+
 # ---------------------------------------------------------------------------
 # Sentence boundary detection
 # ---------------------------------------------------------------------------
@@ -55,8 +57,19 @@ class LLMPipeline:
 
     def __init__(self, config: Config) -> None:
         self._config = config
-        self._system_prompt = config.format_system_prompt()
+        self._base_prompt = config.format_system_prompt()
+        self._system_prompt = self._build_prompt(config.child.level)
         self._history: list[dict[str, str]] = []
+
+    def _build_prompt(self, level: str) -> str:
+        instruction = instructions_for(level)
+        if instruction:
+            return f"{self._base_prompt}\n\n{instruction}"
+        return self._base_prompt
+
+    def set_level(self, level: str) -> None:
+        """Switch the CEFR level. Takes effect from the next turn."""
+        self._system_prompt = self._build_prompt(level)
 
     # ------------------------------------------------------------------
     # Public API
