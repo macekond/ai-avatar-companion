@@ -109,6 +109,18 @@ class SafetyConfig:
 
 
 @dataclass
+class MemoryConfig:
+    enabled: bool = True
+    profiles_dir: str = "~/.ai-avatar/profiles/"
+    max_topics: int = 20
+    max_problems: int = 15
+    topic_ttl_days: int = 14
+    problem_ttl_days: int = 30
+    short_response_words: int = 3    # ≤ this many words → counts as a short response
+    short_response_streak: int = 3   # this many short turns in a row → re-engagement hint
+
+
+@dataclass
 class AppSettings:
     window_title: str = "Nova"
     always_on_top: bool = True
@@ -128,6 +140,7 @@ class Config:
     audio: AudioConfig = field(default_factory=AudioConfig)
     avatar: AvatarConfig = field(default_factory=AvatarConfig)
     safety: SafetyConfig = field(default_factory=SafetyConfig)
+    memory: MemoryConfig = field(default_factory=MemoryConfig)
     app: AppSettings = field(default_factory=AppSettings)
 
     def format_system_prompt(self) -> str:
@@ -171,5 +184,6 @@ class Config:
             audio=AudioConfig(**_filter(AudioConfig, raw.get("audio", {}))),
             avatar=AvatarConfig(**_filter(AvatarConfig, raw.get("avatar", {}))),
             safety=SafetyConfig(**_filter(SafetyConfig, raw.get("safety", {}))),
+            memory=MemoryConfig(**_filter(MemoryConfig, raw.get("memory", {}))),
             app=AppSettings(**_filter(AppSettings, raw.get("app", {}))),
         )

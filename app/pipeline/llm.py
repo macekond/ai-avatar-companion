@@ -71,18 +71,78 @@ class LLMPipeline:
     def __init__(self, config: Config) -> None:
         self._config = config
         self._base_prompt = config.format_system_prompt()
+        self._memory = None
         self._system_prompt = self._build_prompt(config.child.level)
         self._history: list[dict[str, str]] = []
+        self._pending_hint: str | None = None   # one-shot extra system message
 
-    def _build_prompt(self, level: str) -> str:
+    def _build_prompt(self, level: str, memory=None) -> str:
+        parts = [self._base_prompt]
         instruction = instructions_for(level)
         if instruction:
-            return f"{self._base_prompt}\n\n{instruction}"
-        return self._base_prompt
+            parts.append(instruction)
+        if memory is not None:
+            parts.append(self._format_memory_block(memory))
+        return "\n\n".join(parts)
 
     def set_level(self, level: str) -> None:
         """Switch the CEFR level. Takes effect from the next turn."""
-        self._system_prompt = self._build_prompt(level)
+        self._system_prompt = self._build_prompt(level, self._memory)
+
+    def set_hint(self, hint: str | None) -> None:
+        """Set a one-shot system hint injected into the next chat() call then cleared."""
+        self._pending_hint = hint
+
+    def set_memory(self, memory) -> None:
+        """Inject (or clear) the child's memory context in the system prompt.
+
+        Pass a ChildMemory instance to add a personalised memory block.
+        Pass None to remove it (base prompt + level only).
+        Takes effect from the next turn.
+        """
+        self._memory = memory
+        self._system_prompt = self._build_prompt(self._config.child.level, memory)
+
+    @staticmethod
+    def _format_memory_block(memory) -> str:
+        """Render a concise memory context block for the system prompt."""
+        profile = memory.profile
+        age_str = f" (age {profile.age})" if profile.age else ""
+        lines = [f"Memory about {profile.name}{age_str}:"]
+
+        if memory.topics:
+            recent = sorted(
+                memory.topics,
+                key=lambda t: t.last_mentioned,
+                reverse=True,
+            )[:5]
+            lines.append("- Recent topics of interest: " +
+                         ", ".join(t.keyword for t in recent))
+
+        unresolved = [p for p in memory.problems if not p.resolved]
+        if unresolved:
+            top = sorted(unresolved, key=lambda p: p.times_seen, reverse=True)[:3]
+            details = "; ".join(
+                f"{p.type} (e.g. '{p.example}' → '{p.correction}')"
+                for p in top
+            )
+            lines.append(f"- Known language challenges: {details}")
+
+        hints = []
+        if memory.topics:
+            newest = sorted(
+                memory.topics, key=lambda t: t.last_mentioned, reverse=True
+            )[0]
+            hints.append(f"ask about {newest.keyword}")
+        if unresolved:
+            worst = sorted(unresolved, key=lambda p: p.times_seen, reverse=True)[0]
+            hints.append(f"practise {worst.type} with a fun example")
+        if hints:
+            lines.append(
+                f"- If {profile.name} is quiet, you can: " + ", or ".join(hints) + "."
+            )
+
+        return "\n".join(lines)
 
     # ------------------------------------------------------------------
     # Public API
@@ -108,6 +168,9 @@ class LLMPipeline:
         messages: list[dict[str, str]] = [{"role": "system", "content": self._system_prompt}]
         if turn > 0 and turn % _PATTERN_REVIEW_INTERVAL == 0:
             messages.append({"role": "system", "content": _PATTERN_REVIEW_HINT})
+        if self._pending_hint:
+            messages.append({"role": "system", "content": self._pending_hint})
+            self._pending_hint = None  # consume after first use
         messages.extend(self._history)
 
         buffer = ""

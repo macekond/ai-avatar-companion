@@ -97,10 +97,10 @@ def nova_print(avatar_name: str, sentences: list[str]) -> None:
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Nova — AI English companion")
     p.add_argument("--config", default="config.yaml", help="Path to config.yaml")
-    p.add_argument(
-        "--voice", action="store_true",
-        help="Phase 2 voice mode: push-to-talk STT + Piper TTS",
-    )
+    p.add_argument("--voice", action="store_true",
+                   help="Phase 2 voice mode: push-to-talk STT + Piper TTS")
+    p.add_argument("--profile",
+                   help="Profile slug to load (overrides config.yaml child.name)")
     return p.parse_args()
 
 

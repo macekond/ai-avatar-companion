@@ -143,6 +143,85 @@ class TestPromptBuilding:
         assert "Lily" in llm._system_prompt
 
 
+# ── set_memory ──────────────────────────────────────────────────────────
+
+class TestSetMemory:
+    def _memory_with_topics(self):
+        from app.memory import ChildMemory, ChildProfile, Topic
+        mem = ChildMemory(profile=ChildProfile(name="Lily", age=8))
+        mem.topics = [Topic("football", 3, "2026-07-01"),
+                      Topic("cats", 1, "2026-07-02")]
+        return mem
+
+    def _memory_with_problems(self):
+        from app.memory import ChildMemory, ChildProfile, Problem
+        mem = ChildMemory(profile=ChildProfile(name="Lily", age=8))
+        mem.problems = [Problem("past_tense", "goed", "went", 2, "2026-07-01", False)]
+        return mem
+
+    def test_set_memory_none_leaves_prompt_unchanged(self):
+        llm = make_pipeline()
+        prompt_before = llm._system_prompt
+        llm.set_memory(None)
+        assert llm._system_prompt == prompt_before
+
+    def test_set_memory_adds_name_to_prompt(self):
+        llm = make_pipeline()
+        from app.memory import ChildMemory, ChildProfile
+        mem = ChildMemory(profile=ChildProfile(name="Lily", age=8))
+        llm.set_memory(mem)
+        assert "Lily" in llm._system_prompt
+
+    def test_set_memory_adds_age_to_prompt(self):
+        llm = make_pipeline()
+        from app.memory import ChildMemory, ChildProfile
+        mem = ChildMemory(profile=ChildProfile(name="Lily", age=8))
+        llm.set_memory(mem)
+        assert "8" in llm._system_prompt
+
+    def test_set_memory_adds_topics_to_prompt(self):
+        llm = make_pipeline()
+        llm.set_memory(self._memory_with_topics())
+        assert "football" in llm._system_prompt
+        assert "cats" in llm._system_prompt
+
+    def test_set_memory_adds_problems_to_prompt(self):
+        llm = make_pipeline()
+        llm.set_memory(self._memory_with_problems())
+        assert "past_tense" in llm._system_prompt
+        assert "goed" in llm._system_prompt
+        assert "went" in llm._system_prompt
+
+    def test_set_memory_then_set_level_both_present(self):
+        llm = make_pipeline(level="B")
+        from app.memory import ChildMemory, ChildProfile
+        mem = ChildMemory(profile=ChildProfile(name="Lily"))
+        llm.set_memory(mem)
+        llm.set_level("C1")
+        assert "C1" in llm._system_prompt
+        assert "Lily" in llm._system_prompt
+
+    def test_set_memory_rebuilds_on_second_call(self):
+        llm = make_pipeline()
+        from app.memory import ChildMemory, ChildProfile
+        mem1 = ChildMemory(profile=ChildProfile(name="Lily"))
+        mem2 = ChildMemory(profile=ChildProfile(name="Mia"))
+        llm.set_memory(mem1)
+        assert "Lily" in llm._system_prompt
+        llm.set_memory(mem2)
+        assert "Mia" in llm._system_prompt
+
+    def test_set_memory_none_clears_memory_block(self):
+        llm = make_pipeline()
+        from app.memory import ChildMemory, ChildProfile, Topic
+        mem = ChildMemory(profile=ChildProfile(name="Lily"))
+        mem.topics = [Topic("football", 1, "2026-07-01")]
+        llm.set_memory(mem)
+        assert "football" in llm._system_prompt
+        llm.set_memory(None)
+        assert "football" not in llm._system_prompt
+
+
 # ── Conversation history ───────────────────────────────────────────────────
 
 class TestHistory:

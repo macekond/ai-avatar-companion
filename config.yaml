@@ -61,6 +61,16 @@ safety:
   session_limit_minutes: 30     # omit or set to null for no limit
   # quiet_hours: "20:00-07:00"  # optional
 
+memory:
+  enabled: true
+  profiles_dir: ~/.ai-avatar/profiles/
+  max_topics: 20
+  max_problems: 15
+  topic_ttl_days: 14
+  problem_ttl_days: 30
+  short_response_words: 3      # ≤ this many words counts as a short response
+  short_response_streak: 3     # consecutive short turns before re-engagement hint fires
+
 app:
   window_title: "Nova"
   always_on_top: true

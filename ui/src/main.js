@@ -194,8 +194,17 @@ function connectWS() {
     const msg = JSON.parse(e.data)
     switch (msg.type) {
       case 'init':
-        // Server tells us the current level on connect — sync the UI
         setActiveLevel(msg.level)
+        break
+      case 'profiles':
+        renderProfileSelector(msg.list, msg.active)
+        break
+      case 'memory_loaded':
+        // Profile loaded — update active highlight (slug not sent, use active from profiles)
+        break
+      case 'onboarding_start':
+        applyState('idle')
+        labelEl.textContent = '👋 Getting to know you…'
         break
       case 'state':
         applyState(msg.state)
@@ -264,6 +273,45 @@ levelBtns.forEach(btn => {
     wsSend({ type: 'set_level', level })
   })
 })
+
+// ── Profile selector ──────────────────────────────────────────────
+const profileSelectorEl = document.getElementById('profile-selector')
+
+function renderProfileSelector(profiles, activeSlug) {
+  profileSelectorEl.innerHTML = ''
+
+  profiles.forEach(slug => {
+    const btn = document.createElement('button')
+    btn.className = 'level-btn' + (slug === activeSlug ? ' active' : '')
+    // Display name: capitalize slug (underscores → spaces)
+    btn.textContent = slug.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
+    btn.dataset.slug = slug
+    btn.addEventListener('click', () => {
+      wsSend({ type: 'switch_profile', slug })
+    })
+    profileSelectorEl.appendChild(btn)
+  })
+
+  // '+' button to add a new child (triggers onboarding for a fresh slug)
+  const addBtn = document.createElement('button')
+  addBtn.className = 'level-btn'
+  addBtn.textContent = '+'
+  addBtn.title = 'Add a new child'
+  addBtn.addEventListener('click', () => {
+    const rawName = prompt('Enter the new child\'s name:')
+    if (!rawName) return
+    // Build a slug client-side (server will create the profile)
+    const slug = rawName.toLowerCase().trim().replace(/\s+/g, '_').replace(/[^a-z0-9_]/g, '')
+    if (slug) wsSend({ type: 'switch_profile', slug })
+  })
+  profileSelectorEl.appendChild(addBtn)
+}
+
+function setActiveProfile(slug) {
+  profileSelectorEl.querySelectorAll('.level-btn[data-slug]').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.slug === slug)
+  })
+}
 
 // ── Bootstrap ────────────────────────────────────────────────
 initPixi()

@@ -33,6 +33,12 @@ def ensure_npm_deps() -> None:
 
 
 def main() -> None:
+    import argparse
+    parser = argparse.ArgumentParser(description="Nova UI launcher")
+    parser.add_argument("--profile",
+                        help="Profile slug to load (overrides config.yaml child.name)")
+    args = parser.parse_args()
+
     ensure_npm_deps()
 
     procs: list[subprocess.Popen] = []
@@ -49,11 +55,12 @@ def main() -> None:
     signal.signal(signal.SIGINT,  shutdown)
     signal.signal(signal.SIGTERM, shutdown)
 
+    server_cmd = [PYTHON, "-m", "app.server"]
+    if args.profile:
+        server_cmd += ["--profile", args.profile]
+
     print("Starting Python pipeline server…")
-    ws_proc = subprocess.Popen(
-        [PYTHON, "-m", "app.server"],
-        cwd=ROOT,
-    )
+    ws_proc = subprocess.Popen(server_cmd, cwd=ROOT)
     procs.append(ws_proc)
 
     print("Starting Vite frontend server…")
