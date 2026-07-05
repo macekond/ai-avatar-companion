@@ -1,0 +1,89 @@
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: radial-gradient(ellipse at 50% 30%, #fff8ef 0%, #fdefd8 60%, #f5ddb0 100%);
+  font-family: 'Segoe UI', 'Helvetica Neue', system-ui, sans-serif;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* PIXI canvas — fills the viewport */
+#canvas {
+  position: fixed;
+  inset: 0;
+  width: 100% !important;
+  height: 100% !important;
+}
+
+/* ── Text overlay ─────────────────────────────────────────────────────── */
+#overlay {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  padding: 0 24px 32px;
+  text-align: center;
+  pointer-events: none;
+  z-index: 20;
+}
+
+#sentence-bubble {
+  display: inline-block;
+  min-height: 2.6rem;
+  max-width: 78%;
+  background: rgba(255, 255, 255, 0.88);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  border-radius: 18px;
+  padding: 10px 22px;
+  font-size: 1.25rem;
+  color: #4a3a2a;
+  line-height: 1.4;
+  box-shadow: 0 2px 12px rgba(0,0,0,0.08);
+  transition: opacity 0.4s ease;
+  margin-bottom: 10px;
+  word-break: break-word;
+}
+
+#sentence-bubble.fade {
+  opacity: 0;
+}
+
+#state-label {
+  font-size: 0.9rem;
+  color: #9a8070;
+  letter-spacing: 0.02em;
+  height: 1.2rem;
+  transition: opacity 0.3s;
+}
+
+/* ── Transcript flash ─────────────────────────────────────────────────── */
+#transcript {
+  position: fixed;
+  top: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(255,255,255,0.75);
+  border-radius: 10px;
+  padding: 6px 18px;
+  font-size: 0.85rem;
+  color: #6a5a4a;
+  opacity: 0;
+  transition: opacity 0.3s;
+  pointer-events: none;
+  z-index: 20;
+  max-width: 80%;
+  text-align: center;
+}
+
+#transcript.visible {
+  opacity: 1;
+}
+
+/* ── State-driven body classes ────────────────────────────────────────── */
+body.listening  { background: radial-gradient(ellipse at 50% 30%, #eef8ff 0%, #d8eeff 60%, #b0d5f5 100%); }
+body.thinking   { background: radial-gradient(ellipse at 50% 30%, #f4eeff 0%, #e8d8ff 60%, #d0b0f5 100%); }
+body.didnt_catch { background: radial-gradient(ellipse at 50% 30%, #fff4ee 0%, #fde0d0 60%, #f5c0a0 100%); }
