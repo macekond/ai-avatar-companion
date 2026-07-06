@@ -34,3 +34,5 @@ ui/.vite
 packaging/build/
 packaging/dist/
 src-tauri/binaries/
+src-tauri/target/
+src-tauri/gen/
