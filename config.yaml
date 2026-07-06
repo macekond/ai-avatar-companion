@@ -61,6 +61,11 @@ safety:
   session_limit_minutes: 30     # omit or set to null for no limit
   # quiet_hours: "20:00-07:00"  # optional
 
+telemetry:
+  enabled: true
+  log_dir: ~/.ai-avatar/logs/
+  retention_days: 90          # auto-delete JSONL files older than this many days
+
 memory:
   enabled: true
   profiles_dir: ~/.ai-avatar/profiles/

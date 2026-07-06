@@ -109,6 +109,13 @@ class SafetyConfig:
 
 
 @dataclass
+class TelemetryConfig:
+    enabled: bool = True
+    log_dir: str = "~/.ai-avatar/logs/"
+    retention_days: int = 90   # JSONL files older than this are pruned on startup
+
+
+@dataclass
 class MemoryConfig:
     enabled: bool = True
     profiles_dir: str = "~/.ai-avatar/profiles/"
@@ -140,6 +147,7 @@ class Config:
     audio: AudioConfig = field(default_factory=AudioConfig)
     avatar: AvatarConfig = field(default_factory=AvatarConfig)
     safety: SafetyConfig = field(default_factory=SafetyConfig)
+    telemetry: TelemetryConfig = field(default_factory=TelemetryConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
     app: AppSettings = field(default_factory=AppSettings)
 
@@ -184,6 +192,7 @@ class Config:
             audio=AudioConfig(**_filter(AudioConfig, raw.get("audio", {}))),
             avatar=AvatarConfig(**_filter(AvatarConfig, raw.get("avatar", {}))),
             safety=SafetyConfig(**_filter(SafetyConfig, raw.get("safety", {}))),
+            telemetry=TelemetryConfig(**_filter(TelemetryConfig, raw.get("telemetry", {}))),
             memory=MemoryConfig(**_filter(MemoryConfig, raw.get("memory", {}))),
             app=AppSettings(**_filter(AppSettings, raw.get("app", {}))),
         )
