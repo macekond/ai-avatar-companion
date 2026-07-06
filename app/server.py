@@ -53,6 +53,7 @@ from app.memory_extractor import MemoryExtractor
 from app.pipeline.llm import LLMPipeline
 from app.pipeline.stt import STTPipeline, SAMPLE_RATE
 from app.pipeline.tts import TTSPipeline
+from app.telemetry import TelemetrySession
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("nova.server")
@@ -262,6 +263,7 @@ async def _session(
     llm: LLMPipeline,
     tts: TTSPipeline,
     mem_mgr: Optional[MemoryManager] = None,
+    telemetry: Optional[TelemetrySession] = None,
 ) -> None:
     loop = asyncio.get_running_loop()
 
@@ -277,6 +279,7 @@ async def _session(
     def amplitude_cb(value: float) -> None:
         send_from_thread({"type": "amplitude", "value": round(value, 3)})
 
+    import time as _time
     extractor = MemoryExtractor(config.models.llm.model) if mem_mgr else None
 
     # ── Load / initialise memory ─────────────────────────────────────────
@@ -292,6 +295,11 @@ async def _session(
             "list": mem_mgr.list_profiles(),
             "active": mem_mgr.slug,
         })
+
+    # ── Start telemetry session ──────────────────────────────────────
+    is_onboarding = mem_mgr is not None and memory is None
+    if telemetry:
+        telemetry.start(level=config.child.level, is_onboarding=is_onboarding)
 
     # ── Onboarding or memory-loaded ──────────────────────────────────────
     if mem_mgr and memory is None:
@@ -379,10 +387,15 @@ async def _session(
 
             # ── THINKING ─────────────────────────────────────────────────
             await send({"type": "state", "state": "thinking"})
+            _stt_t0 = _time.monotonic()
             transcript = await asyncio.to_thread(stt.transcribe, audio)
+            stt_ms = int((_time.monotonic() - _stt_t0) * 1000)
+            _ptt_stop_t = _stt_t0   # approximate ptt_stop time as stt start
 
             if not transcript:
                 log.info("No speech detected")
+                if telemetry:
+                    telemetry.log_didnt_catch()
                 await send({"type": "state", "state": "didnt_catch"})
                 sorry = "I didn't hear you — try again!"
                 await send({"type": "sentence", "text": sorry})
@@ -406,16 +419,22 @@ async def _session(
             stop_speaking = threading.Event()
             spoken_sentences: list[str] = []
 
-            if (
+            reengagement_fired = bool(
                 mem_mgr and memory and
                 consecutive_short >= config.memory.short_response_streak
-            ):
+            )
+            if reengagement_fired:
                 llm.set_hint(_REENGAGEMENT_HINT)
                 consecutive_short = 0
 
+            _llm_t0 = _time.monotonic()
+            _llm_ttft_ms: list[int] = []  # filled by first sentence
+
             def _run_pipeline() -> None:
                 try:
-                    for sentence in llm.chat(transcript):
+                    for i, sentence in enumerate(llm.chat(transcript)):
+                        if i == 0:
+                            _llm_ttft_ms.append(int((_time.monotonic() - _llm_t0) * 1000))
                         if stop_speaking.is_set():
                             break
                         spoken_sentences.append(sentence)
@@ -427,14 +446,25 @@ async def _session(
                     send_from_thread({"type": "sentence",
                                       "text": "My brain is napping — try again!"})
 
+            _turn_t0 = _time.monotonic()
             await asyncio.to_thread(_run_pipeline)
+            total_ms = int((_time.monotonic() - _ptt_stop_t) * 1000)
+            llm_ttft_ms = _llm_ttft_ms[0] if _llm_ttft_ms else 0
             await send({"type": "state", "state": "idle"})
 
-            # ── POST-TURN EXTRACTION ──────────────────────────────────────
+            # ── POST-TURN EXTRACTION + TELEMETRY ───────────────────────────
             if mem_mgr and memory and extractor and spoken_sentences and transcript:
                 full_reply = " ".join(spoken_sentences)
                 _mem_ref = memory
                 _mgr_ref = mem_mgr
+
+                _tel_ref = telemetry
+                _stt_ms_ref = stt_ms
+                _ttft_ref = llm_ttft_ms
+                _total_ref = total_ms
+                _level_ref = config.child.level
+                _reeng_ref = reengagement_fired
+                _wc_ref = len(transcript.split())
 
                 def _extract_and_save() -> None:
                     try:
@@ -447,16 +477,47 @@ async def _session(
                         _mgr_ref.prune(_mem_ref)
                         _mgr_ref.save(_mem_ref)
                         loop.call_soon_threadsafe(llm.set_memory, _mem_ref)
+                        # Record telemetry turn with extracted metadata
+                        if _tel_ref:
+                            _tel_ref.log_turn(
+                                transcript=transcript,
+                                reply=full_reply,
+                                stt_ms=_stt_ms_ref,
+                                llm_ttft_ms=_ttft_ref,
+                                total_ms=_total_ref,
+                                level=_level_ref,
+                                topic=result.topic,
+                                problem=result.problem_raw,
+                                engaged=result.engaged,
+                                reengagement_fired=_reeng_ref,
+                            )
                     except Exception as exc:
                         log.debug("Memory extraction failed (non-fatal): %s", exc)
 
                 asyncio.ensure_future(asyncio.to_thread(_extract_and_save))
+
+            elif telemetry and spoken_sentences and transcript:
+                # No extractor — log turn without topic/problem metadata
+                telemetry.log_turn(
+                    transcript=transcript,
+                    reply=" ".join(spoken_sentences),
+                    stt_ms=stt_ms,
+                    llm_ttft_ms=llm_ttft_ms,
+                    total_ms=total_ms,
+                    level=config.child.level,
+                    engaged=len(transcript.split()) > config.memory.short_response_words,
+                    reengagement_fired=reengagement_fired,
+                )
 
     except websockets.ConnectionClosed:
         log.info("Client disconnected")
         if mem_mgr and memory:
             mem_mgr.prune(memory)
             mem_mgr.save(memory)
+    finally:
+        if telemetry:
+            telemetry.end()
+            log.info("Telemetry written to %s", telemetry.log_file)
 
 
 # ---------------------------------------------------------------------------
@@ -489,7 +550,10 @@ async def _main(profile_slug: Optional[str] = None) -> None:
     log.info("Nova WebSocket server → ws://%s:%d", HOST, PORT)
 
     async def _handler(ws):
-        await _session(ws, config, stt, llm, tts, mem_mgr)
+        telemetry = None
+        if config.telemetry.enabled:
+            telemetry = TelemetrySession(config.telemetry.log_dir, profile_slug)
+        await _session(ws, config, stt, llm, tts, mem_mgr, telemetry)
 
     async with websockets.serve(_handler, HOST, PORT):
         await asyncio.Future()
