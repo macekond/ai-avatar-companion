@@ -176,21 +176,30 @@ def print_engagement_trend(sessions: list[dict]) -> None:
 
 
 def print_latency_breakdown(sessions: list[dict]) -> None:
-    rows = [(s.get("avg_stt_ms"), s.get("avg_llm_ttft_ms"), s.get("avg_total_ms"))
+    rows = [(s.get("avg_stt_ms"),
+             s.get("avg_llm_ttft_ms"),
+             s.get("avg_first_audio_ms"),
+             s.get("avg_total_ms"))
             for s in sessions
             if s.get("avg_stt_ms") is not None]
     if not rows:
         print("  (no latency data)")
         return
-    avg_stt   = sum(r[0] for r in rows) / len(rows)
-    avg_ttft  = sum(r[1] for r in rows if r[1]) / max(1, sum(1 for r in rows if r[1]))
-    avg_total = sum(r[2] for r in rows if r[2]) / max(1, sum(1 for r in rows if r[2]))
+    avg_stt        = sum(r[0] for r in rows) / len(rows)
+    avg_ttft       = sum(r[1] for r in rows if r[1]) / max(1, sum(1 for r in rows if r[1]))
+    first_audio_rows = [r[2] for r in rows if r[2]]
+    avg_first      = sum(first_audio_rows) / len(first_audio_rows) if first_audio_rows else None
+    avg_total      = sum(r[3] for r in rows if r[3]) / max(1, sum(1 for r in rows if r[3]))
     print(f"  STT transcription avg   : {avg_stt/1000:.2f}s")
     print(f"  LLM time-to-first-token : {avg_ttft/1000:.2f}s")
-    print(f"  Total turn latency avg  : {avg_total/1000:.2f}s  (target ≤ 1.5 s)")
-    target_ok = sum(1 for r in rows if r[2] and r[2] <= 1500)
-    print(f"  Turns within 1.5 s      : {target_ok}/{len(rows)} "
-          f"({100*target_ok//len(rows) if rows else 0}%)")
+    if avg_first is not None:
+        print(f"  Release → first audio   : {avg_first/1000:.2f}s  (target ≤ 1.5 s)")
+        target_ok = sum(1 for v in first_audio_rows if v <= 1500)
+        pct = 100 * target_ok // len(first_audio_rows) if first_audio_rows else 0
+        print(f"  Sessions within 1.5 s   : {target_ok}/{len(first_audio_rows)} ({pct}%)")
+    else:
+        print("  Release → first audio   : (no data — older log format)")
+    print(f"  Full-reply turn latency : {avg_total/1000:.2f}s  (includes TTS playback)")
 
 
 # ---------------------------------------------------------------------------
