@@ -39,6 +39,7 @@ import asyncio
 import json
 import logging
 import re
+import sys
 import threading
 from typing import Any, Optional
 
@@ -48,8 +49,9 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from app.config import Config
+from app.config import Config, default_config_path
 from app.memory import ChildMemory, ChildProfile, MemoryManager, name_to_slug
+from app.setup import check_ollama
 from app.memory_extractor import MemoryExtractor
 from app.pipeline.llm import LLMPipeline
 from app.pipeline.stt import STTPipeline, SAMPLE_RATE
@@ -76,6 +78,8 @@ ALLOWED_ORIGINS = [
     "http://127.0.0.1:5173",
     "http://localhost:4173",   # Vite preview
     "http://127.0.0.1:4173",
+    "tauri://localhost",       # Tauri v2 webview (macOS/Linux WKWebView)
+    "http://tauri.localhost",  # Tauri v2 webview (Windows WebView2)
     None,                      # non-browser clients (no Origin header)
 ]
 
@@ -90,8 +94,18 @@ _REENGAGEMENT_HINT = (
 # Server-side recording
 # ---------------------------------------------------------------------------
 
+# How long to wait for the recording thread after PTT release before giving
+# up. Opening the input stream can block indefinitely when microphone
+# permission is missing (macOS TCC) — the session must not hang with it.
+RECORD_GRACE_S = 10.0
+
+
 def _record(stop: threading.Event) -> np.ndarray:
-    """Record audio until *stop* is set. Called in a thread-pool executor."""
+    """Record audio until *stop* is set. Called in a thread-pool executor.
+
+    Returns an empty array on any failure (no mic, permission denied) so the
+    caller flows into the didn't-catch path instead of crashing the session.
+    """
     import sounddevice as sd
 
     chunks: list[np.ndarray] = []
@@ -99,9 +113,13 @@ def _record(stop: threading.Event) -> np.ndarray:
     def _cb(indata: np.ndarray, frames: int, _time, _status) -> None:
         chunks.append(indata.copy())
 
-    with sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="float32",
-                        callback=_cb):
-        stop.wait()
+    try:
+        with sd.InputStream(samplerate=SAMPLE_RATE, channels=1,
+                            dtype="float32", callback=_cb):
+            stop.wait()
+    except Exception as exc:
+        log.error("Recording failed (mic unavailable or permission denied): %s", exc)
+        return np.zeros(0, dtype=np.float32)
 
     if not chunks:
         return np.zeros(0, dtype=np.float32)
@@ -164,7 +182,11 @@ async def _one_ptt_turn(
         await send({"type": "state", "state": "idle"})
         return ""
     stop_rec.set()
-    audio = await rec_task
+    try:
+        audio = await asyncio.wait_for(rec_task, RECORD_GRACE_S)
+    except Exception:
+        log.error("Recording did not complete — treating as no audio")
+        audio = np.zeros(0, dtype=np.float32)
     await send({"type": "state", "state": "thinking"})
     return await asyncio.to_thread(stt.transcribe, audio)
 
@@ -368,13 +390,19 @@ async def _session(
     async def _next_raw() -> str:
         if buffered_msgs:
             return buffered_msgs.pop(0)
-        return await ws.__anext__()
+        # ws.recv(), not async-for/__anext__: the real websockets
+        # ServerConnection has no __anext__ (only __aiter__), so iteration
+        # helpers must go through recv(). Raises ConnectionClosed on close.
+        return await ws.recv()
 
     try:
         while True:
             try:
                 raw = await _next_raw()
-            except StopAsyncIteration:
+            except (websockets.ConnectionClosed, StopAsyncIteration,
+                    asyncio.TimeoutError):
+                # ConnectionClosed: client left. TimeoutError: test mocks
+                # signal queue exhaustion this way.
                 break
             msg = json.loads(raw)
             mtype = msg.get("type")
@@ -461,7 +489,13 @@ async def _session(
                 await send({"type": "state", "state": "idle"})
                 continue
             stop_rec.set()
-            audio = await rec_task
+            try:
+                audio = await asyncio.wait_for(rec_task, RECORD_GRACE_S)
+            except Exception:
+                # Stream open can hang without mic permission; don't let the
+                # session hang with it — flow into the didn't-catch path.
+                log.error("Recording did not complete — treating as no audio")
+                audio = np.zeros(0, dtype=np.float32)
 
             # ── THINKING ─────────────────────────────────────────────────
             await send({"type": "state", "state": "thinking"})
@@ -664,8 +698,9 @@ async def _session(
 # Entry point
 # ---------------------------------------------------------------------------
 
-async def _main(profile_slug: Optional[str] = None) -> None:
-    config = Config.load("config.yaml")
+async def _main(profile_slug: Optional[str] = None, port: int = PORT,
+                managed: bool = False) -> None:
+    config = Config.load(str(default_config_path()))
 
     if profile_slug is None:
         profile_slug = name_to_slug(config.child.name)
@@ -686,27 +721,122 @@ async def _main(profile_slug: Optional[str] = None) -> None:
         )
         log.info("Memory enabled — profile: %s", profile_slug)
 
-    log.info("Loading pipeline models…")
-    stt = STTPipeline(config)
-    tts = TTSPipeline(config)
-    llm = LLMPipeline(config)
+    # ── Deferred pipeline init (design §2.8) ─────────────────────────────
+    # The socket opens BEFORE models load, so the UI can connect immediately
+    # and render setup progress: first-run model downloads (~600 MB) and the
+    # Ollama check no longer block the server. Until `ready` fires, handlers
+    # hold clients on a setup screen instead of starting a session.
+    loop = asyncio.get_running_loop()
+    pipelines: dict[str, Any] = {"stt": None, "llm": None, "tts": None}
+    ready = asyncio.Event()
+    setup_state = {"phase": "starting", "detail": ""}
+    setup_watchers: set = set()
 
-    log.info("Nova WebSocket server → ws://%s:%d", HOST, PORT)
+    async def _broadcast_setup(phase: str, detail: str = "") -> None:
+        setup_state.update(phase=phase, detail=detail)
+        log.info("Setup: %s %s", phase, detail)
+        payload = json.dumps({"type": "setup_status", "phase": phase,
+                              "detail": detail})
+        for w in list(setup_watchers):
+            try:
+                await w.send(payload)
+            except Exception:
+                setup_watchers.discard(w)
+
+    async def _init_pipelines() -> None:
+        # Phase A: Ollama check — re-poll so the parent can install/start
+        # Ollama without relaunching the app.
+        while True:
+            ok, msg = await asyncio.to_thread(
+                check_ollama, config.models.llm.model)
+            if ok:
+                break
+            await _broadcast_setup("ollama_missing", msg)
+            await asyncio.sleep(3.0)
+
+        # Phase B: model load (downloads on first run, cached afterwards).
+        await _broadcast_setup(
+            "downloading_models",
+            "Loading voice models — the first run downloads about 600 MB.")
+        pipelines["stt"] = await asyncio.to_thread(STTPipeline, config)
+        pipelines["tts"] = await asyncio.to_thread(TTSPipeline, config)
+        pipelines["llm"] = LLMPipeline(config)   # no local weights; cheap
+
+        ready.set()
+        await _broadcast_setup("ready")
+
+    init_task = asyncio.ensure_future(_init_pipelines())
 
     async def _handler(ws):
+        if not ready.is_set():
+            setup_watchers.add(ws)
+            try:
+                await ws.send(json.dumps(
+                    {"type": "setup_status", **setup_state}))
+                await ready.wait()
+                await ws.send(json.dumps(
+                    {"type": "setup_status", "phase": "ready", "detail": ""}))
+            except Exception:
+                return   # client went away during setup
+            finally:
+                setup_watchers.discard(ws)
         telemetry = None
         if config.telemetry.enabled:
             telemetry = TelemetrySession(config.telemetry.log_dir, profile_slug)
-        await _session(ws, config, stt, llm, tts, mem_mgr, telemetry)
+        await _session(ws, config, pipelines["stt"], pipelines["llm"],
+                       pipelines["tts"], mem_mgr, telemetry)
 
-    async with websockets.serve(_handler, HOST, PORT, origins=ALLOWED_ORIGINS):
-        await asyncio.Future()
+    # With --managed (set by the Tauri shell, which owns our stdin pipe),
+    # shut down when stdin closes: parent death — including SIGKILL —
+    # surfaces here as EOF, so no orphaned sidecar survives the app.
+    stop = loop.create_future()
+
+    def _watch_stdin() -> None:
+        try:
+            while sys.stdin.buffer.read(4096):
+                pass
+        except Exception:
+            pass
+        log.info("stdin closed — parent exited, shutting down")
+        loop.call_soon_threadsafe(
+            lambda: stop.done() or stop.set_result(None))
+        # Clean shutdown can be blocked by non-daemon worker threads (e.g.
+        # a model download in progress). The parent is gone — nothing is
+        # worth waiting for. Hard-exit if we're still alive shortly after.
+        import os
+        import time
+        time.sleep(10.0)
+        log.warning("shutdown still pending 10 s after stdin EOF — exiting")
+        os._exit(0)
+
+    if managed:
+        threading.Thread(target=_watch_stdin, daemon=True).start()
+
+    async with websockets.serve(_handler, HOST, port, origins=ALLOWED_ORIGINS):
+        log.info("Nova WebSocket server → ws://%s:%d", HOST, port)
+        # Readiness line for the Tauri shell (stdout is a pipe — flush).
+        print(f"NOVA_READY ws://{HOST}:{port}", flush=True)
+        try:
+            await stop
+        finally:
+            init_task.cancel()
 
 
 if __name__ == "__main__":
     import argparse
+    import multiprocessing
+    # Frozen (PyInstaller) builds: library code (huggingface_hub, ctranslate2)
+    # spawns helper processes by re-invoking this executable; freeze_support
+    # dispatches those re-invocations instead of falling through to argparse.
+    multiprocessing.freeze_support()
     parser = argparse.ArgumentParser(description="Nova WebSocket server")
     parser.add_argument("--profile",
                         help="Profile slug (overrides config.yaml child.name)")
+    parser.add_argument("--port", type=int, default=PORT,
+                        help=f"WebSocket port (default {PORT})")
+    parser.add_argument("--managed", action="store_true",
+                        help="Exit when stdin closes (set by the app shell "
+                             "that spawned this process)")
     args = parser.parse_args()
-    asyncio.run(_main(profile_slug=args.profile))
+    asyncio.run(_main(profile_slug=args.profile, port=args.port,
+                      managed=args.managed))

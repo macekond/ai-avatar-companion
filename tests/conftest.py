@@ -64,14 +64,19 @@ class MockWebSocket:
             raise asyncio.TimeoutError
         return msg
 
+    # Match the real websockets.ServerConnection interface: __aiter__ is an
+    # async generator, and there is deliberately NO direct __anext__ method —
+    # server code must use recv(). (A ws.__anext__() call once passed tests
+    # against this mock and crashed against real connections.)
     def __aiter__(self):
-        return self
+        return self._iterate()
 
-    async def __anext__(self) -> str:
-        msg = self._next_raw()
-        if msg is None:
-            raise StopAsyncIteration
-        return msg
+    async def _iterate(self):
+        while True:
+            msg = self._next_raw()
+            if msg is None:
+                return
+            yield msg
 
     # ── Convenience accessors ──────────────────────────────────────────
 
