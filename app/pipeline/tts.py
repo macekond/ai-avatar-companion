@@ -166,7 +166,14 @@ class _PiperBackend:
 # ---------------------------------------------------------------------------
 
 class _SystemTTSBackend:
-    """Uses macOS 'say' command — no install, instant availability."""
+    """Uses macOS 'say' command — no install, instant availability.
+
+    NOTE: this is a pragmatic macOS-only deviation from the design's
+    XTTS-v2 / ElevenLabs fallback chain. Piper is preferred; `say`
+    fires only when Piper voice files or the piper binary are missing.
+    On Linux/Windows this backend will fail — those platforms should
+    ensure the Piper voice files are installed.
+    """
 
     # Samantha is the clearest built-in US English voice for a learner
     _VOICE = "Samantha"

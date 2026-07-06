@@ -56,15 +56,17 @@ avatar:
   lip_sync: amplitude           # RMS → mouth-open; visemes are a possible Phase 4 upgrade
 
 safety:
-  blocklist_file: ./blocklist.txt
+  # NOTE: the keys below are declared for the future safety layer but are
+  # NOT enforced yet (Phase 4 item). Setting them changes nothing today.
+  blocklist_file: ./blocklist.txt          # NYI — no LLM→TTS word filter yet
   log_path: ~/.ai-avatar/logs/conversations.jsonl
-  session_limit_minutes: 30     # omit or set to null for no limit
-  # quiet_hours: "20:00-07:00"  # optional
+  session_limit_minutes: 30                # NYI — no session-length enforcement
+  # quiet_hours: "20:00-07:00"             # NYI — parental quiet-hours block
 
 telemetry:
   enabled: true
   log_dir: ~/.ai-avatar/logs/
-  retention_days: 90          # auto-delete JSONL files older than this many days
+  retention_days: 90          # NYI — logs are not auto-pruned yet
 
 memory:
   enabled: true

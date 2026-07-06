@@ -103,6 +103,8 @@ class AvatarConfig:
 
 @dataclass
 class SafetyConfig:
+    # NYI (not yet implemented) — placeholders for the Phase 4 safety layer.
+    # These fields are read by config.yaml but no enforcement code exists yet.
     blocklist_file: str = "./blocklist.txt"
     log_path: str = "~/.ai-avatar/logs/conversations.jsonl"
     session_limit_minutes: Optional[int] = 30
@@ -112,7 +114,8 @@ class SafetyConfig:
 class TelemetryConfig:
     enabled: bool = True
     log_dir: str = "~/.ai-avatar/logs/"
-    retention_days: int = 90   # JSONL files older than this are pruned on startup
+    # NYI — no automatic pruning yet; logs accumulate until manually cleared.
+    retention_days: int = 90
 
 
 @dataclass
