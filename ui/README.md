@@ -10,12 +10,18 @@ npm run dev      # http://localhost:5173
 npm run build    # → dist/
 ```
 
-## Avatar model
+## Avatar models
 
-`public/avatar/AvatarSample_A.vrm` is pixiv's official VRoid sample model,
-released under **CC0** — it may be used, altered, and redistributed freely,
-including in this repository. Source: [madjin/vrm-samples](https://github.com/madjin/vrm-samples)
-(mirror of the VRoid Studio sample avatars).
+**Default: `public/avatar/VIPEHero_2707.vrm`** — "VIPE Hero #2707" from the
+VIPE Heroes Genesis collection, via
+[Open Source Avatars](https://www.opensourceavatars.com/en/finder?avatar=vipe-hero-2707).
+License: **CC-BY** — free to use, modify, and redistribute **with
+attribution**. Attribution: *VIPE Heroes Genesis by VIPE
+([vipe.io](https://vipe.io)), via opensourceavatars.com (ToxSam).*
+
+Alternative: `public/avatar/AvatarSample_A.vrm` — pixiv's official VRoid
+sample model, **CC0** (no attribution needed). Source:
+[madjin/vrm-samples](https://github.com/madjin/vrm-samples).
 
 To use a different avatar, drop any `.vrm` file in `public/avatar/` and update
 `MODEL_PATH` in `src/main.js`. The state machine uses standard VRM humanoid

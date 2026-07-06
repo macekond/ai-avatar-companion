@@ -16,7 +16,7 @@ import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm'
 
 // ── Constants ─────────────────────────────────────────────────────────────
 const WS_URL       = 'ws://localhost:8765'
-const MODEL_PATH   = '/avatar/AvatarSample_A.vrm'
+const MODEL_PATH   = '/avatar/VIPEHero_2707.vrm'
 const RECONNECT_MS = 2000
 
 const STATE_LABELS = {
