@@ -47,28 +47,8 @@ RED    = _c("91")
 # Startup checks
 # ---------------------------------------------------------------------------
 
-def check_ollama(model: str) -> tuple[bool, str]:
-    """Return (ok, error_message). Checks that Ollama is running and the model is pulled."""
-    try:
-        import ollama
-        ollama.show(model)
-        return True, ""
-    except ImportError:
-        return False, "The 'ollama' Python package is not installed. Run: pip install ollama"
-    except Exception as exc:
-        msg = str(exc).lower()
-        if "connection" in msg or "connect" in msg or "refused" in msg:
-            return False, (
-                f"Ollama is not running.\n"
-                f"  Start it with: {BOLD}ollama serve{RESET}\n"
-                f"  Then ensure the model is pulled: {BOLD}ollama pull {model}{RESET}"
-            )
-        if "not found" in msg or "404" in msg:
-            return False, (
-                f"Model '{model}' is not pulled yet.\n"
-                f"  Run: {BOLD}ollama pull {model}{RESET}"
-            )
-        return False, f"Ollama error: {exc}"
+# Shared with app/server.py — plain-text messages, suitable for the UI too.
+from app.setup import check_ollama
 
 
 # ---------------------------------------------------------------------------

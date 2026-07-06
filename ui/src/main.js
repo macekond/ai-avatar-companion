@@ -180,6 +180,71 @@ function showError(html) {
     </div>`
 }
 
+// ── Setup overlay (first-run downloads / Ollama guidance) ─────────────────
+const SETUP_MESSAGES = {
+  starting: {
+    title: 'Waking Nova up…',
+    body: 'Just a moment!',
+    spinner: true,
+  },
+  ollama_missing: {
+    title: 'Nova needs Ollama to think',
+    body: 'Please install and open <b>Ollama</b> from '
+      + '<span style="white-space:nowrap">ollama.com</span>, then run '
+      + '<code>ollama pull llama3.2:3b</code> once. '
+      + 'Nova keeps checking and will start by itself.',
+    spinner: true,
+  },
+  downloading_models: {
+    title: 'Getting Nova’s voice ready…',
+    body: 'The first run downloads about 600 MB of voice models. '
+      + 'This only happens once.',
+    spinner: true,
+  },
+  warming_up: {
+    title: 'Almost there…',
+    body: 'Warming up so replies come fast.',
+    spinner: true,
+  },
+}
+
+let setupOverlayEl = null
+
+function showSetupOverlay(phase, detail) {
+  const info = SETUP_MESSAGES[phase] || {
+    title: 'Setting up…', body: detail || '', spinner: true,
+  }
+  if (!setupOverlayEl) {
+    setupOverlayEl = document.createElement('div')
+    setupOverlayEl.id = 'setup-overlay'
+    setupOverlayEl.style.cssText =
+      'position:fixed;inset:0;z-index:1000;display:flex;align-items:center;'
+      + 'justify-content:center;background:rgba(255,250,244,0.96);'
+      + 'font-family:system-ui;color:#5a3a2a;text-align:center;padding:40px'
+    document.body.appendChild(setupOverlayEl)
+  }
+  setupOverlayEl.innerHTML =
+    `<div style="max-width:420px">
+      ${info.spinner ? '<div class="setup-spinner" style="margin:0 auto 24px;width:44px;height:44px;border:4px solid #f0d9c8;border-top-color:#d98a5f;border-radius:50%;animation:setup-spin 1s linear infinite"></div>' : ''}
+      <h2 style="margin:0 0 12px;font-size:1.4rem">${info.title}</h2>
+      <p style="margin:0;line-height:1.5">${info.body}</p>
+      ${detail && phase === 'ollama_missing' ? `<p style="margin-top:16px;font-size:0.85rem;opacity:0.7">${detail}</p>` : ''}
+    </div>`
+  if (!document.getElementById('setup-spin-style')) {
+    const style = document.createElement('style')
+    style.id = 'setup-spin-style'
+    style.textContent = '@keyframes setup-spin{to{transform:rotate(360deg)}}'
+    document.head.appendChild(style)
+  }
+}
+
+function hideSetupOverlay() {
+  if (setupOverlayEl) {
+    setupOverlayEl.remove()
+    setupOverlayEl = null
+  }
+}
+
 // ── WebSocket ─────────────────────────────────────────────────────────────
 function connectWS() {
   labelEl.textContent = 'Connecting to Nova…'
@@ -217,6 +282,13 @@ function connectWS() {
         break
       case 'amplitude':
         targetAmp = msg.value
+        break
+      case 'setup_status':
+        if (msg.phase === 'ready') {
+          hideSetupOverlay()
+        } else {
+          showSetupOverlay(msg.phase, msg.detail)
+        }
         break
     }
   }

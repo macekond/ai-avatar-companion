@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import dataclasses
+import shutil
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -21,6 +23,24 @@ def _fields(cls) -> set[str]:
 def _filter(cls, data: dict) -> dict:
     """Drop dict keys that are not fields of *cls* (unknown YAML keys)."""
     return {k: v for k, v in data.items() if k in _fields(cls)}
+
+
+def default_config_path() -> Path:
+    """Resolve where config.yaml lives.
+
+    Dev checkout: `config.yaml` in the current directory (repo root).
+    Frozen (PyInstaller bundle): `~/.ai-avatar/config.yaml`, seeded from the
+    copy bundled into the executable on first run so parents get an
+    editable file that survives app updates.
+    """
+    if getattr(sys, "frozen", False):
+        user_cfg = Path.home() / ".ai-avatar" / "config.yaml"
+        if not user_cfg.exists():
+            user_cfg.parent.mkdir(parents=True, exist_ok=True)
+            bundled = Path(getattr(sys, "_MEIPASS", ".")) / "config.yaml"
+            shutil.copy(bundled, user_cfg)
+        return user_cfg
+    return Path("config.yaml")
 
 
 # ---------------------------------------------------------------------------
