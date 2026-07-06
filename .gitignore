@@ -29,3 +29,8 @@ logs/
 ui/node_modules
 ui/dist
 ui/.vite
+
+# Packaging artifacts
+packaging/build/
+packaging/dist/
+src-tauri/binaries/

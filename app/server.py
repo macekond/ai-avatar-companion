@@ -94,8 +94,18 @@ _REENGAGEMENT_HINT = (
 # Server-side recording
 # ---------------------------------------------------------------------------
 
+# How long to wait for the recording thread after PTT release before giving
+# up. Opening the input stream can block indefinitely when microphone
+# permission is missing (macOS TCC) — the session must not hang with it.
+RECORD_GRACE_S = 10.0
+
+
 def _record(stop: threading.Event) -> np.ndarray:
-    """Record audio until *stop* is set. Called in a thread-pool executor."""
+    """Record audio until *stop* is set. Called in a thread-pool executor.
+
+    Returns an empty array on any failure (no mic, permission denied) so the
+    caller flows into the didn't-catch path instead of crashing the session.
+    """
     import sounddevice as sd
 
     chunks: list[np.ndarray] = []
@@ -103,9 +113,13 @@ def _record(stop: threading.Event) -> np.ndarray:
     def _cb(indata: np.ndarray, frames: int, _time, _status) -> None:
         chunks.append(indata.copy())
 
-    with sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="float32",
-                        callback=_cb):
-        stop.wait()
+    try:
+        with sd.InputStream(samplerate=SAMPLE_RATE, channels=1,
+                            dtype="float32", callback=_cb):
+            stop.wait()
+    except Exception as exc:
+        log.error("Recording failed (mic unavailable or permission denied): %s", exc)
+        return np.zeros(0, dtype=np.float32)
 
     if not chunks:
         return np.zeros(0, dtype=np.float32)
@@ -168,7 +182,11 @@ async def _one_ptt_turn(
         await send({"type": "state", "state": "idle"})
         return ""
     stop_rec.set()
-    audio = await rec_task
+    try:
+        audio = await asyncio.wait_for(rec_task, RECORD_GRACE_S)
+    except Exception:
+        log.error("Recording did not complete — treating as no audio")
+        audio = np.zeros(0, dtype=np.float32)
     await send({"type": "state", "state": "thinking"})
     return await asyncio.to_thread(stt.transcribe, audio)
 
@@ -372,13 +390,19 @@ async def _session(
     async def _next_raw() -> str:
         if buffered_msgs:
             return buffered_msgs.pop(0)
-        return await ws.__anext__()
+        # ws.recv(), not async-for/__anext__: the real websockets
+        # ServerConnection has no __anext__ (only __aiter__), so iteration
+        # helpers must go through recv(). Raises ConnectionClosed on close.
+        return await ws.recv()
 
     try:
         while True:
             try:
                 raw = await _next_raw()
-            except StopAsyncIteration:
+            except (websockets.ConnectionClosed, StopAsyncIteration,
+                    asyncio.TimeoutError):
+                # ConnectionClosed: client left. TimeoutError: test mocks
+                # signal queue exhaustion this way.
                 break
             msg = json.loads(raw)
             mtype = msg.get("type")
@@ -465,7 +489,13 @@ async def _session(
                 await send({"type": "state", "state": "idle"})
                 continue
             stop_rec.set()
-            audio = await rec_task
+            try:
+                audio = await asyncio.wait_for(rec_task, RECORD_GRACE_S)
+            except Exception:
+                # Stream open can hang without mic permission; don't let the
+                # session hang with it — flow into the didn't-catch path.
+                log.error("Recording did not complete — treating as no audio")
+                audio = np.zeros(0, dtype=np.float32)
 
             # ── THINKING ─────────────────────────────────────────────────
             await send({"type": "state", "state": "thinking"})
@@ -786,6 +816,11 @@ async def _main(profile_slug: Optional[str] = None, port: int = PORT,
 
 if __name__ == "__main__":
     import argparse
+    import multiprocessing
+    # Frozen (PyInstaller) builds: library code (huggingface_hub, ctranslate2)
+    # spawns helper processes by re-invoking this executable; freeze_support
+    # dispatches those re-invocations instead of falling through to argparse.
+    multiprocessing.freeze_support()
     parser = argparse.ArgumentParser(description="Nova WebSocket server")
     parser.add_argument("--profile",
                         help="Profile slug (overrides config.yaml child.name)")
