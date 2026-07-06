@@ -36,3 +36,7 @@ packaging/dist/
 src-tauri/binaries/
 src-tauri/target/
 src-tauri/gen/
+
+# Proprietary Live2D assets — never commit (see ui/README.md)
+ui/public/cubism/
+ui/public/avatar/Hiyori/

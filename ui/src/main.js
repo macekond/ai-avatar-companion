@@ -1,26 +1,22 @@
 /**
- * Nova Phase 3 — Live2D avatar frontend
+ * Nova — VRM avatar frontend (three.js + @pixiv/three-vrm)
  *
  * Responsibilities:
- *  - Render the Live2D avatar via pixi-live2d-display
+ *  - Render a VRM avatar (CC0 sample model; MIT runtime — fully open source)
  *  - Maintain the 5-state machine driven by WebSocket messages from the Python server
  *  - Capture Space keydown/keyup and send ptt_start/ptt_stop to the server
- *  - Drive ParamMouthOpenY from amplitude messages for lip-sync
+ *  - Drive the 'aa' mouth expression from amplitude messages for lip-sync
  *  - Update sentence bubble, transcript flash, and background colour per state
  */
 
 import './style.css'
-import * as PIXI from 'pixi.js'
-// Import from the cubism4 subpath — this auto-registers the Cubism 4 plugin
-// and tells pixi-live2d-display to use live2dcubismcore.min.js (not live2d.min.js).
-import { Live2DModel, MotionPriority } from 'pixi-live2d-display/cubism4'
-
-// Register PIXI's ticker with Live2D so animations run
-Live2DModel.registerTicker(PIXI.Ticker)
+import * as THREE from 'three'
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'
+import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm'
 
 // ── Constants ─────────────────────────────────────────────────────────────
 const WS_URL       = 'ws://localhost:8765'
-const MODEL_PATH   = '/avatar/Hiyori/Hiyori.model3.json'
+const MODEL_PATH   = '/avatar/AvatarSample_A.vrm'
 const RECONNECT_MS = 2000
 
 const STATE_LABELS = {
@@ -38,8 +34,11 @@ const labelEl    = document.getElementById('state-label')
 const transcriptEl = document.getElementById('transcript')
 
 // ── App state ─────────────────────────────────────────────────────────────
-let pixiApp   = null
-let model     = null
+let renderer  = null
+let scene     = null
+let camera    = null
+let vrm       = null       // loaded three-vrm instance
+let clock     = null
 let ws        = null
 let state     = 'idle'
 let amplitude = 0          // smoothed lip-sync value
@@ -47,67 +46,145 @@ let targetAmp = 0
 let pttActive = false      // true while Space is held
 let fadeTimer = null       // for bubble fade-out
 
-// ── PIXI setup ────────────────────────────────────────────────────────────
-function initPixi() {
-  pixiApp = new PIXI.Application({
-    view: canvasEl,
-    width: window.innerWidth,
-    height: window.innerHeight,
-    backgroundAlpha: 0,    // transparent — CSS gradient shows through
-    antialias: true,
-    resizeTo: window,
-  })
+// Target pose (radians) the tick loop eases the head/spine towards —
+// applyState just sets targets, so transitions are always smooth.
+const pose = { headPitch: 0, headRoll: 0, headYaw: 0, spinePitch: 0 }
 
-  // Low-priority ticker: runs after Live2D internal update each frame
-  pixiApp.ticker.add(onTick, undefined, PIXI.UPDATE_PRIORITY.LOW)
+// ── three.js setup ────────────────────────────────────────────────────────
+function initThree() {
+  renderer = new THREE.WebGLRenderer({
+    canvas: canvasEl,
+    alpha: true,           // transparent — CSS gradient shows through
+    antialias: true,
+  })
+  renderer.setPixelRatio(window.devicePixelRatio)
+  renderer.setSize(window.innerWidth, window.innerHeight)
+
+  scene = new THREE.Scene()
+
+  // Upper-body portrait framing (VRM models stand at the origin, ~1.5 m tall)
+  camera = new THREE.PerspectiveCamera(
+    28, window.innerWidth / window.innerHeight, 0.1, 20)
+  camera.position.set(0.0, 1.32, 1.35)
+  camera.lookAt(0.0, 1.28, 0.0)
+
+  const key = new THREE.DirectionalLight(0xffffff, Math.PI * 0.9)
+  key.position.set(0.6, 1.8, 1.2)
+  scene.add(key)
+  scene.add(new THREE.AmbientLight(0xfff2e8, Math.PI * 0.35))
+
+  clock = new THREE.Clock()
+  renderer.setAnimationLoop(onTick)
+  window.addEventListener('resize', fitViewport)
 }
 
-// Per-frame update: lip-sync + amplitude decay
+function fitViewport() {
+  camera.aspect = window.innerWidth / window.innerHeight
+  camera.updateProjectionMatrix()
+  renderer.setSize(window.innerWidth, window.innerHeight)
+}
+
+// ── Blink scheduler ───────────────────────────────────────────────────────
+let nextBlinkAt = 2.0
+let blinkPhase  = -1        // <0: not blinking; 0..1: closing→opening
+
+function updateBlink(t, delta) {
+  if (!vrm?.expressionManager) return
+  if (blinkPhase < 0 && t >= nextBlinkAt) blinkPhase = 0
+  if (blinkPhase >= 0) {
+    blinkPhase += delta / 0.18   // full blink ≈ 180 ms
+    const v = blinkPhase < 0.5 ? blinkPhase * 2 : Math.max(0, 2 - blinkPhase * 2)
+    vrm.expressionManager.setValue('blink', Math.min(1, v))
+    if (blinkPhase >= 1) {
+      blinkPhase = -1
+      nextBlinkAt = t + 2 + Math.random() * 4
+    }
+  }
+}
+
+// Per-frame update: lip-sync, pose easing, blink, VRM internals
 function onTick() {
+  const delta = clock.getDelta()
+  const t = clock.elapsedTime
+
   // Smooth amplitude towards target
   amplitude += (targetAmp - amplitude) * 0.35
   targetAmp *= 0.88            // decay when no new messages arrive
 
-  if (model && state === 'speaking') {
-    try {
-      model.internalModel.coreModel.setParameterValueById('ParamMouthOpenY', amplitude)
-    } catch { /* model may not expose this param */ }
+  if (vrm) {
+    // Lip-sync: VRM's standard 'aa' viseme expression
+    vrm.expressionManager?.setValue(
+      'aa', state === 'speaking' ? Math.min(1, amplitude * 1.4) : 0)
+
+    updateBlink(t, delta)
+
+    // Ease head/spine towards the state's target pose + gentle idle sway
+    const head  = vrm.humanoid?.getNormalizedBoneNode('head')
+    const spine = vrm.humanoid?.getNormalizedBoneNode('spine')
+    const sway = Math.sin(t * 0.6) * 0.015          // breathing sway
+    if (head) {
+      head.rotation.x += (pose.headPitch - head.rotation.x) * 0.08
+      head.rotation.y += (pose.headYaw + sway - head.rotation.y) * 0.08
+      head.rotation.z += (pose.headRoll - head.rotation.z) * 0.08
+    }
+    if (spine) {
+      spine.rotation.x += (pose.spinePitch + Math.sin(t * 0.9) * 0.008
+                           - spine.rotation.x) * 0.06
+    }
+
+    vrm.update(delta)
   }
+
+  renderer.render(scene, camera)
 }
 
-// ── Live2D model loading ──────────────────────────────────────────────────
+// ── VRM model loading ─────────────────────────────────────────────────────
 async function loadModel() {
+  const loader = new GLTFLoader()
+  loader.register((parser) => new VRMLoaderPlugin(parser))
+
+  let gltf
   try {
-    model = await Live2DModel.from(MODEL_PATH, { autoInteract: false })
+    gltf = await loader.loadAsync(MODEL_PATH)
   } catch (err) {
+    console.error('[avatar] load failed:', err)
     showError(
       'Avatar model not found.<br>' +
-      'Follow <b>ui/README.md</b> to download the Hiyori model, then refresh.'
+      'Expected a VRM file at <b>ui/public' + MODEL_PATH + '</b> — see ui/README.md.'
     )
     return
   }
 
-  pixiApp.stage.addChild(model)
-  fitModel()
+  vrm = gltf.userData.vrm
+  // Perf helpers recommended by three-vrm
+  VRMUtils.removeUnnecessaryVertices(gltf.scene)
+  VRMUtils.combineSkeletons(gltf.scene)
+  // VRM 0.x models face +Z; rotate to face the camera
+  VRMUtils.rotateVRM0(vrm)
 
-  // Resize handler
-  window.addEventListener('resize', fitModel)
+  scene.add(vrm.scene)
 
-  // Start idle motion
+  // Relax the default T-pose: lower both arms to the sides
+  for (const side of ['left', 'right']) {
+    const upperArm = vrm.humanoid?.getNormalizedBoneNode(`${side}UpperArm`)
+    if (upperArm) upperArm.rotation.z = side === 'left' ? 1.15 : -1.15
+  }
+
   applyState('idle')
 }
 
-function fitModel() {
-  if (!model) return
-  const w = pixiApp.view.width
-  const h = pixiApp.view.height
-  const scale = Math.min(w * 0.85 / model.width, h * 0.92 / model.height)
-  model.scale.set(scale)
-  model.x = (w - model.width  * scale) / 2
-  model.y = (h - model.height * scale) / 2 - h * 0.02
+// ── State machine ─────────────────────────────────────────────────────────
+// Sets pose targets (eased per frame in onTick) and VRM expressions per state.
+let didntCatchTimer = null
+
+function setExpression(name, value) {
+  try { vrm?.expressionManager?.setValue(name, value) } catch { /* absent */ }
 }
 
-// ── State machine ─────────────────────────────────────────────────────────
+function resetExpressions() {
+  for (const n of ['happy', 'sad', 'surprised', 'relaxed']) setExpression(n, 0)
+}
+
 function applyState(newState) {
   state = newState
 
@@ -117,42 +194,39 @@ function applyState(newState) {
   // State label
   labelEl.textContent = STATE_LABELS[newState] ?? ''
 
-  if (!model) return
+  if (!vrm) return
+  if (didntCatchTimer) { clearTimeout(didntCatchTimer); didntCatchTimer = null }
+  resetExpressions()
 
-  try {
-    switch (newState) {
-      case 'idle':
-        model.motion('Idle', 0, MotionPriority.IDLE)
-        break
-      case 'listening':
-        // Lean-in effect: tilt body parameters slightly
-        model.motion('Idle', 0, MotionPriority.IDLE)
-        model.internalModel.coreModel.setParameterValueById('ParamAngleX', -5)
-        model.internalModel.coreModel.setParameterValueById('ParamBodyAngleX', -3)
-        break
-      case 'thinking':
-        model.motion('Idle', 0, MotionPriority.IDLE)
-        model.internalModel.coreModel.setParameterValueById('ParamAngleY', 10)
-        break
-      case 'speaking':
-        // Amplitude loop handles mouth; reset any tilt
-        model.motion('TapBody', 0, MotionPriority.NORMAL)
-        model.internalModel.coreModel.setParameterValueById('ParamAngleX', 0)
-        model.internalModel.coreModel.setParameterValueById('ParamAngleY', 0)
-        model.internalModel.coreModel.setParameterValueById('ParamBodyAngleX', 0)
-        break
-      case 'didnt_catch':
-        model.motion('Idle', 0, MotionPriority.IDLE)
-        // Friendly head tilt
-        model.internalModel.coreModel.setParameterValueById('ParamAngleZ', 15)
-        setTimeout(() => {
-          if (model) {
-            try { model.internalModel.coreModel.setParameterValueById('ParamAngleZ', 0) } catch {}
-          }
-        }, 2500)
-        break
-    }
-  } catch { /* param/motion not available in this model — silently skip */ }
+  switch (newState) {
+    case 'idle':
+      Object.assign(pose, { headPitch: 0, headRoll: 0, headYaw: 0, spinePitch: 0 })
+      setExpression('relaxed', 0.25)
+      break
+    case 'listening':
+      // Lean in attentively
+      Object.assign(pose, { headPitch: 0.10, headRoll: 0, headYaw: 0, spinePitch: 0.05 })
+      setExpression('happy', 0.3)
+      break
+    case 'thinking':
+      // Look up, pondering
+      Object.assign(pose, { headPitch: -0.12, headRoll: 0.05, headYaw: 0.08, spinePitch: 0 })
+      break
+    case 'speaking':
+      // Neutral pose; amplitude loop drives the mouth
+      Object.assign(pose, { headPitch: 0, headRoll: 0, headYaw: 0, spinePitch: 0 })
+      setExpression('happy', 0.4)
+      break
+    case 'didnt_catch':
+      // Friendly head tilt, then back to neutral
+      Object.assign(pose, { headPitch: 0.05, headRoll: 0.25, headYaw: 0, spinePitch: 0 })
+      setExpression('surprised', 0.5)
+      didntCatchTimer = setTimeout(() => {
+        Object.assign(pose, { headPitch: 0, headRoll: 0, headYaw: 0, spinePitch: 0 })
+        resetExpressions()
+      }, 2500)
+      break
+  }
 }
 
 // ── Text UI helpers ───────────────────────────────────────────────────────
@@ -390,6 +464,6 @@ function setActiveProfile(slug) {
 }
 
 // ── Bootstrap ────────────────────────────────────────────────
-initPixi()
+initThree()
 connectWS()
 loadModel()   // async; non-blocking
