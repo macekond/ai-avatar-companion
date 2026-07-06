@@ -197,7 +197,41 @@ Background colour shifts with each state.
 - ✅ **Phase 1** — Text chat, sentence-streaming LLM pipeline
 - ✅ **Phase 2** — Voice loop: faster-whisper STT + Piper TTS
 - ✅ **Phase 3** — Live2D avatar (Hiyori placeholder) + WebSocket bridge
-- ⬜ **Phase 4** — Polish: Tauri shell, content filter, session logging, custom Nova model
+- 🔶 **Phase 4** — Polish: ✅ Tauri shell / macOS bundle · ⬜ content filter, session limits, custom Nova model
+
+---
+
+## Building the macOS app (DMG)
+
+One-time prerequisites:
+
+```bash
+xcode-select --install                                   # Apple CLT
+curl --proto '=https' -sSf https://sh.rustup.rs | sh     # Rust toolchain
+python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
+npm --prefix ui install
+```
+
+Build:
+
+```bash
+make bundle
+# → src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/Nova_<version>_aarch64.dmg
+```
+
+The pipeline: `vite build` → PyInstaller freezes the Python server into a
+sidecar binary → Tauri bundles both into `Nova.app` and packs a DMG.
+
+Notes for recipients (Apple Silicon Macs only):
+
+- The app is **ad-hoc signed** — the first launch needs right-click → Open
+  (or `xattr -dr com.apple.quarantine /Applications/Nova.app`).
+- **Ollama** must be installed separately from [ollama.com](https://ollama.com)
+  with `ollama pull llama3.2:3b`. Nova shows a friendly setup screen until
+  it's available.
+- First launch downloads ~600 MB of voice models; later launches are offline.
+- Config lives at `~/.ai-avatar/config.yaml` (seeded on first run); profiles
+  and logs under `~/.ai-avatar/`.
 
 ---
 

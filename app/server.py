@@ -800,6 +800,14 @@ async def _main(profile_slug: Optional[str] = None, port: int = PORT,
         log.info("stdin closed — parent exited, shutting down")
         loop.call_soon_threadsafe(
             lambda: stop.done() or stop.set_result(None))
+        # Clean shutdown can be blocked by non-daemon worker threads (e.g.
+        # a model download in progress). The parent is gone — nothing is
+        # worth waiting for. Hard-exit if we're still alive shortly after.
+        import os
+        import time
+        time.sleep(10.0)
+        log.warning("shutdown still pending 10 s after stdin EOF — exiting")
+        os._exit(0)
 
     if managed:
         threading.Thread(target=_watch_stdin, daemon=True).start()

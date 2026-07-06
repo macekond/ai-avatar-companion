@@ -30,9 +30,21 @@ cp packaging/dist/nova-server "src-tauri/binaries/nova-server-${TRIPLE}"
 echo "==> [3/3] Building Tauri app + DMG"
 source "$HOME/.cargo/env"
 # Run from the repo root — the CLI locates src-tauri/ relative to cwd.
-./ui/node_modules/.bin/tauri build --target "${TRIPLE}"
+# Bundle only the .app: Tauri's own DMG script drives Finder via
+# AppleScript and fails in headless shells; hdiutil below is reliable.
+./ui/node_modules/.bin/tauri build --target "${TRIPLE}" --bundles app
 
-DMG=$(ls src-tauri/target/${TRIPLE}/release/bundle/dmg/*.dmg | head -1)
+BUNDLE_DIR="src-tauri/target/${TRIPLE}/release/bundle"
+VERSION=$(python3 -c "import json;print(json.load(open('src-tauri/tauri.conf.json'))['version'])")
+DMG="${BUNDLE_DIR}/dmg/Nova_${VERSION}_aarch64.dmg"
+
+mkdir -p "${BUNDLE_DIR}/dmg"
+STAGING=$(mktemp -d)
+cp -R "${BUNDLE_DIR}/macos/Nova.app" "${STAGING}/"
+ln -s /Applications "${STAGING}/Applications"
+hdiutil create -volname "Nova" -srcfolder "${STAGING}" -ov -format UDZO "${DMG}"
+rm -rf "${STAGING}"
+
 echo
 echo "Done: ${DMG}"
 echo
