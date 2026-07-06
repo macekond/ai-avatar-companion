@@ -29,8 +29,8 @@ Server → browser:
   {"type": "amplitude",     "value": 0–1}
 
 Run:
-    python app/server.py
-    python app/server.py --profile mia
+    python -m app.server
+    python -m app.server --profile mia
 """
 from __future__ import annotations
 
@@ -60,6 +60,23 @@ log = logging.getLogger("nova.server")
 
 HOST = "localhost"
 PORT = 8765
+
+# Origin allow-list for the WebSocket server. Browsers permit cross-origin
+# WebSocket connections to localhost, so any webpage the user has open could
+# otherwise activate the microphone and read transcripts. Only the UI's dev
+# and preview origins are allowed. `None` (no Origin header) is allowed
+# because it identifies non-browser clients — local processes that could
+# forge any header anyway; the Origin check only defends the browser threat
+# model. The string "null" is deliberately NOT allowed: sandboxed iframes on
+# arbitrary websites send `Origin: null`, so allowing it would reopen the
+# cross-origin hole.
+ALLOWED_ORIGINS = [
+    "http://localhost:5173",   # Vite dev
+    "http://127.0.0.1:5173",
+    "http://localhost:4173",   # Vite preview
+    "http://127.0.0.1:4173",
+    None,                      # non-browser clients (no Origin header)
+]
 
 _REENGAGEMENT_HINT = (
     "The child seems quiet. Based on the memory context in the system prompt, "
@@ -282,6 +299,11 @@ async def _session(
     import time as _time
     extractor = MemoryExtractor(config.models.llm.model) if mem_mgr else None
 
+    # Fire-and-forget extraction tasks, awaited on teardown so the last
+    # turn's telemetry (written inside them) isn't lost and the final
+    # memory save doesn't race a still-running background save.
+    pending_tasks: list[asyncio.Task] = []
+
     # ── Load / initialise memory ─────────────────────────────────────────
     memory: Optional[ChildMemory] = mem_mgr.load() if mem_mgr else None
 
@@ -335,9 +357,13 @@ async def _session(
 
             # ── Profile switch ───────────────────────────────────────────
             if mtype == "switch_profile" and mem_mgr:
-                new_slug = msg.get("slug", "").strip()
-                if not new_slug:
+                # Never trust a client-supplied slug: run it through the same
+                # sanitizer the UI uses so a crafted slug can't escape the
+                # profiles directory (path traversal → arbitrary file write).
+                raw_slug = msg.get("slug", "")
+                if not isinstance(raw_slug, str) or not raw_slug.strip():
                     continue
+                new_slug = name_to_slug(raw_slug)
                 if memory:
                     mem_mgr.prune(memory)
                     mem_mgr.save(memory)
@@ -494,7 +520,9 @@ async def _session(
                     except Exception as exc:
                         log.debug("Memory extraction failed (non-fatal): %s", exc)
 
-                asyncio.ensure_future(asyncio.to_thread(_extract_and_save))
+                pending_tasks.append(
+                    asyncio.ensure_future(asyncio.to_thread(_extract_and_save))
+                )
 
             elif telemetry and spoken_sentences and transcript:
                 # No extractor — log turn without topic/problem metadata
@@ -511,10 +539,21 @@ async def _session(
 
     except websockets.ConnectionClosed:
         log.info("Client disconnected")
-        if mem_mgr and memory:
-            mem_mgr.prune(memory)
-            mem_mgr.save(memory)
     finally:
+        # Await pending extraction/save tasks so we don't (a) lose the last
+        # turn's telemetry (log_turn happens inside these) or (b) race the
+        # disconnect-time memory save below. asyncio.wait never raises on
+        # timeout; tasks still running after 5 s are abandoned — safe,
+        # because telemetry._write no-ops once the file handle is closed.
+        still_running = [t for t in pending_tasks if not t.done()]
+        if still_running:
+            await asyncio.wait(still_running, timeout=5.0)
+        if mem_mgr and memory:
+            try:
+                mem_mgr.prune(memory)
+                mem_mgr.save(memory)
+            except Exception as exc:
+                log.debug("Final memory save failed: %s", exc)
         if telemetry:
             telemetry.end()
             log.info("Telemetry written to %s", telemetry.log_file)
@@ -529,6 +568,10 @@ async def _main(profile_slug: Optional[str] = None) -> None:
 
     if profile_slug is None:
         profile_slug = name_to_slug(config.child.name)
+    else:
+        # Uniform invariant: no unsanitized slug ever reaches MemoryManager,
+        # whether it came from config, the CLI, or a WebSocket message.
+        profile_slug = name_to_slug(profile_slug)
 
     mem_mgr: Optional[MemoryManager] = None
     if config.memory.enabled:
@@ -555,7 +598,7 @@ async def _main(profile_slug: Optional[str] = None) -> None:
             telemetry = TelemetrySession(config.telemetry.log_dir, profile_slug)
         await _session(ws, config, stt, llm, tts, mem_mgr, telemetry)
 
-    async with websockets.serve(_handler, HOST, PORT):
+    async with websockets.serve(_handler, HOST, PORT, origins=ALLOWED_ORIGINS):
         await asyncio.Future()
 
 
