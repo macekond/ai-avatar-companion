@@ -15,6 +15,7 @@ Message protocol
 Browser → server:
   {"type": "ptt_start"}
   {"type": "ptt_stop"}
+  {"type": "stop_speak"}                     # barge-in while speaking/thinking
   {"type": "set_level",      "level": "B"}
   {"type": "switch_profile", "slug": "mia"}
 
@@ -304,12 +305,27 @@ async def _session(
     # memory save doesn't race a still-running background save.
     pending_tasks: list[asyncio.Task] = []
 
+    async def _drain_pending(timeout: float = 5.0) -> None:
+        still_running = [t for t in pending_tasks if not t.done()]
+        if still_running:
+            await asyncio.wait(still_running, timeout=timeout)
+        pending_tasks.clear()
+
+    # Level for this session — starts from config, updated by UI 'set_level'
+    # so telemetry reflects what the child is actually practising.
+    active_level = config.child.level
+
+    # The LLM pipeline is shared across WebSocket connections, so start each
+    # session with a clean history — otherwise a fresh tab (or a second child
+    # after a hot-swap) inherits whatever conversation was in progress.
+    llm.clear_history()
+
     # ── Load / initialise memory ─────────────────────────────────────────
     memory: Optional[ChildMemory] = mem_mgr.load() if mem_mgr else None
 
     # ── On-connect messages ──────────────────────────────────────────────
     log.info("Client connected")
-    await send({"type": "init", "level": config.child.level})
+    await send({"type": "init", "level": active_level})
 
     if mem_mgr:
         await send({
@@ -321,7 +337,7 @@ async def _session(
     # ── Start telemetry session ──────────────────────────────────────
     is_onboarding = mem_mgr is not None and memory is None
     if telemetry:
-        telemetry.start(level=config.child.level, is_onboarding=is_onboarding)
+        telemetry.start(level=active_level, is_onboarding=is_onboarding)
 
     # ── Onboarding or memory-loaded ──────────────────────────────────────
     if mem_mgr and memory is None:
@@ -344,15 +360,31 @@ async def _session(
     # ── Main loop ────────────────────────────────────────────────────────
     consecutive_short = 0
 
+    # Messages consumed by the barge-in watcher (or by the listening phase)
+    # that belong to the main loop are buffered here and drained before the
+    # next real read from the socket.
+    buffered_msgs: list[str] = []
+
+    async def _next_raw() -> str:
+        if buffered_msgs:
+            return buffered_msgs.pop(0)
+        return await ws.__anext__()
+
     try:
-        async for raw in ws:
+        while True:
+            try:
+                raw = await _next_raw()
+            except StopAsyncIteration:
+                break
             msg = json.loads(raw)
             mtype = msg.get("type")
 
             # ── Level change ─────────────────────────────────────────────
             if mtype == "set_level":
-                llm.set_level(msg.get("level", "A"))
-                log.info("Level changed to: %s", msg.get("level"))
+                new_level = msg.get("level", "A")
+                llm.set_level(new_level)
+                active_level = new_level
+                log.info("Level changed to: %s", new_level)
                 continue
 
             # ── Profile switch ───────────────────────────────────────────
@@ -364,6 +396,11 @@ async def _session(
                 if not isinstance(raw_slug, str) or not raw_slug.strip():
                     continue
                 new_slug = name_to_slug(raw_slug)
+                # Drain in-flight extraction tasks BEFORE swapping profiles:
+                # a slow task from the previous child would otherwise call
+                # llm.set_memory with the old child's memory after the swap,
+                # leaking one child's context into another's conversation.
+                await _drain_pending()
                 if memory:
                     mem_mgr.prune(memory)
                     mem_mgr.save(memory)
@@ -401,10 +438,25 @@ async def _session(
             await send({"type": "state", "state": "listening"})
             stop_rec = threading.Event()
             rec_task = loop.run_in_executor(None, _record, stop_rec)
+            # Read until ptt_stop; anything else that arrives mid-recording
+            # (e.g. a set_level click) is stashed and replayed to the main
+            # loop after this turn instead of being swallowed.
+            stashed: list[str] = []
+            got_stop = False
             try:
-                raw2 = await asyncio.wait_for(ws.recv(), timeout=30.0)
-                json.loads(raw2)  # ptt_stop
+                while True:
+                    if buffered_msgs:
+                        raw2 = buffered_msgs.pop(0)
+                    else:
+                        raw2 = await asyncio.wait_for(ws.recv(), timeout=30.0)
+                    if json.loads(raw2).get("type") == "ptt_stop":
+                        got_stop = True
+                        break
+                    stashed.append(raw2)
             except asyncio.TimeoutError:
+                pass
+            buffered_msgs.extend(stashed)
+            if not got_stop:
                 stop_rec.set()
                 await send({"type": "state", "state": "idle"})
                 continue
@@ -455,6 +507,14 @@ async def _session(
 
             _llm_t0 = _time.monotonic()
             _llm_ttft_ms: list[int] = []  # filled by first sentence
+            _first_audio_ms: list[int] = []  # release → first TTS frame
+
+            def _tracked_amp(value: float) -> None:
+                if not _first_audio_ms and value > 0:
+                    _first_audio_ms.append(
+                        int((_time.monotonic() - _ptt_stop_t) * 1000)
+                    )
+                amplitude_cb(value)
 
             def _run_pipeline() -> None:
                 try:
@@ -465,17 +525,57 @@ async def _session(
                             break
                         spoken_sentences.append(sentence)
                         send_from_thread({"type": "sentence", "text": sentence})
-                        tts.speak_streaming(sentence, amplitude_cb, stop_speaking)
+                        tts.speak_streaming(sentence, _tracked_amp, stop_speaking)
                         send_from_thread({"type": "amplitude", "value": 0.0})
                 except RuntimeError as exc:
                     log.error("Pipeline error: %s", exc)
                     send_from_thread({"type": "sentence",
                                       "text": "My brain is napping — try again!"})
 
+            # Barge-in: while the pipeline runs, watch the socket for a
+            # `stop_speak` message. When one arrives, set the shared stop
+            # event so TTS aborts and the pipeline breaks after the current
+            # sentence. Other messages are buffered for the main loop.
+            # (Catching asyncio.TimeoutError also lets MockWebSocket-based
+            # tests terminate the watcher when their message queue drains.)
+            async def _watch_for_stop() -> None:
+                while True:
+                    try:
+                        raw3 = await ws.recv()
+                    except (asyncio.TimeoutError,
+                            websockets.ConnectionClosed,
+                            StopAsyncIteration):
+                        return
+                    try:
+                        m = json.loads(raw3)
+                    except (ValueError, TypeError):
+                        continue
+                    if m.get("type") == "stop_speak":
+                        stop_speaking.set()
+                        return
+                    buffered_msgs.append(raw3)
+
             _turn_t0 = _time.monotonic()
-            await asyncio.to_thread(_run_pipeline)
+            pipeline_task = asyncio.create_task(asyncio.to_thread(_run_pipeline))
+            watcher_task = asyncio.create_task(_watch_for_stop())
+            done, _ = await asyncio.wait(
+                {pipeline_task, watcher_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if watcher_task not in done:
+                watcher_task.cancel()
+                try:
+                    await watcher_task
+                except asyncio.CancelledError:
+                    pass
+            if pipeline_task not in done:
+                # Watcher fired first: wait for the pipeline to unwind (TTS
+                # honors stop_speaking; loop breaks after current sentence).
+                await pipeline_task
+
             total_ms = int((_time.monotonic() - _ptt_stop_t) * 1000)
             llm_ttft_ms = _llm_ttft_ms[0] if _llm_ttft_ms else 0
+            first_audio_ms = _first_audio_ms[0] if _first_audio_ms else 0
             await send({"type": "state", "state": "idle"})
 
             # ── POST-TURN EXTRACTION + TELEMETRY ───────────────────────────
@@ -487,8 +587,9 @@ async def _session(
                 _tel_ref = telemetry
                 _stt_ms_ref = stt_ms
                 _ttft_ref = llm_ttft_ms
+                _first_audio_ref = first_audio_ms
                 _total_ref = total_ms
-                _level_ref = config.child.level
+                _level_ref = active_level
                 _reeng_ref = reengagement_fired
                 _wc_ref = len(transcript.split())
 
@@ -510,6 +611,7 @@ async def _session(
                                 reply=full_reply,
                                 stt_ms=_stt_ms_ref,
                                 llm_ttft_ms=_ttft_ref,
+                                first_audio_ms=_first_audio_ref,
                                 total_ms=_total_ref,
                                 level=_level_ref,
                                 topic=result.topic,
@@ -531,8 +633,9 @@ async def _session(
                     reply=" ".join(spoken_sentences),
                     stt_ms=stt_ms,
                     llm_ttft_ms=llm_ttft_ms,
+                    first_audio_ms=first_audio_ms,
                     total_ms=total_ms,
-                    level=config.child.level,
+                    level=active_level,
                     engaged=len(transcript.split()) > config.memory.short_response_words,
                     reengagement_fired=reengagement_fired,
                 )
@@ -542,12 +645,10 @@ async def _session(
     finally:
         # Await pending extraction/save tasks so we don't (a) lose the last
         # turn's telemetry (log_turn happens inside these) or (b) race the
-        # disconnect-time memory save below. asyncio.wait never raises on
-        # timeout; tasks still running after 5 s are abandoned — safe,
-        # because telemetry._write no-ops once the file handle is closed.
-        still_running = [t for t in pending_tasks if not t.done()]
-        if still_running:
-            await asyncio.wait(still_running, timeout=5.0)
+        # disconnect-time memory save below. Tasks still running after the
+        # timeout are abandoned — safe, because telemetry._write no-ops
+        # once the file handle is closed.
+        await _drain_pending()
         if mem_mgr and memory:
             try:
                 mem_mgr.prune(memory)

@@ -14,8 +14,12 @@ session_start:
 turn:
   ts, event, session_id, profile, turn_n, level
   child_said, avatar_said, word_count
-  stt_ms, llm_ttft_ms, total_ms
+  stt_ms, llm_ttft_ms, first_audio_ms, total_ms
   topic, problem, engaged, reengagement_fired
+
+  first_audio_ms measures release-to-first-TTS-audio latency — the number
+  the design's "≤ 1.5 s" target actually refers to. total_ms is end of full
+  reply and includes speech playback.
 
 didnt_catch:
   ts, event, session_id, profile, turn_n
@@ -24,6 +28,7 @@ session_end:
   ts, event, session_id, profile, duration_s
   turns, didnt_catch_count, reengagement_count
   avg_word_count, avg_total_ms, avg_stt_ms, avg_llm_ttft_ms
+  avg_first_audio_ms
   engaged_turns, engaged_ratio
   topics, problems
 
@@ -73,6 +78,7 @@ class TelemetrySession:
         self._total_ms_list: list[int] = []
         self._stt_ms_list: list[int] = []
         self._llm_ttft_ms_list: list[int] = []
+        self._first_audio_ms_list: list[int] = []
         self._engaged_turns = 0
         self._topics: list[str] = []
         self._problems: list[str] = []
@@ -127,6 +133,7 @@ class TelemetrySession:
             "avg_total_ms": avg(self._total_ms_list),
             "avg_stt_ms": avg(self._stt_ms_list),
             "avg_llm_ttft_ms": avg(self._llm_ttft_ms_list),
+            "avg_first_audio_ms": avg(self._first_audio_ms_list),
             "engaged_turns": self._engaged_turns,
             "engaged_ratio": (
                 round(self._engaged_turns / self._turn_n, 2)
@@ -150,6 +157,7 @@ class TelemetrySession:
         stt_ms: int,
         llm_ttft_ms: int,
         total_ms: int,
+        first_audio_ms: int = 0,
         level: str = "A",
         topic: Optional[str] = None,
         problem: Optional[str] = None,
@@ -165,6 +173,8 @@ class TelemetrySession:
         self._total_ms_list.append(total_ms)
         self._stt_ms_list.append(stt_ms)
         self._llm_ttft_ms_list.append(llm_ttft_ms)
+        if first_audio_ms > 0:
+            self._first_audio_ms_list.append(first_audio_ms)
         if engaged:
             self._engaged_turns += 1
         if reengagement_fired:
@@ -186,6 +196,7 @@ class TelemetrySession:
             "word_count": wc,
             "stt_ms": stt_ms,
             "llm_ttft_ms": llm_ttft_ms,
+            "first_audio_ms": first_audio_ms,
             "total_ms": total_ms,
             "topic": topic,
             "problem": problem,

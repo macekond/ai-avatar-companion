@@ -245,6 +245,10 @@ window.addEventListener('keydown', (e) => {
   if (state === 'idle' && !pttActive) {
     pttActive = true
     wsSend({ type: 'ptt_start' })
+  } else if (state === 'speaking' || state === 'thinking') {
+    // Barge-in: pressing Space while the avatar is speaking or thinking
+    // interrupts and hands control back to the child immediately.
+    wsSend({ type: 'stop_speak' })
   }
 })
 
