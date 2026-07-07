@@ -528,11 +528,14 @@ levelBtns.forEach(btn => {
 // ── Voice selector ────────────────────────────────────────────────
 const voiceSelectorEl = document.getElementById('voice-selector')
 let activeVoice = null
+const voiceLabels = new Map()   // id → display label (for the toast)
 
 function renderVoiceSelector(voices, current) {
   activeVoice = current
   voiceSelectorEl.innerHTML = ''
+  voiceLabels.clear()
   ;(voices || []).forEach(v => {
+    voiceLabels.set(v.id, v.label)
     const btn = document.createElement('button')
     btn.className = 'chip voice-chip' + (v.id === current ? ' active' : '')
     btn.textContent = v.label
@@ -547,11 +550,51 @@ function renderVoiceSelector(voices, current) {
 
 function updateVoiceStatus(state, voice) {
   const chips = voiceSelectorEl.querySelectorAll('.voice-chip')
-  chips.forEach(c => c.classList.toggle('loading', state === 'loading' && c.dataset.voice === voice))
-  if (state === 'ready') {
+  const busy = state === 'loading' || state === 'downloading'
+  chips.forEach(c => {
+    const isTarget = c.dataset.voice === voice
+    c.classList.toggle('loading', busy && isTarget)
+    c.classList.toggle('downloading', state === 'downloading' && isTarget)
+  })
+
+  const name = (voiceLabels.get(voice) || 'voice').split(' —')[0]
+  if (state === 'downloading') {
+    showToast(`⬇ Downloading ${name}'s voice… (one-time, ~60 MB)`, { spinner: true, persist: true })
+  } else if (state === 'loading') {
+    showToast(`Switching to ${name}…`, { spinner: true, persist: true })
+  } else if (state === 'ready') {
     activeVoice = voice
     chips.forEach(c => c.classList.toggle('active', c.dataset.voice === voice))
+    showToast(`✓ ${name}'s voice ready`, { duration: 1800 })
+  } else if (state === 'error') {
+    showToast(`Couldn't load ${name}'s voice — kept the previous one`, { duration: 3000 })
   }
+}
+
+// ── Toast (bottom-center transient banner) ────────────────────────
+let toastEl = null
+let toastTimer = null
+
+function showToast(text, { spinner = false, persist = false, duration = 2500 } = {}) {
+  if (!toastEl) {
+    toastEl = document.createElement('div')
+    toastEl.id = 'toast'
+    document.body.appendChild(toastEl)
+  }
+  if (toastTimer) { clearTimeout(toastTimer); toastTimer = null }
+  toastEl.innerHTML = ''
+  if (spinner) {
+    const sp = document.createElement('span')
+    sp.className = 'toast-spinner'
+    toastEl.appendChild(sp)
+  }
+  toastEl.appendChild(document.createTextNode(text))
+  toastEl.classList.add('visible')
+  if (!persist) toastTimer = setTimeout(hideToast, duration)
+}
+
+function hideToast() {
+  if (toastEl) toastEl.classList.remove('visible')
 }
 
 // ── Profile selector ──────────────────────────────────────────────

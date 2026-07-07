@@ -234,6 +234,11 @@ class _SystemTTSBackend:
 # Voice downloader
 # ---------------------------------------------------------------------------
 
+def voice_is_cached(voice_name: str) -> bool:
+    """True if the voice model is already downloaded (no fetch needed)."""
+    return (_VOICE_CACHE / f"{voice_name}.onnx").exists()
+
+
 def _ensure_voice(voice_name: str) -> Path:
     """Return path to the local .onnx model, downloading it if needed.
 
