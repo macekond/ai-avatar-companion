@@ -9,8 +9,20 @@
   <!-- three.js renders into this canvas -->
   <canvas id="canvas"></canvas>
 
-  <!-- Settings gear — top-right corner -->
+  <!-- Top-right controls -->
+  <button id="transcript-btn" aria-label="Conversation" title="Conversation">📝</button>
   <button id="settings-gear" aria-label="Settings" title="Settings">⚙</button>
+
+  <!-- Transcript panel (conversation review) -->
+  <div id="transcript-panel" hidden role="dialog" aria-label="Conversation">
+    <div class="settings-header">
+      <span>Conversation</span>
+      <button id="transcript-close" aria-label="Close conversation">✕</button>
+    </div>
+    <div id="transcript-list">
+      <p class="transcript-empty">Your chat with Nova will appear here.</p>
+    </div>
+  </div>
 
   <!-- Settings panel (hidden until the gear is tapped) -->
   <div id="settings-panel" hidden role="dialog" aria-label="Settings">

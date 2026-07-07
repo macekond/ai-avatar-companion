@@ -161,6 +161,8 @@ Tap the ⚙ gear (top-right) to open the settings panel:
 
 Voice and level are persisted to `~/.ai-avatar/settings.json` and applied on the next launch, so they survive restarts without editing `config.yaml`.
 
+Tap the 📝 button (top-right) to open the **Conversation** panel — a running transcript of the session where each grammar fix is shown inline (e.g. ~~goed~~ → **went** *(past tense)*), so a parent or child can review what was gently corrected.
+
 Only permissively-licensed voices (public domain / CC0) are offered — see [Licence notes](#licence-notes).
 
 ---
