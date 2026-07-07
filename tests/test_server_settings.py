@@ -57,10 +57,21 @@ class TestSettingsOnConnect:
         assert "voice" in s[0]
 
     async def test_voice_list_only_permissive_licenses(self):
-        # Guard against re-adding the research-only lessac voice.
+        # Strict allowlist: every shipped voice must be public-domain / CC0.
+        # Adding any voice here without confirming its license fails the test.
+        # Verified licenses (rhasspy/piper-voices MODEL_CARD):
+        #   kristin  public domain   ljspeech public domain
+        #   joe      CC0             norman   public domain
+        PERMISSIVE = {
+            "en_US-kristin-medium",
+            "en_US-ljspeech-medium",
+            "en_US-joe-medium",
+            "en_US-norman-medium",
+        }
         ids = {v["id"] for v in AVAILABLE_VOICES}
+        assert ids <= PERMISSIVE, f"unvetted voice(s): {ids - PERMISSIVE}"
+        # lessac is Blizzard-licensed (research only) — must never return.
         assert "en_US-lessac-medium" not in ids
-        assert "en_US-kristin-medium" in ids
 
 
 # ── set_voice handler ──────────────────────────────────────────────────────
