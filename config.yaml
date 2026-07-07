@@ -42,7 +42,7 @@ models:
     conversation_buffer_exchanges: 6  # rolling window of exchange pairs kept in context
   tts:
     engine: piper
-    voice: en_US-lessac-medium
+    voice: en_US-kristin-medium   # public-domain, bright/younger; changeable in Settings
     length_scale: 1.1           # slightly slower speech for a learner
     fallback:
       - engine: xtts-v2

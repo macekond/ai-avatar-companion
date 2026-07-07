@@ -17,6 +17,7 @@ Browser → server:
   {"type": "ptt_stop"}
   {"type": "stop_speak"}                     # barge-in while speaking/thinking
   {"type": "set_level",      "level": "B"}
+  {"type": "set_voice",      "voice": "en_US-kristin-medium"}
   {"type": "switch_profile", "slug": "mia"}
 
 Server → browser:
@@ -51,7 +52,19 @@ load_dotenv()
 
 from app.config import Config, default_config_path
 from app.memory import ChildMemory, ChildProfile, MemoryManager, name_to_slug
+from app.settings import load_settings, save_setting
 from app.setup import check_ollama
+
+# Curated voice list for the Settings panel. Deliberately limited to voices
+# with permissive licenses (public domain / CC0) — the previous default
+# en_US-lessac was Blizzard-licensed (research only) and is excluded.
+AVAILABLE_VOICES = [
+    {"id": "en_US-kristin-medium", "label": "Kristin — bright, younger (US)"},
+    {"id": "en_US-ljspeech-medium", "label": "LJ — calm, clear (US)"},
+    {"id": "en_US-joe-medium",      "label": "Joe — friendly male (US)"},
+    {"id": "en_US-norman-medium",   "label": "Norman — deeper male (US)"},
+]
+_VOICE_IDS = {v["id"] for v in AVAILABLE_VOICES}
 from app.memory_extractor import MemoryExtractor
 from app.pipeline.llm import LLMPipeline
 from app.pipeline.stt import STTPipeline, SAMPLE_RATE
@@ -349,6 +362,14 @@ async def _session(
     log.info("Client connected")
     await send({"type": "init", "level": active_level})
 
+    # Settings panel state: available voices + current selection + level.
+    await send({
+        "type": "settings",
+        "voices": AVAILABLE_VOICES,
+        "voice": config.models.tts.voice,
+        "level": active_level,
+    })
+
     if mem_mgr:
         await send({
             "type": "profiles",
@@ -412,7 +433,26 @@ async def _session(
                 new_level = msg.get("level", "A")
                 llm.set_level(new_level)
                 active_level = new_level
+                save_setting("level", new_level)
                 log.info("Level changed to: %s", new_level)
+                continue
+
+            # ── Voice change ─────────────────────────────────────────────
+            if mtype == "set_voice":
+                new_voice = msg.get("voice", "")
+                if new_voice not in _VOICE_IDS:
+                    continue
+                await send({"type": "voice_status", "state": "loading",
+                            "voice": new_voice})
+                # Reloading loads (and may download) the model — off the loop.
+                ok = await asyncio.to_thread(tts.reload_voice, new_voice)
+                if ok:
+                    config.models.tts.voice = new_voice
+                    save_setting("voice", new_voice)
+                    log.info("Voice changed to: %s", new_voice)
+                await send({"type": "voice_status",
+                            "state": "ready" if ok else "error",
+                            "voice": tts.current_voice or new_voice})
                 continue
 
             # ── Profile switch ───────────────────────────────────────────
@@ -701,6 +741,13 @@ async def _session(
 async def _main(profile_slug: Optional[str] = None, port: int = PORT,
                 managed: bool = False) -> None:
     config = Config.load(str(default_config_path()))
+
+    # Apply persisted user settings (Settings panel) over config defaults.
+    _saved = load_settings()
+    if _saved.get("voice") in _VOICE_IDS:
+        config.models.tts.voice = _saved["voice"]
+    if _saved.get("level"):
+        config.child.level = _saved["level"]
 
     if profile_slug is None:
         profile_slug = name_to_slug(config.child.name)

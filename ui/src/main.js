@@ -364,6 +364,13 @@ function connectWS() {
           showSetupOverlay(msg.phase, msg.detail)
         }
         break
+      case 'settings':
+        renderVoiceSelector(msg.voices, msg.voice)
+        if (msg.level) setActiveLevel(msg.level)
+        break
+      case 'voice_status':
+        updateVoiceStatus(msg.state, msg.voice)
+        break
     }
   }
 
@@ -407,8 +414,23 @@ window.addEventListener('keyup', (e) => {
   }
 })
 
+// ── Settings panel (gear → Kid / Voice / Level) ───────────────────
+const gearEl        = document.getElementById('settings-gear')
+const panelEl       = document.getElementById('settings-panel')
+const closeEl       = document.getElementById('settings-close')
+
+function toggleSettings(open) {
+  panelEl.hidden = open === undefined ? !panelEl.hidden : !open
+  gearEl.classList.toggle('active', !panelEl.hidden)
+}
+gearEl.addEventListener('click', () => toggleSettings())
+closeEl.addEventListener('click', () => toggleSettings(false))
+window.addEventListener('keydown', (e) => {
+  if (e.code === 'Escape' && !panelEl.hidden) toggleSettings(false)
+})
+
 // ── Level selector ────────────────────────────────────────────────
-const levelBtns = document.querySelectorAll('.level-btn')
+const levelBtns = document.querySelectorAll('#level-selector .chip')
 
 function setActiveLevel(level) {
   levelBtns.forEach(btn => {
@@ -424,6 +446,35 @@ levelBtns.forEach(btn => {
   })
 })
 
+// ── Voice selector ────────────────────────────────────────────────
+const voiceSelectorEl = document.getElementById('voice-selector')
+let activeVoice = null
+
+function renderVoiceSelector(voices, current) {
+  activeVoice = current
+  voiceSelectorEl.innerHTML = ''
+  ;(voices || []).forEach(v => {
+    const btn = document.createElement('button')
+    btn.className = 'chip voice-chip' + (v.id === current ? ' active' : '')
+    btn.textContent = v.label
+    btn.dataset.voice = v.id
+    btn.addEventListener('click', () => {
+      if (v.id === activeVoice) return
+      wsSend({ type: 'set_voice', voice: v.id })
+    })
+    voiceSelectorEl.appendChild(btn)
+  })
+}
+
+function updateVoiceStatus(state, voice) {
+  const chips = voiceSelectorEl.querySelectorAll('.voice-chip')
+  chips.forEach(c => c.classList.toggle('loading', state === 'loading' && c.dataset.voice === voice))
+  if (state === 'ready') {
+    activeVoice = voice
+    chips.forEach(c => c.classList.toggle('active', c.dataset.voice === voice))
+  }
+}
+
 // ── Profile selector ──────────────────────────────────────────────
 const profileSelectorEl = document.getElementById('profile-selector')
 
@@ -432,7 +483,7 @@ function renderProfileSelector(profiles, activeSlug) {
 
   profiles.forEach(slug => {
     const btn = document.createElement('button')
-    btn.className = 'level-btn' + (slug === activeSlug ? ' active' : '')
+    btn.className = 'chip' + (slug === activeSlug ? ' active' : '')
     // Display name: capitalize slug (underscores → spaces)
     btn.textContent = slug.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
     btn.dataset.slug = slug
@@ -444,7 +495,7 @@ function renderProfileSelector(profiles, activeSlug) {
 
   // '+' button to add a new child (triggers onboarding for a fresh slug)
   const addBtn = document.createElement('button')
-  addBtn.className = 'level-btn'
+  addBtn.className = 'chip'
   addBtn.textContent = '+'
   addBtn.title = 'Add a new child'
   addBtn.addEventListener('click', () => {
@@ -458,7 +509,7 @@ function renderProfileSelector(profiles, activeSlug) {
 }
 
 function setActiveProfile(slug) {
-  profileSelectorEl.querySelectorAll('.level-btn[data-slug]').forEach(btn => {
+  profileSelectorEl.querySelectorAll('.chip[data-slug]').forEach(btn => {
     btn.classList.toggle('active', btn.dataset.slug === slug)
   })
 }

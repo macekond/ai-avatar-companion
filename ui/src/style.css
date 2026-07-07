@@ -83,35 +83,87 @@ html, body {
   opacity: 1;
 }
 
-/* ── Profile selector ─────────────────────────────────────── */
-#profile-selector {
+/* ── Settings gear ────────────────────────────────────────── */
+#settings-gear {
   position: fixed;
   top: 16px;
   right: 16px;
-  display: flex;
-  gap: 6px;
-  z-index: 30;
+  z-index: 40;
+  width: 40px;
+  height: 40px;
+  border: 1.5px solid rgba(150, 120, 90, 0.35);
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.60);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  color: #7a6a5a;
+  font-size: 1.15rem;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.15s, transform 0.2s, color 0.15s;
 }
+#settings-gear:hover { background: rgba(255, 255, 255, 0.9); color: #4a3a2a; }
+#settings-gear.active { transform: rotate(60deg); background: rgba(90, 70, 50, 0.82); color: #fff; }
 
-/* Shared pill base — profile pills use the same class as level pills */
-
-/* ── Level selector ───────────────────────────────────────── */
-#level-selector {
+/* ── Settings panel ───────────────────────────────────────── */
+#settings-panel {
   position: fixed;
-  top: 16px;
-  left: 16px;
+  top: 64px;
+  right: 16px;
+  z-index: 39;
+  width: 260px;
+  max-width: calc(100vw - 32px);
+  padding: 16px;
+  border-radius: 16px;
+  background: rgba(255, 252, 248, 0.94);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  box-shadow: 0 12px 40px rgba(90, 60, 40, 0.22);
+  color: #5a4a3a;
+  font-size: 0.85rem;
+}
+#settings-panel[hidden] { display: none; }
+
+.settings-header {
   display: flex;
-  gap: 6px;
-  z-index: 30;
+  justify-content: space-between;
+  align-items: center;
+  font-weight: 700;
+  font-size: 0.95rem;
+  margin-bottom: 12px;
+}
+#settings-close {
+  border: none;
+  background: transparent;
+  color: #a08a76;
+  font-size: 0.9rem;
+  cursor: pointer;
+}
+#settings-close:hover { color: #4a3a2a; }
+
+.settings-section { margin-bottom: 14px; }
+.settings-section:last-child { margin-bottom: 0; }
+.settings-section h3 {
+  margin: 0 0 7px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #a08a76;
 }
 
-.level-btn {
+#profile-selector, #voice-selector, #level-selector {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+/* ── Chips (shared: profile, voice, level) ────────────────── */
+.chip {
   padding: 5px 11px;
   border: 1.5px solid rgba(150, 120, 90, 0.35);
   border-radius: 20px;
   background: rgba(255, 255, 255, 0.60);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
   color: #7a6a5a;
   font-size: 0.78rem;
   font-weight: 600;
@@ -121,19 +173,24 @@ html, body {
   user-select: none;
   -webkit-user-select: none;
 }
-
-.level-btn:hover {
+.chip:hover {
   background: rgba(255, 255, 255, 0.85);
   border-color: rgba(150, 120, 90, 0.6);
   color: #4a3a2a;
 }
-
-.level-btn.active {
+.chip.active {
   background: rgba(90, 70, 50, 0.82);
   border-color: transparent;
   color: #fff;
   transform: scale(1.05);
 }
+.voice-chip { width: 100%; text-align: left; }
+.chip.loading {
+  opacity: 0.6;
+  cursor: wait;
+  animation: chip-pulse 0.9s ease-in-out infinite;
+}
+@keyframes chip-pulse { 50% { opacity: 0.35; } }
 
 /* ── State-driven body classes ────────────────────────────────────── */
 body.listening  { background: radial-gradient(ellipse at 50% 30%, #eef8ff 0%, #d8eeff 60%, #b0d5f5 100%); }
