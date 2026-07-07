@@ -9,16 +9,36 @@
   <!-- three.js renders into this canvas -->
   <canvas id="canvas"></canvas>
 
-  <!-- Profile selector — top-right corner -->
-  <div id="profile-selector" role="group" aria-label="Child profile"></div>
+  <!-- Settings gear — top-right corner -->
+  <button id="settings-gear" aria-label="Settings" title="Settings">⚙</button>
 
-  <!-- English level selector — top-left corner -->
-  <div id="level-selector" role="group" aria-label="English level">
-    <button class="level-btn" data-level="Pre A">Pre A</button>
-    <button class="level-btn" data-level="A">A</button>
-    <button class="level-btn" data-level="B">B</button>
-    <button class="level-btn" data-level="C1">C1</button>
-    <button class="level-btn" data-level="C2">C2</button>
+  <!-- Settings panel (hidden until the gear is tapped) -->
+  <div id="settings-panel" hidden role="dialog" aria-label="Settings">
+    <div class="settings-header">
+      <span>Settings</span>
+      <button id="settings-close" aria-label="Close settings">✕</button>
+    </div>
+
+    <section class="settings-section">
+      <h3>Kid</h3>
+      <div id="profile-selector" role="group" aria-label="Child profile"></div>
+    </section>
+
+    <section class="settings-section">
+      <h3>Voice</h3>
+      <div id="voice-selector" role="group" aria-label="Voice"></div>
+    </section>
+
+    <section class="settings-section">
+      <h3>English level</h3>
+      <div id="level-selector" role="group" aria-label="English level">
+        <button class="chip" data-level="Pre A">Pre A</button>
+        <button class="chip" data-level="A">A</button>
+        <button class="chip" data-level="B">B</button>
+        <button class="chip" data-level="C1">C1</button>
+        <button class="chip" data-level="C2">C2</button>
+      </div>
+    </section>
   </div>
 
   <!-- Text overlay: sentence bubble + state label -->

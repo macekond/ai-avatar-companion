@@ -98,7 +98,7 @@ class TTSFallback:
 @dataclass
 class TTSConfig:
     engine: str = "piper"
-    voice: str = "en_US-lessac-medium"
+    voice: str = "en_US-kristin-medium"
     length_scale: float = 1.1
     fallback: list[TTSFallback] = field(default_factory=list)
 

@@ -42,7 +42,27 @@ class TTSPipeline:
     """
 
     def __init__(self, config: Config) -> None:
+        self._config = config
         self._backend = _create_backend(config)
+
+    @property
+    def current_voice(self) -> str:
+        """Voice name currently in use (or '' for the system fallback)."""
+        return getattr(self._backend, "voice_name", "")
+
+    def reload_voice(self, voice_name: str) -> bool:
+        """Swap to a different Piper voice, downloading it if needed.
+
+        Returns True on success. On failure the previous backend is kept so
+        the session keeps working with the old voice.
+        """
+        try:
+            new_backend = _PiperBackend(self._config, voice_override=voice_name)
+        except Exception as exc:
+            print(f"[TTS] Could not load voice '{voice_name}': {exc}")
+            return False
+        self._backend = new_backend
+        return True
 
     def speak(self, text: str, stop: threading.Event | None = None) -> None:
         """Synthesise *text* and play it.
@@ -93,15 +113,16 @@ def _create_backend(config: "Config"):
 class _PiperBackend:
     """Piper TTS: downloads the voice model on first use, synthesises offline."""
 
-    def __init__(self, config: "Config") -> None:
+    def __init__(self, config: "Config", voice_override: str | None = None) -> None:
         from piper.voice import PiperVoice
         from piper.config import SynthesisConfig
 
-        voice_name = config.models.tts.voice
+        voice_name = voice_override or config.models.tts.voice
         model_path = _ensure_voice(voice_name)
 
         print(f"Loading Piper voice ({voice_name})…", end="", flush=True)
         self._voice = PiperVoice.load(str(model_path))
+        self.voice_name = voice_name
         self._sample_rate: int = self._voice.config.sample_rate
         self._syn_config = SynthesisConfig(
             length_scale=config.models.tts.length_scale,
