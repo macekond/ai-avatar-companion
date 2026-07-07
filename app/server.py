@@ -68,7 +68,7 @@ _VOICE_IDS = {v["id"] for v in AVAILABLE_VOICES}
 from app.memory_extractor import MemoryExtractor
 from app.pipeline.llm import LLMPipeline
 from app.pipeline.stt import STTPipeline, SAMPLE_RATE
-from app.pipeline.tts import TTSPipeline
+from app.pipeline.tts import TTSPipeline, voice_is_cached
 from app.telemetry import TelemetrySession
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -442,8 +442,15 @@ async def _session(
                 new_voice = msg.get("voice", "")
                 if new_voice not in _VOICE_IDS:
                     continue
-                await send({"type": "voice_status", "state": "loading",
-                            "voice": new_voice})
+                # First use of a voice pulls ~60 MB from HuggingFace — tell
+                # the UI it's downloading (not just loading) so it can show a
+                # clear one-time indicator.
+                downloading = not voice_is_cached(new_voice)
+                await send({
+                    "type": "voice_status",
+                    "state": "downloading" if downloading else "loading",
+                    "voice": new_voice,
+                })
                 # Reloading loads (and may download) the model — off the loop.
                 ok = await asyncio.to_thread(tts.reload_voice, new_voice)
                 if ok:

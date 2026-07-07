@@ -81,12 +81,33 @@ class TestSetVoice:
         ws = MockWebSocket([json.dumps({"type": "set_voice",
                                         "voice": "en_US-joe-medium"})])
         tts = _mock_tts(reload_ok=True, current="en_US-joe-medium")
-        with patch("app.server.save_setting") as save:
+        with patch("app.server.save_setting") as save, \
+             patch("app.server.voice_is_cached", return_value=True):
             await _session(ws, base_config, _mock_stt(), _mock_llm(), tts)
         tts.reload_voice.assert_called_once_with("en_US-joe-medium")
         save.assert_any_call("voice", "en_US-joe-medium")
         statuses = ws.sent_of_type("voice_status")
         assert statuses[0]["state"] == "loading"
+        assert statuses[-1]["state"] == "ready"
+
+    async def test_cached_voice_reports_loading(self, base_config):
+        ws = MockWebSocket([json.dumps({"type": "set_voice",
+                                        "voice": "en_US-joe-medium"})])
+        tts = _mock_tts(reload_ok=True, current="en_US-joe-medium")
+        with patch("app.server.save_setting"), \
+             patch("app.server.voice_is_cached", return_value=True):
+            await _session(ws, base_config, _mock_stt(), _mock_llm(), tts)
+        assert ws.sent_of_type("voice_status")[0]["state"] == "loading"
+
+    async def test_uncached_voice_reports_downloading(self, base_config):
+        ws = MockWebSocket([json.dumps({"type": "set_voice",
+                                        "voice": "en_US-norman-medium"})])
+        tts = _mock_tts(reload_ok=True, current="en_US-norman-medium")
+        with patch("app.server.save_setting"), \
+             patch("app.server.voice_is_cached", return_value=False):
+            await _session(ws, base_config, _mock_stt(), _mock_llm(), tts)
+        statuses = ws.sent_of_type("voice_status")
+        assert statuses[0]["state"] == "downloading"
         assert statuses[-1]["state"] == "ready"
 
     async def test_unknown_voice_ignored(self, base_config):

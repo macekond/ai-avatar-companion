@@ -190,7 +190,46 @@ html, body {
   cursor: wait;
   animation: chip-pulse 0.9s ease-in-out infinite;
 }
+.chip.downloading::after {
+  content: ' ⬇';
+  font-size: 0.9em;
+}
 @keyframes chip-pulse { 50% { opacity: 0.35; } }
+
+/* ── Toast (bottom-center transient banner) ───────────────── */
+#toast {
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%) translateY(12px);
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  max-width: calc(100vw - 40px);
+  padding: 10px 18px;
+  border-radius: 22px;
+  background: rgba(90, 70, 50, 0.92);
+  color: #fff;
+  font-size: 0.85rem;
+  font-weight: 600;
+  box-shadow: 0 8px 28px rgba(60, 40, 24, 0.3);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.25s, transform 0.25s;
+}
+#toast.visible { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+.toast-spinner {
+  width: 15px;
+  height: 15px;
+  border: 2.5px solid rgba(255, 255, 255, 0.35);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: toast-spin 0.8s linear infinite;
+  flex-shrink: 0;
+}
+@keyframes toast-spin { to { transform: rotate(360deg); } }
 
 /* ── State-driven body classes ────────────────────────────────────── */
 body.listening  { background: radial-gradient(ellipse at 50% 30%, #eef8ff 0%, #d8eeff 60%, #b0d5f5 100%); }
