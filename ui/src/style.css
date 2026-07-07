@@ -10,7 +10,7 @@ html, body {
   -webkit-user-select: none;
 }
 
-/* PIXI canvas — fills the viewport */
+/* three.js canvas — fills the viewport */
 #canvas {
   position: fixed;
   inset: 0;
