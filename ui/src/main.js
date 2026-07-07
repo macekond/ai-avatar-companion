@@ -371,6 +371,12 @@ function connectWS() {
       case 'voice_status':
         updateVoiceStatus(msg.state, msg.voice)
         break
+      case 'conversation_turn':
+        addConversationTurn(msg.id, msg.you, msg.nova)
+        break
+      case 'conversation_correction':
+        addConversationCorrection(msg.id, msg.kind, msg.wrong, msg.right)
+        break
     }
   }
 
@@ -422,12 +428,85 @@ const closeEl       = document.getElementById('settings-close')
 function toggleSettings(open) {
   panelEl.hidden = open === undefined ? !panelEl.hidden : !open
   gearEl.classList.toggle('active', !panelEl.hidden)
+  if (!panelEl.hidden) toggleTranscript(false)   // one panel at a time
 }
 gearEl.addEventListener('click', () => toggleSettings())
 closeEl.addEventListener('click', () => toggleSettings(false))
 window.addEventListener('keydown', (e) => {
   if (e.code === 'Escape' && !panelEl.hidden) toggleSettings(false)
 })
+
+// ── Transcript panel (conversation review) ────────────────────────
+const transcriptBtnEl   = document.getElementById('transcript-btn')
+const transcriptPanelEl = document.getElementById('transcript-panel')
+const transcriptCloseEl = document.getElementById('transcript-close')
+const transcriptListEl  = document.getElementById('transcript-list')
+const conversation = new Map()   // id → { el, youEl }
+
+function toggleTranscript(open) {
+  transcriptPanelEl.hidden = open === undefined ? !transcriptPanelEl.hidden : !open
+  transcriptBtnEl.classList.toggle('active', !transcriptPanelEl.hidden)
+  if (!transcriptPanelEl.hidden) toggleSettings(false)
+}
+transcriptBtnEl.addEventListener('click', () => toggleTranscript())
+transcriptCloseEl.addEventListener('click', () => toggleTranscript(false))
+window.addEventListener('keydown', (e) => {
+  if (e.code === 'Escape' && !transcriptPanelEl.hidden) toggleTranscript(false)
+})
+
+function addConversationTurn(id, you, nova) {
+  const empty = transcriptListEl.querySelector('.transcript-empty')
+  if (empty) empty.remove()
+
+  const turn = document.createElement('div')
+  turn.className = 'turn'
+
+  const youEl = document.createElement('div')
+  youEl.className = 'turn-you'
+  youEl.append(tag('You'), textNode(you))
+
+  const novaEl = document.createElement('div')
+  novaEl.className = 'turn-nova'
+  novaEl.append(tag('Nova'), textNode(nova))
+
+  turn.append(youEl, novaEl)
+  transcriptListEl.appendChild(turn)
+  transcriptListEl.scrollTop = transcriptListEl.scrollHeight
+
+  conversation.set(id, { el: turn, youEl })
+}
+
+function addConversationCorrection(id, kind, wrong, right) {
+  const entry = conversation.get(id)
+  if (!entry) return
+  // Emphasise the fix inline on the child's line: strike the wrong word,
+  // show the right one, and add a small note underneath.
+  const note = document.createElement('div')
+  note.className = 'turn-correction'
+  note.append(
+    span('correction-wrong', wrong),
+    span('correction-arrow', ' → '),
+    span('correction-right', right),
+    kind ? span('correction-kind', ` (${kind.replace(/_/g, ' ')})`) : document.createComment(''),
+  )
+  entry.el.insertBefore(note, entry.el.querySelector('.turn-nova'))
+  entry.el.classList.add('has-correction')
+}
+
+// small DOM helpers
+function tag(label) {
+  const s = document.createElement('span')
+  s.className = 'turn-tag'
+  s.textContent = label
+  return s
+}
+function textNode(t) { return document.createTextNode(t) }
+function span(cls, text) {
+  const s = document.createElement('span')
+  s.className = cls
+  s.textContent = text
+  return s
+}
 
 // ── Level selector ────────────────────────────────────────────────
 const levelBtns = document.querySelectorAll('#level-selector .chip')

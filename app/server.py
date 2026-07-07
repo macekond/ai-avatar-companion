@@ -29,6 +29,9 @@ Server → browser:
   {"type": "transcript",    "text": "…"}
   {"type": "sentence",      "text": "…"}
   {"type": "amplitude",     "value": 0–1}
+  {"type": "conversation_turn",       "id": 1, "you": "…", "nova": "…"}
+  {"type": "conversation_correction", "id": 1, "kind": "past_tense",
+                                      "wrong": "goed", "right": "went"}
 
 Run:
     python -m app.server
@@ -402,6 +405,7 @@ async def _session(
 
     # ── Main loop ────────────────────────────────────────────────────────
     consecutive_short = 0
+    conv_turn_n = 0   # id for transcript entries (child↔Nova exchanges)
 
     # Messages consumed by the barge-in watcher (or by the listening phase)
     # that belong to the main loop are buffered here and drained before the
@@ -652,11 +656,22 @@ async def _session(
             first_audio_ms = _first_audio_ms[0] if _first_audio_ms else 0
             await send({"type": "state", "state": "idle"})
 
+            # ── Transcript entry (immediate; corrections patched in later) ──
+            if spoken_sentences and transcript:
+                conv_turn_n += 1
+                await send({
+                    "type": "conversation_turn",
+                    "id": conv_turn_n,
+                    "you": transcript,
+                    "nova": " ".join(spoken_sentences),
+                })
+
             # ── POST-TURN EXTRACTION + TELEMETRY ───────────────────────────
             if mem_mgr and memory and extractor and spoken_sentences and transcript:
                 full_reply = " ".join(spoken_sentences)
                 _mem_ref = memory
                 _mgr_ref = mem_mgr
+                _conv_id = conv_turn_n
 
                 _tel_ref = telemetry
                 _stt_ms_ref = stt_ms
@@ -675,6 +690,16 @@ async def _session(
                         parsed = result.parse_problem()
                         if parsed:
                             _mgr_ref.update_problem(_mem_ref, *parsed)
+                            # Patch the transcript entry with the correction so
+                            # the tab can highlight what was gently fixed.
+                            ptype, wrong, right = parsed
+                            send_from_thread({
+                                "type": "conversation_correction",
+                                "id": _conv_id,
+                                "kind": ptype,
+                                "wrong": wrong,
+                                "right": right,
+                            })
                         _mgr_ref.prune(_mem_ref)
                         _mgr_ref.save(_mem_ref)
                         loop.call_soon_threadsafe(llm.set_memory, _mem_ref)

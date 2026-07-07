@@ -83,11 +83,10 @@ html, body {
   opacity: 1;
 }
 
-/* ── Settings gear ────────────────────────────────────────── */
-#settings-gear {
+/* ── Top-right round buttons (transcript + gear) ──────────── */
+#settings-gear, #transcript-btn {
   position: fixed;
   top: 16px;
-  right: 16px;
   z-index: 40;
   width: 40px;
   height: 40px;
@@ -97,13 +96,71 @@ html, body {
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
   color: #7a6a5a;
-  font-size: 1.15rem;
+  font-size: 1.05rem;
   line-height: 1;
   cursor: pointer;
   transition: background 0.15s, transform 0.2s, color 0.15s;
 }
-#settings-gear:hover { background: rgba(255, 255, 255, 0.9); color: #4a3a2a; }
-#settings-gear.active { transform: rotate(60deg); background: rgba(90, 70, 50, 0.82); color: #fff; }
+#settings-gear  { right: 16px; font-size: 1.15rem; }
+#transcript-btn { right: 64px; }
+#settings-gear:hover, #transcript-btn:hover { background: rgba(255, 255, 255, 0.9); color: #4a3a2a; }
+#settings-gear.active  { transform: rotate(60deg); background: rgba(90, 70, 50, 0.82); color: #fff; }
+#transcript-btn.active { background: rgba(90, 70, 50, 0.82); color: #fff; }
+
+/* ── Transcript panel ─────────────────────────────────────── */
+#transcript-panel {
+  position: fixed;
+  top: 64px;
+  right: 16px;
+  z-index: 39;
+  width: 340px;
+  max-width: calc(100vw - 32px);
+  max-height: calc(100vh - 96px);
+  display: flex;
+  flex-direction: column;
+  padding: 16px;
+  border-radius: 16px;
+  background: rgba(255, 252, 248, 0.94);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  box-shadow: 0 12px 40px rgba(90, 60, 40, 0.22);
+  color: #5a4a3a;
+}
+#transcript-panel[hidden] { display: none; }
+
+#transcript-list {
+  overflow-y: auto;
+  font-size: 0.85rem;
+  line-height: 1.45;
+}
+.transcript-empty { color: #a08a76; font-style: italic; }
+
+.turn { padding: 8px 0; border-bottom: 1px solid rgba(150, 120, 90, 0.14); }
+.turn:last-child { border-bottom: none; }
+.turn-you, .turn-nova { margin: 2px 0; }
+.turn-tag {
+  display: inline-block;
+  min-width: 42px;
+  font-size: 0.64rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #a08a76;
+  margin-right: 6px;
+}
+.turn-nova { color: #6a5545; }
+
+.turn-correction {
+  margin: 4px 0 4px 48px;
+  padding: 3px 8px;
+  border-radius: 8px;
+  background: rgba(120, 190, 130, 0.16);
+  font-size: 0.8rem;
+}
+.correction-wrong { text-decoration: line-through; color: #c07a6a; }
+.correction-right { font-weight: 700; color: #3f9a55; }
+.correction-arrow { color: #a08a76; }
+.correction-kind  { color: #a08a76; font-style: italic; }
 
 /* ── Settings panel ───────────────────────────────────────── */
 #settings-panel {
