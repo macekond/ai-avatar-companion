@@ -262,3 +262,27 @@ Notes for recipients (Apple Silicon Macs only):
 - **Shipped voices** are all permissively licensed: `kristin`, `ljspeech`, `norman` (public domain, LibriVox / LJ-Speech) and `joe` (CC0). The Blizzard-licensed `en_US-lessac` (research-use-only) is deliberately **not** offered.
 
 **Everything else** — faster-whisper, Ollama client, websockets, etc. — is MIT / Apache 2.0 / BSD.
+
+---
+
+## Contributing
+
+Contributions are welcome! A few notes:
+
+- Run the tests before opening a PR: `.venv/bin/python -m pytest -q` (271 tests, offline, no hardware needed — see [TESTING.md](TESTING.md)).
+- Keep the local-first, privacy-first design: no telemetry leaves the device, audio never goes to the cloud.
+- The UI avatar layer is intentionally not unit-tested (browser WebGL); verify visual changes manually via `python run.py`.
+- Please describe *why* a change is needed, not just *what* it does.
+
+Found a security issue? See [SECURITY.md](SECURITY.md) — don't file it as a public issue.
+
+---
+
+## Licence
+
+This project is licensed under the **GNU General Public License v3.0** — see [LICENSE](LICENSE).
+
+GPL-3.0 is used because the bundled Piper TTS engine is GPL-3.0-or-later, so
+the distributed application is a combined GPL work. Third-party components
+(avatar model, voices, ML libraries) retain their own licences as listed in
+[Licence notes](#licence-notes) above.
