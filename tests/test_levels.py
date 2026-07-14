@@ -134,3 +134,55 @@ class TestLevelContent:
     def test_c2_mentions_idioms(self):
         instr = instructions_for("C2").lower()
         assert "idiom" in instr or "collocation" in instr
+
+
+# ── Level-fit strength (regression guards for the tuning change) ────────────
+
+class TestLevelFitStrength:
+    """The lower levels must forcefully override the generic base prompt and
+    keep replies genuinely simple. These guard against drift back toward the
+    'too complex at Pre A' behaviour."""
+
+    def test_pre_a_and_a_override_general_guidance(self):
+        """Pre A and A must state they take precedence over the base prompt."""
+        for level in ("Pre A", "A"):
+            assert "override" in instructions_for(level).lower(), \
+                f"Level {level} should override the general guidance above it"
+
+    def test_pre_a_enforces_single_short_sentence(self):
+        instr = instructions_for("Pre A").lower()
+        assert "one sentence" in instr, "Pre A should demand a single sentence"
+        assert "never two sentences" in instr, \
+            "Pre A should forbid multi-sentence replies"
+
+    def test_pre_a_gives_a_hard_word_ceiling(self):
+        """A concrete small word count, not just 'short', must be present."""
+        instr = instructions_for("Pre A")
+        assert "2–4 words" in instr or "5 words" in instr, \
+            "Pre A should state an explicit low word ceiling"
+
+    def test_pre_a_and_a_show_a_too_hard_counterexample(self):
+        """Concrete 'too hard' examples give the model a ceiling to stay under."""
+        for level in ("Pre A", "A"):
+            assert "too hard" in instructions_for(level).lower(), \
+                f"Level {level} should include a 'too hard' counter-example"
+
+    def test_pre_a_forbids_non_present_tenses(self):
+        instr = instructions_for("Pre A").lower()
+        assert "no past tense" in instr or "present tense only" in instr
+
+    def test_reply_length_grows_with_level(self):
+        """Pre A is the tightest; each step up should not be stricter."""
+        def cap(level):
+            # Rough proxy: how many sentences the level permits.
+            instr = instructions_for(level).lower()
+            if "one sentence" in instr and "never two" in instr:
+                return 1
+            if "max two" in instr or "one short sentence" in instr:
+                return 2
+            if "two or three sentences" in instr:
+                return 3
+            return 99  # C1/C2 unbounded
+        caps = [cap(l) for l in LEVELS]
+        assert caps == sorted(caps), \
+            f"Reply-length caps should be non-decreasing by level, got {caps}"
