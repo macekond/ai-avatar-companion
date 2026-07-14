@@ -49,6 +49,41 @@ def _today() -> str:
     return date.today().isoformat()
 
 
+def humanize_since(iso_date: str, today: Optional[date] = None) -> str:
+    """Describe how long ago ``iso_date`` was, in kid-friendly relative terms.
+
+    Used to give the conversation model temporal awareness so it can say
+    things like "we talked about that yesterday". Buckets:
+
+        today · yesterday · N days ago · last week · N weeks ago ·
+        last month · N months ago
+
+    A future date (e.g. clock skew) collapses to "today".
+    """
+    today = today or date.today()
+    days = (today - date.fromisoformat(iso_date)).days
+    if days <= 0:
+        return "today"
+    if days == 1:
+        return "yesterday"
+    if days < 7:
+        return f"{days} days ago"
+    if days < 14:
+        return "last week"
+    if days < 28:
+        return f"{days // 7} weeks ago"
+    if days < 60:
+        return "last month"
+    return f"{days // 30} months ago"
+
+
+def today_context(today: Optional[date] = None) -> str:
+    """Return a spoken-style anchor for the current day, e.g.
+    "Tuesday, 14 July 2026" — no leading zero on the day, portable."""
+    today = today or date.today()
+    return f"{today.strftime('%A')}, {today.day} {today.strftime('%B')} {today.year}"
+
+
 # ---------------------------------------------------------------------------
 # Data model
 # ---------------------------------------------------------------------------

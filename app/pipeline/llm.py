@@ -14,12 +14,14 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterator
+from datetime import date
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from app.config import Config
 
-from app.levels import instructions_for
+from app.levels import LANGUAGE_LOCK, instructions_for
+from app.memory import humanize_since, today_context
 
 # ---------------------------------------------------------------------------
 # Sentence boundary detection
@@ -83,6 +85,9 @@ class LLMPipeline:
             parts.append(instruction)
         if memory is not None:
             parts.append(self._format_memory_block(memory))
+        # Always last: the non-negotiable "reply only in English" rule. Placed
+        # after everything else so the model treats it as the final word.
+        parts.append(LANGUAGE_LOCK)
         return "\n\n".join(parts)
 
     def set_level(self, level: str) -> None:
@@ -105,10 +110,19 @@ class LLMPipeline:
 
     @staticmethod
     def _format_memory_block(memory) -> str:
-        """Render a concise memory context block for the system prompt."""
+        """Render a concise memory context block for the system prompt.
+
+        Each remembered topic/challenge is tagged with how long ago it came
+        up (relative to today), and the block opens with today's date. This
+        gives the model the temporal awareness kids enjoy — "today is
+        Saturday", "yesterday we talked about football".
+        """
         profile = memory.profile
         age_str = f" (age {profile.age})" if profile.age else ""
-        lines = [f"Memory about {profile.name}{age_str}:"]
+        lines = [
+            f"Today is {today_context()}.",
+            f"Memory about {profile.name}{age_str}:",
+        ]
 
         if memory.topics:
             recent = sorted(
@@ -116,17 +130,27 @@ class LLMPipeline:
                 key=lambda t: t.last_mentioned,
                 reverse=True,
             )[:5]
-            lines.append("- Recent topics of interest: " +
-                         ", ".join(t.keyword for t in recent))
+            lines.append("- Recent topics of interest: " + ", ".join(
+                f"{t.keyword} ({humanize_since(t.last_mentioned)})"
+                for t in recent
+            ))
 
         unresolved = [p for p in memory.problems if not p.resolved]
         if unresolved:
             top = sorted(unresolved, key=lambda p: p.times_seen, reverse=True)[:3]
             details = "; ".join(
-                f"{p.type} (e.g. '{p.example}' → '{p.correction}')"
+                f"{p.type} (e.g. '{p.example}' → '{p.correction}', "
+                f"came up {humanize_since(p.last_seen)})"
                 for p in top
             )
             lines.append(f"- Known language challenges: {details}")
+
+        lines.append(
+            "- You know when each of these came up, so refer to it naturally "
+            "when it fits (e.g. \"yesterday you told me about...\", \"happy "
+            f"{date.today().strftime('%A')}!\") — kids love talking about today, "
+            "yesterday and what's coming up."
+        )
 
         hints = []
         if memory.topics:
