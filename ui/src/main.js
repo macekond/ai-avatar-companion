@@ -401,8 +401,17 @@ function wsSend(data) {
 // ── Keyboard PTT ──────────────────────────────────────────────────────────
 // True hold-to-talk via keydown/keyup — works natively in the browser,
 // no Accessibility permission needed.
+// While a modal dialog is open, Space belongs to it — typing into the
+// name field, or activating the focused button — not to push-to-talk.
+// Without this guard, Space is preventDefault-ed away from the input (so
+// multi-word names can't be typed) and fires a spurious ptt_start/stop_speak.
+function pttBlocked() {
+  return !modalOverlayEl.hidden
+}
+
 window.addEventListener('keydown', (e) => {
   if (e.code !== 'Space' || e.repeat) return
+  if (pttBlocked()) return
   e.preventDefault()
   if (state === 'idle' && !pttActive) {
     pttActive = true
@@ -416,6 +425,7 @@ window.addEventListener('keydown', (e) => {
 
 window.addEventListener('keyup', (e) => {
   if (e.code !== 'Space') return
+  if (pttBlocked()) return
   e.preventDefault()
   if (pttActive) {
     pttActive = false
@@ -718,9 +728,9 @@ function renderProfileSelector(profiles, activeSlug) {
       confirmLabel: 'Add',
     })
     if (!rawName) return
-    // Build a slug client-side (server re-sanitises and creates the profile)
-    const slug = rawName.toLowerCase().trim().replace(/\s+/g, '_').replace(/[^a-z0-9_]/g, '')
-    if (slug) wsSend({ type: 'switch_profile', slug })
+    // Send the raw name — the server runs it through name_to_slug (the single
+    // source of truth for slugs), so we don't duplicate that logic here.
+    wsSend({ type: 'switch_profile', slug: rawName })
   })
   profileSelectorEl.appendChild(addBtn)
 }

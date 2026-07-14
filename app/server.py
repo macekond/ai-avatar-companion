@@ -351,6 +351,16 @@ async def _session(
             await asyncio.wait(still_running, timeout=timeout)
         pending_tasks.clear()
 
+    def _apply_extracted_memory(mem_ref: ChildMemory) -> None:
+        """Refresh the LLM with freshly extracted memory — but only if that
+        child is still active. An extraction task schedules this via
+        call_soon_threadsafe; if a profile swap happened in the meantime, the
+        callback can land *after* the swap already loaded the new child's
+        memory, so re-applying the old ref would leak one child's context into
+        another. Gating on identity makes the stale callback a no-op."""
+        if mem_ref is memory:
+            llm.set_memory(mem_ref)
+
     # Level for this session — starts from config, updated by UI 'set_level'
     # so telemetry reflects what the child is actually practising.
     active_level = config.child.level
@@ -529,9 +539,12 @@ async def _session(
                 raw_slug = msg.get("slug", "")
                 if not isinstance(raw_slug, str) or not raw_slug.strip():
                     continue
-                target = name_to_slug(raw_slug)
+                # fallback="" so junk that sanitises to nothing is rejected
+                # rather than collapsing to the "child" default and deleting
+                # an unrelated profile.
+                target = name_to_slug(raw_slug, fallback="")
                 profiles = mem_mgr.list_profiles()
-                if target not in profiles:
+                if not target or target not in profiles:
                     continue
                 # Refuse to delete the last remaining child — the app always
                 # needs an active profile to fall back to.
@@ -539,17 +552,20 @@ async def _session(
                     await send({"type": "profile_error",
                                 "message": "Can't remove the only child."})
                     continue
-                was_active = target == mem_mgr.slug
-                mem_mgr.delete_profile(target)
-                if was_active:
-                    # Don't persist the outgoing memory — the file is gone and
-                    # saving would resurrect the profile we just deleted.
-                    memory = None
-                    remaining = [p for p in profiles if p != target]
+                remaining = [p for p in profiles if p != target]
+                if target == mem_mgr.slug:
+                    # Drain in-flight extraction tasks BEFORE unlinking: a
+                    # pending task holds the outgoing profile's MemoryManager
+                    # and would re-create the file via save() if we deleted
+                    # first. save_current=False then skips the explicit re-save
+                    # during the swap.
+                    await _drain_pending()
+                    mem_mgr.delete_profile(target)
                     await _swap_profile(remaining[0], save_current=False)
                 else:
+                    mem_mgr.delete_profile(target)
                     await send({"type": "profiles",
-                                "list": mem_mgr.list_profiles(),
+                                "list": remaining,
                                 "active": mem_mgr.slug})
                 continue
 
@@ -752,7 +768,7 @@ async def _session(
                             })
                         _mgr_ref.prune(_mem_ref)
                         _mgr_ref.save(_mem_ref)
-                        loop.call_soon_threadsafe(llm.set_memory, _mem_ref)
+                        loop.call_soon_threadsafe(_apply_extracted_memory, _mem_ref)
                         # Record telemetry turn with extracted metadata
                         if _tel_ref:
                             _tel_ref.log_turn(

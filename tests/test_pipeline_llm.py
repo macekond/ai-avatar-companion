@@ -316,6 +316,18 @@ class TestMemoryTemporal:
         llm = make_pipeline()
         assert "Today is" not in llm._system_prompt
 
+    def test_no_temporal_guidance_for_empty_memory(self):
+        # A freshly onboarded child has no topics/problems — the model must NOT
+        # be told "you know when each of these came up" (it would invent a
+        # shared past on the very first conversation).
+        from app.memory import ChildMemory, ChildProfile
+        llm = make_pipeline()
+        llm.set_memory(ChildMemory(profile=ChildProfile(name="Mia", age=7)))
+        block = llm._system_prompt
+        assert "Memory about Mia" in block        # header still present
+        assert "you know when each of these came up" not in block.lower()
+        assert "yesterday you told me about" not in block.lower()
+
 
 # ── Conversation history ───────────────────────────────────────────────────
 

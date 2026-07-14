@@ -111,6 +111,13 @@ class TestNameToSlug:
     def test_numbers_preserved(self):
         assert name_to_slug("kid2") == "kid2"
 
+    def test_custom_fallback_for_empty(self):
+        assert name_to_slug("###", fallback="") == ""
+        assert name_to_slug("", fallback="") == ""
+
+    def test_fallback_not_used_for_valid_slug(self):
+        assert name_to_slug("Mia", fallback="") == "mia"
+
 
 # ── Data model ─────────────────────────────────────────────────────────────
 
@@ -436,3 +443,12 @@ class TestDeleteProfile:
         assert mgr.delete_profile("../victim") is False
         assert victim.exists()   # untouched
         victim.unlink()
+
+    def test_junk_slug_does_not_collapse_to_child(self, tmp_path):
+        # Junk that sanitises to nothing must NOT be treated as the "child"
+        # fallback and delete an unrelated profile named "child".
+        (tmp_path / "child.json").write_text("{}")
+        mgr = MemoryManager(tmp_path, "child")
+        assert mgr.delete_profile("###") is False
+        assert (tmp_path / "child.json").exists()   # untouched
+        assert mgr.delete_profile("") is False

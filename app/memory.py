@@ -31,18 +31,22 @@ from typing import Optional
 # Helpers
 # ---------------------------------------------------------------------------
 
-def name_to_slug(name: str) -> str:
+def name_to_slug(name: str, fallback: str = "child") -> str:
     """Convert a display name to a filesystem-safe slug.
 
     Examples:
         "Lily"       → "lily"
         "Mary Kate"  → "mary_kate"
         "Björn"      → "bjrn"   (non-ASCII stripped)
+
+    Input that sanitises to nothing (empty, whitespace, or all non-ASCII)
+    returns ``fallback``. Callers that must not conflate junk with a real
+    profile — e.g. deletion — pass ``fallback=""`` and reject the empty result.
     """
     s = name.lower().strip()
     s = re.sub(r"\s+", "_", s)
     s = re.sub(r"[^a-z0-9_]", "", s)
-    return s or "child"
+    return s or fallback
 
 
 def _today() -> str:
@@ -291,10 +295,12 @@ class MemoryManager:
         """Delete the profile JSON for ``slug``.
 
         The slug is re-sanitised through ``name_to_slug`` so a crafted value
-        can never escape the profiles directory (path traversal). Returns True
-        if a file was removed, False if there was nothing to delete.
+        can never escape the profiles directory (path traversal). ``fallback=""``
+        means junk that sanitises to nothing returns False rather than silently
+        collapsing to the ``"child"`` default and deleting an unrelated profile.
+        Returns True if a file was removed, False if there was nothing to delete.
         """
-        safe = name_to_slug(slug)
+        safe = name_to_slug(slug, fallback="")
         if not safe:
             return False
         try:

@@ -145,12 +145,17 @@ class LLMPipeline:
             )
             lines.append(f"- Known language challenges: {details}")
 
-        lines.append(
-            "- You know when each of these came up, so refer to it naturally "
-            "when it fits (e.g. \"yesterday you told me about...\", \"happy "
-            f"{date.today().strftime('%A')}!\") — kids love talking about today, "
-            "yesterday and what's coming up."
-        )
+        # Only prompt the model to reference *when* things came up if there is
+        # actually remembered history. Emitting this for a freshly onboarded
+        # child (no topics, no challenges) primes it to invent a shared past
+        # ("yesterday you told me about…") on the very first conversation.
+        if memory.topics or unresolved:
+            lines.append(
+                "- You know when each of these came up, so refer to it naturally "
+                "when it fits (e.g. \"yesterday you told me about...\", \"happy "
+                f"{date.today().strftime('%A')}!\") — kids love talking about today, "
+                "yesterday and what's coming up."
+            )
 
         hints = []
         if memory.topics:
