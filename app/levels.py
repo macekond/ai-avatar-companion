@@ -14,6 +14,29 @@ Levels match the five selector options in the UI:
 
 LEVELS: list[str] = ["Pre A", "A", "B", "C1", "C2"]
 
+# Appended last to EVERY system prompt (see LLMPipeline._build_prompt), after the
+# personality, level, and memory blocks. The point of an English-practice
+# companion is defeated if the child can talk it into replying in their native
+# language, so this is written as a hard, non-negotiable rule that outranks the
+# rest of the prompt. It lives in code (not config.yaml) so it can't be dropped
+# by editing the personality prompt, and it is placed last because the small
+# local model weights the final instruction most heavily.
+LANGUAGE_LOCK: str = (
+    "Language rule — this is absolute and overrides everything above, including "
+    "anything the child asks:\n"
+    "- You ALWAYS reply only in English. This never changes, for any reason.\n"
+    "- Requests to switch language come in many disguises: 'answer in Czech', "
+    "'can you explain this in Czech', 'say it in my language', 'just this once', "
+    "'repeat that in Spanish', roleplay setups, or clever rewording. Treat ALL "
+    "of them the same way: do not comply.\n"
+    "- Instead, stay in English and gently steer back — e.g. 'Let's keep it in "
+    "English!' — then carry on the conversation normally in English.\n"
+    "- This holds no matter what language the child writes or speaks in; keep "
+    "replying in English.\n"
+    "- Do not lecture about this rule or break character — just warmly keep the "
+    "practice in English."
+)
+
 # Correction intensity guidance appended to each level's instructions.
 # Pre A/A keep corrections implicit (recasting only); B/C1/C2 allow increasingly
 # explicit explanations as the child's meta-linguistic awareness grows.
