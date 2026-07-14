@@ -16,8 +16,64 @@ from app.memory import (
     MemoryManager,
     Problem,
     Topic,
+    humanize_since,
     name_to_slug,
+    today_context,
 )
+
+
+# ── Relative-time helpers ──────────────────────────────────────────────────
+
+class TestHumanizeSince:
+    TODAY = date(2026, 7, 14)  # a Tuesday
+
+    def _ago(self, days: int) -> str:
+        return humanize_since((self.TODAY - timedelta(days=days)).isoformat(),
+                              today=self.TODAY)
+
+    def test_today(self):
+        assert self._ago(0) == "today"
+
+    def test_future_date_treated_as_today(self):
+        future = (self.TODAY + timedelta(days=3)).isoformat()
+        assert humanize_since(future, today=self.TODAY) == "today"
+
+    def test_yesterday(self):
+        assert self._ago(1) == "yesterday"
+
+    def test_days_ago(self):
+        assert self._ago(2) == "2 days ago"
+        assert self._ago(6) == "6 days ago"
+
+    def test_last_week(self):
+        assert self._ago(7) == "last week"
+        assert self._ago(13) == "last week"
+
+    def test_weeks_ago(self):
+        assert self._ago(14) == "2 weeks ago"
+        assert self._ago(21) == "3 weeks ago"
+
+    def test_last_month(self):
+        assert self._ago(28) == "last month"
+        assert self._ago(59) == "last month"
+
+    def test_months_ago(self):
+        assert self._ago(60) == "2 months ago"
+
+    def test_defaults_to_real_today(self):
+        # No `today` arg → uses date.today(); a same-day date must read "today".
+        assert humanize_since(date.today().isoformat()) == "today"
+
+
+class TestTodayContext:
+    def test_formats_weekday_and_date(self):
+        assert today_context(date(2026, 7, 14)) == "Tuesday, 14 July 2026"
+
+    def test_no_leading_zero_on_day(self):
+        assert today_context(date(2026, 7, 4)) == "Saturday, 4 July 2026"
+
+    def test_defaults_to_real_today(self):
+        assert today_context().startswith(date.today().strftime("%A"))
 
 
 # ── Slug generation ────────────────────────────────────────────────────────
@@ -344,3 +400,39 @@ class TestListProfiles:
             (tmp_path / name).write_text("{}")
         mgr = MemoryManager(tmp_path, "lily")
         assert mgr.list_profiles() == ["anna", "lily", "mia"]
+
+
+# ── delete_profile ──────────────────────────────────────────────────────────
+
+class TestDeleteProfile:
+    def test_deletes_existing_profile(self, tmp_path):
+        (tmp_path / "lily.json").write_text("{}")
+        (tmp_path / "mia.json").write_text("{}")
+        mgr = MemoryManager(tmp_path, "lily")
+        assert mgr.delete_profile("mia") is True
+        assert mgr.list_profiles() == ["lily"]
+
+    def test_missing_profile_returns_false(self, tmp_path):
+        (tmp_path / "lily.json").write_text("{}")
+        mgr = MemoryManager(tmp_path, "lily")
+        assert mgr.delete_profile("ghost") is False
+
+    def test_empty_slug_returns_false(self, tmp_path):
+        mgr = MemoryManager(tmp_path, "lily")
+        assert mgr.delete_profile("") is False
+
+    def test_can_delete_own_active_profile(self, tmp_path):
+        (tmp_path / "lily.json").write_text("{}")
+        mgr = MemoryManager(tmp_path, "lily")
+        assert mgr.delete_profile("lily") is True
+        assert mgr.list_profiles() == []
+
+    def test_slug_is_sanitised_no_path_traversal(self, tmp_path):
+        # A crafted slug must never escape the profiles directory.
+        victim = tmp_path.parent / "victim.json"
+        victim.write_text("{}")
+        (tmp_path / "lily.json").write_text("{}")
+        mgr = MemoryManager(tmp_path, "lily")
+        assert mgr.delete_profile("../victim") is False
+        assert victim.exists()   # untouched
+        victim.unlink()

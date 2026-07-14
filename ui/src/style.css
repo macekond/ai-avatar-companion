@@ -242,6 +242,36 @@ html, body {
   transform: scale(1.05);
 }
 .voice-chip { width: 100%; text-align: left; }
+.chip.danger {
+  background: rgba(200, 70, 55, 0.90);
+  border-color: transparent;
+  color: #fff;
+}
+.chip.danger:hover { background: rgba(180, 55, 42, 0.95); color: #fff; }
+
+/* ── Profile item (name chip + inline remove) ─────────────── */
+.profile-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+.profile-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: #b09a86;
+  font-size: 0.66rem;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.profile-remove:hover { background: rgba(200, 70, 55, 0.15); color: #c8463a; }
 .chip.loading {
   opacity: 0.6;
   cursor: wait;
@@ -287,6 +317,55 @@ html, body {
   flex-shrink: 0;
 }
 @keyframes toast-spin { to { transform: rotate(360deg); } }
+
+/* ── Modal dialog (in-app prompt / confirm) ───────────────── */
+#modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(60, 40, 24, 0.32);
+  backdrop-filter: blur(3px);
+  -webkit-backdrop-filter: blur(3px);
+}
+#modal-overlay[hidden] { display: none; }
+#modal {
+  width: 300px;
+  max-width: 100%;
+  padding: 20px;
+  border-radius: 16px;
+  background: rgba(255, 252, 248, 0.98);
+  box-shadow: 0 16px 48px rgba(90, 60, 40, 0.3);
+  color: #5a4a3a;
+}
+#modal-message {
+  margin: 0 0 14px;
+  font-size: 0.9rem;
+  font-weight: 600;
+  line-height: 1.4;
+}
+#modal-input {
+  width: 100%;
+  box-sizing: border-box;
+  margin-bottom: 16px;
+  padding: 8px 12px;
+  border: 1.5px solid rgba(150, 120, 90, 0.4);
+  border-radius: 10px;
+  background: #fff;
+  color: #4a3a2a;
+  font-size: 0.9rem;
+  font-family: inherit;
+}
+#modal-input[hidden] { display: none; }
+#modal-input:focus { outline: none; border-color: rgba(90, 70, 50, 0.7); }
+#modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
 
 /* ── State-driven body classes ────────────────────────────────────── */
 body.listening  { background: radial-gradient(ellipse at 50% 30%, #eef8ff 0%, #d8eeff 60%, #b0d5f5 100%); }

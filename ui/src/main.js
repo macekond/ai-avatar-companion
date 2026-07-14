@@ -338,6 +338,9 @@ function connectWS() {
       case 'profiles':
         renderProfileSelector(msg.list, msg.active)
         break
+      case 'profile_error':
+        showToast(msg.message)
+        break
       case 'memory_loaded':
         // Profile loaded — update active highlight (slug not sent, use active from profiles)
         break
@@ -597,22 +600,109 @@ function hideToast() {
   if (toastEl) toastEl.classList.remove('visible')
 }
 
+// ── Modal dialog (prompt / confirm) ───────────────────────────────
+// window.prompt()/confirm() are no-ops in the Tauri webview, so profile
+// add/remove use this in-app dialog instead.
+const modalOverlayEl = document.getElementById('modal-overlay')
+const modalMessageEl = document.getElementById('modal-message')
+const modalInputEl   = document.getElementById('modal-input')
+const modalCancelEl  = document.getElementById('modal-cancel')
+const modalConfirmEl = document.getElementById('modal-confirm')
+let modalResolve = null
+let modalHasInput = false
+
+function closeModal(result) {
+  if (!modalResolve) return
+  const resolve = modalResolve
+  modalResolve = null
+  modalOverlayEl.hidden = true
+  resolve(result)
+}
+
+// Returns a Promise: a trimmed string (or null if cancelled) when `input`,
+// otherwise a boolean confirm result.
+function openModal({ message, input = false, placeholder = '',
+                    confirmLabel = 'OK', danger = false } = {}) {
+  // A dialog already open resolves as cancelled before opening the new one.
+  if (modalResolve) closeModal(modalHasInput ? null : false)
+  return new Promise(resolve => {
+    modalResolve = resolve
+    modalHasInput = input
+    modalMessageEl.textContent = message
+    modalInputEl.hidden = !input
+    modalInputEl.value = ''
+    modalInputEl.placeholder = placeholder
+    modalConfirmEl.textContent = confirmLabel
+    modalConfirmEl.classList.toggle('danger', danger)
+    modalOverlayEl.hidden = false
+    setTimeout(() => (input ? modalInputEl : modalConfirmEl).focus(), 0)
+  })
+}
+
+function confirmModal() {
+  closeModal(modalHasInput ? modalInputEl.value.trim() || null : true)
+}
+modalConfirmEl.addEventListener('click', confirmModal)
+modalCancelEl.addEventListener('click', () => closeModal(modalHasInput ? null : false))
+modalOverlayEl.addEventListener('click', (e) => {
+  if (e.target === modalOverlayEl) closeModal(modalHasInput ? null : false)
+})
+modalInputEl.addEventListener('keydown', (e) => {
+  if (e.code === 'Enter') { e.preventDefault(); confirmModal() }
+})
+window.addEventListener('keydown', (e) => {
+  if (e.code === 'Escape' && !modalOverlayEl.hidden) {
+    e.stopPropagation()
+    closeModal(modalHasInput ? null : false)
+  }
+}, true)
+
 // ── Profile selector ──────────────────────────────────────────────
 const profileSelectorEl = document.getElementById('profile-selector')
 
+function displayName(slug) {
+  // Capitalize slug (underscores → spaces): mia_rose → Mia Rose
+  return slug.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
+}
+
 function renderProfileSelector(profiles, activeSlug) {
   profileSelectorEl.innerHTML = ''
+  // Only offer removal when more than one child exists — the app always needs
+  // an active profile to fall back to.
+  const canRemove = profiles.length > 1
 
   profiles.forEach(slug => {
+    const item = document.createElement('span')
+    item.className = 'profile-item'
+
     const btn = document.createElement('button')
     btn.className = 'chip' + (slug === activeSlug ? ' active' : '')
-    // Display name: capitalize slug (underscores → spaces)
-    btn.textContent = slug.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
+    btn.textContent = displayName(slug)
     btn.dataset.slug = slug
     btn.addEventListener('click', () => {
-      wsSend({ type: 'switch_profile', slug })
+      if (slug !== activeSlug) wsSend({ type: 'switch_profile', slug })
     })
-    profileSelectorEl.appendChild(btn)
+    item.appendChild(btn)
+
+    if (canRemove) {
+      const removeBtn = document.createElement('button')
+      removeBtn.className = 'profile-remove'
+      removeBtn.textContent = '✕'
+      removeBtn.setAttribute('aria-label', `Remove ${displayName(slug)}`)
+      removeBtn.title = `Remove ${displayName(slug)}`
+      removeBtn.addEventListener('click', async (e) => {
+        e.stopPropagation()
+        const ok = await openModal({
+          message: `Remove ${displayName(slug)}? This permanently deletes their saved progress.`,
+          confirmLabel: 'Remove',
+          danger: true,
+        })
+        if (ok) wsSend({ type: 'delete_profile', slug })
+      })
+      item.appendChild(removeBtn)
+    }
+
+    profileSelectorEl.appendChild(item)
   })
 
   // '+' button to add a new child (triggers onboarding for a fresh slug)
@@ -620,10 +710,15 @@ function renderProfileSelector(profiles, activeSlug) {
   addBtn.className = 'chip'
   addBtn.textContent = '+'
   addBtn.title = 'Add a new child'
-  addBtn.addEventListener('click', () => {
-    const rawName = prompt('Enter the new child\'s name:')
+  addBtn.addEventListener('click', async () => {
+    const rawName = await openModal({
+      message: "What's the new child's name?",
+      input: true,
+      placeholder: 'Name',
+      confirmLabel: 'Add',
+    })
     if (!rawName) return
-    // Build a slug client-side (server will create the profile)
+    // Build a slug client-side (server re-sanitises and creates the profile)
     const slug = rawName.toLowerCase().trim().replace(/\s+/g, '_').replace(/[^a-z0-9_]/g, '')
     if (slug) wsSend({ type: 'switch_profile', slug })
   })
