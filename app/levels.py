@@ -44,29 +44,48 @@ _CORRECTION: dict[str, str] = {
     ),
 }
 
+# These level rules are the single most important constraint on the reply.
+# They are appended after the base personality prompt and must WIN over any
+# general guidance there (including its default reply length) — hence the
+# explicit "overrides everything above" framing on every level.
 LEVEL_INSTRUCTIONS: dict[str, str] = {
     "Pre A": (
-        "English level: Pre-A1 (absolute beginner).\n"
-        "- Use only the most basic words: colors, numbers 1–10, animals, food, "
-        "family members (mom, dad), common objects.\n"
-        "- Keep every sentence to 3–5 words. Example: 'I like cats.' 'The dog is big.'\n"
-        "- Present tense only. No contractions, no idioms, no complex grammar.\n"
-        "- Ask only yes/no or one-word-answer questions: 'Do you like dogs?' 'What color?'\n"
-        "- Speak very slowly and clearly. Repeat key words.\n"
+        "English level: Pre-A1 (absolute beginner). These rules override "
+        "everything above — matching this level matters more than being chatty "
+        "or clever.\n"
+        "- HARD LIMIT: reply with ONE sentence of 2–4 words. Never two sentences. "
+        "Never more than 5 words.\n"
+        "- Use only the tiniest words a 4-year-old knows: colors, numbers 1–10, "
+        "animals, food, toys, mom, dad, yes, no, big, small, good, fun, like, want, see.\n"
+        "- Present tense only. No past tense, no future, no contractions, no "
+        "idioms, no phrasal verbs, no 'that/which/because' clauses.\n"
+        "- Ask only yes/no or one-word questions: 'Do you like dogs?' 'What color?'\n"
+        "- GOOD replies: 'I like cats.' 'Dogs are fun!' 'What is that?' 'Yes, red!'\n"
+        "- TOO HARD (never do this): 'That sounds like such a fun thing to do!' "
+        "'I was wondering what you had for lunch today.' — both are far too long "
+        "and complex. Cut them down to 3 words.\n"
+        "- If a word might be too hard, replace it with an easier one.\n"
         + _CORRECTION["Pre A"]
     ),
     "A": (
-        "English level: A1/A2 (beginner).\n"
-        "- Use short, simple sentences with common everyday vocabulary.\n"
-        "- Tenses: present simple, past simple, 'going to' future.\n"
+        "English level: A1/A2 (beginner). These rules override the general "
+        "guidance above — keep it simpler than your instinct.\n"
+        "- Reply with ONE short sentence (max two). Keep each sentence under "
+        "8 words.\n"
+        "- Use common everyday vocabulary only. No word longer than two syllables "
+        "unless it is very familiar (like 'animal', 'water').\n"
+        "- Tenses: present simple, past simple, 'going to' future. Nothing else.\n"
         "- Topics: school, food, animals, family, daily routine, weather.\n"
         "- Ask simple open questions: 'What did you eat today?' 'Who is your best friend?'\n"
         "- Avoid phrasal verbs, idioms, and irregular past tenses unless they are very common.\n"
+        "- GOOD: 'I like pizza too! What is your favorite food?' "
+        "TOO HARD: 'It sounds like you had quite an adventurous afternoon.'\n"
         + _CORRECTION["A"]
     ),
     "B": (
         "English level: B1/B2 (intermediate).\n"
-        "- Use natural everyday English with a variety of sentence lengths.\n"
+        "- Use natural everyday English with a variety of sentence lengths, but "
+        "keep replies to two or three sentences.\n"
         "- Mix tenses naturally; include modals (can, could, should, would, might).\n"
         "- Introduce new vocabulary with a brief in-sentence explanation when useful.\n"
         "- Topics: hobbies, travel, opinions, future plans, feelings, books, films.\n"
