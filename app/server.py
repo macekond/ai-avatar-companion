@@ -19,10 +19,12 @@ Browser → server:
   {"type": "set_level",      "level": "B"}
   {"type": "set_voice",      "voice": "en_US-kristin-medium"}
   {"type": "switch_profile", "slug": "mia"}
+  {"type": "delete_profile", "slug": "mia"}
 
 Server → browser:
   {"type": "init",          "level": "A"}
   {"type": "profiles",      "list": ["lily","mia"], "active": "lily"}
+  {"type": "profile_error", "message": "Can't remove the only child."}
   {"type": "onboarding_start"}
   {"type": "memory_loaded",  "name": "Lily", "age": 8}
   {"type": "state",         "state": "idle|listening|thinking|speaking|didnt_catch"}
@@ -407,6 +409,48 @@ async def _session(
     consecutive_short = 0
     conv_turn_n = 0   # id for transcript entries (child↔Nova exchanges)
 
+    async def _swap_profile(new_slug: str, save_current: bool = True) -> None:
+        """Hot-swap the active child profile to ``new_slug``.
+
+        Drains in-flight extraction tasks first (a slow task from the previous
+        child would otherwise call llm.set_memory with the old memory *after*
+        the swap, leaking one child's context into another's). When the target
+        profile has no file yet, runs onboarding; otherwise greets normally.
+
+        ``save_current=False`` skips persisting the outgoing memory — used when
+        the outgoing profile was just deleted and must not be resurrected.
+        """
+        nonlocal mem_mgr, memory, consecutive_short
+        await _drain_pending()
+        if save_current and memory is not None:
+            mem_mgr.prune(memory)
+            mem_mgr.save(memory)
+        mem_mgr = MemoryManager(
+            config.memory.profiles_dir, new_slug,
+            max_topics=config.memory.max_topics,
+            max_problems=config.memory.max_problems,
+            topic_ttl_days=config.memory.topic_ttl_days,
+            problem_ttl_days=config.memory.problem_ttl_days,
+        )
+        memory = mem_mgr.load()
+        llm.set_memory(memory)
+        llm.clear_history()
+        consecutive_short = 0
+        await send({"type": "profiles",
+                    "list": mem_mgr.list_profiles(),
+                    "active": new_slug})
+        if memory is None:
+            await send({"type": "onboarding_start"})
+            memory = await _run_onboarding(
+                ws, config, stt, tts, mem_mgr, loop, send, send_from_thread,
+            )
+            llm.set_memory(memory)
+        else:
+            await send({"type": "memory_loaded",
+                        "name": memory.profile.name,
+                        "age": memory.profile.age})
+        await _send_greeting(config, memory, tts, send, send_from_thread)
+
     # Messages consumed by the barge-in watcher (or by the listening phase)
     # that belong to the main loop are buffered here and drained before the
     # next real read from the socket.
@@ -475,39 +519,38 @@ async def _session(
                 if not isinstance(raw_slug, str) or not raw_slug.strip():
                     continue
                 new_slug = name_to_slug(raw_slug)
-                # Drain in-flight extraction tasks BEFORE swapping profiles:
-                # a slow task from the previous child would otherwise call
-                # llm.set_memory with the old child's memory after the swap,
-                # leaking one child's context into another's conversation.
-                await _drain_pending()
-                if memory:
-                    mem_mgr.prune(memory)
-                    mem_mgr.save(memory)
-                mem_mgr = MemoryManager(
-                    config.memory.profiles_dir, new_slug,
-                    max_topics=config.memory.max_topics,
-                    max_problems=config.memory.max_problems,
-                    topic_ttl_days=config.memory.topic_ttl_days,
-                    problem_ttl_days=config.memory.problem_ttl_days,
-                )
-                memory = mem_mgr.load()
-                llm.set_memory(memory)
-                llm.clear_history()
-                consecutive_short = 0
-                await send({"type": "profiles",
-                            "list": mem_mgr.list_profiles(),
-                            "active": new_slug})
-                if memory is None:
-                    await send({"type": "onboarding_start"})
-                    memory = await _run_onboarding(
-                        ws, config, stt, tts, mem_mgr, loop, send, send_from_thread,
-                    )
-                    llm.set_memory(memory)
+                await _swap_profile(new_slug)
+                continue
+
+            # ── Profile delete ───────────────────────────────────────────
+            if mtype == "delete_profile" and mem_mgr:
+                # Sanitise the same way switch does — a client slug is never
+                # trusted to reach the filesystem unfiltered.
+                raw_slug = msg.get("slug", "")
+                if not isinstance(raw_slug, str) or not raw_slug.strip():
+                    continue
+                target = name_to_slug(raw_slug)
+                profiles = mem_mgr.list_profiles()
+                if target not in profiles:
+                    continue
+                # Refuse to delete the last remaining child — the app always
+                # needs an active profile to fall back to.
+                if len(profiles) <= 1:
+                    await send({"type": "profile_error",
+                                "message": "Can't remove the only child."})
+                    continue
+                was_active = target == mem_mgr.slug
+                mem_mgr.delete_profile(target)
+                if was_active:
+                    # Don't persist the outgoing memory — the file is gone and
+                    # saving would resurrect the profile we just deleted.
+                    memory = None
+                    remaining = [p for p in profiles if p != target]
+                    await _swap_profile(remaining[0], save_current=False)
                 else:
-                    await send({"type": "memory_loaded",
-                                "name": memory.profile.name,
-                                "age": memory.profile.age})
-                await _send_greeting(config, memory, tts, send, send_from_thread)
+                    await send({"type": "profiles",
+                                "list": mem_mgr.list_profiles(),
+                                "active": mem_mgr.slug})
                 continue
 
             if mtype != "ptt_start":

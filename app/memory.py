@@ -251,3 +251,19 @@ class MemoryManager:
         if not self._dir.exists():
             return []
         return sorted(p.stem for p in self._dir.glob("*.json"))
+
+    def delete_profile(self, slug: str) -> bool:
+        """Delete the profile JSON for ``slug``.
+
+        The slug is re-sanitised through ``name_to_slug`` so a crafted value
+        can never escape the profiles directory (path traversal). Returns True
+        if a file was removed, False if there was nothing to delete.
+        """
+        safe = name_to_slug(slug)
+        if not safe:
+            return False
+        try:
+            (self._dir / f"{safe}.json").unlink()
+            return True
+        except FileNotFoundError:
+            return False

@@ -344,3 +344,39 @@ class TestListProfiles:
             (tmp_path / name).write_text("{}")
         mgr = MemoryManager(tmp_path, "lily")
         assert mgr.list_profiles() == ["anna", "lily", "mia"]
+
+
+# ── delete_profile ──────────────────────────────────────────────────────────
+
+class TestDeleteProfile:
+    def test_deletes_existing_profile(self, tmp_path):
+        (tmp_path / "lily.json").write_text("{}")
+        (tmp_path / "mia.json").write_text("{}")
+        mgr = MemoryManager(tmp_path, "lily")
+        assert mgr.delete_profile("mia") is True
+        assert mgr.list_profiles() == ["lily"]
+
+    def test_missing_profile_returns_false(self, tmp_path):
+        (tmp_path / "lily.json").write_text("{}")
+        mgr = MemoryManager(tmp_path, "lily")
+        assert mgr.delete_profile("ghost") is False
+
+    def test_empty_slug_returns_false(self, tmp_path):
+        mgr = MemoryManager(tmp_path, "lily")
+        assert mgr.delete_profile("") is False
+
+    def test_can_delete_own_active_profile(self, tmp_path):
+        (tmp_path / "lily.json").write_text("{}")
+        mgr = MemoryManager(tmp_path, "lily")
+        assert mgr.delete_profile("lily") is True
+        assert mgr.list_profiles() == []
+
+    def test_slug_is_sanitised_no_path_traversal(self, tmp_path):
+        # A crafted slug must never escape the profiles directory.
+        victim = tmp_path.parent / "victim.json"
+        victim.write_text("{}")
+        (tmp_path / "lily.json").write_text("{}")
+        mgr = MemoryManager(tmp_path, "lily")
+        assert mgr.delete_profile("../victim") is False
+        assert victim.exists()   # untouched
+        victim.unlink()

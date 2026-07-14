@@ -155,7 +155,7 @@ Then set `privacy.allow_cloud_fallback: true` in `config.yaml`. Audio never leav
 
 Tap the ⚙ gear (top-right) to open the settings panel:
 
-- **Kid** — switch between child profiles, or add a new one (each has its own memory).
+- **Kid** — switch between child profiles, add a new one, or remove one (tap the ✕ next to a name). Each child has its own memory; the last remaining profile can't be removed.
 - **Voice** — change the Piper voice; it reloads live (no restart) and is remembered.
 - **English level** — Pre A / A / B / C1 / C2, adjusts vocabulary and correction intensity.
 
