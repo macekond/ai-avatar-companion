@@ -43,6 +43,7 @@ let ws        = null
 let state     = 'idle'
 let amplitude = 0          // smoothed lip-sync value
 let targetAmp = 0
+let stageReservePx = 0     // px reserved on the right for the transcript panel
 let pttActive = false      // true while Space is held
 let fadeTimer = null       // for bubble fade-out
 
@@ -75,13 +76,16 @@ function initThree() {
 
   clock = new THREE.Clock()
   renderer.setAnimationLoop(onTick)
-  window.addEventListener('resize', fitViewport)
+  window.addEventListener('resize', applyStageLayout)
 }
 
 function fitViewport() {
-  camera.aspect = window.innerWidth / window.innerHeight
+  // The avatar stage shrinks to the left when the transcript panel is docked
+  // beside it, so the model stays fully visible instead of being covered.
+  const w = Math.max(1, window.innerWidth - stageReservePx)
+  camera.aspect = w / window.innerHeight
   camera.updateProjectionMatrix()
-  renderer.setSize(window.innerWidth, window.innerHeight)
+  renderer.setSize(w, window.innerHeight)
 }
 
 // ── Blink scheduler ───────────────────────────────────────────────────────
@@ -461,10 +465,31 @@ const transcriptCloseEl = document.getElementById('transcript-close')
 const transcriptListEl  = document.getElementById('transcript-list')
 const conversation = new Map()   // id → { el, youEl }
 
+// Below this width there isn't room to sit the avatar and the transcript
+// side by side (it would leave the avatar too cramped), so the panel falls
+// back to overlaying the avatar.
+const SIDE_BY_SIDE_MIN = 860
+// Right strip the docked panel occupies: its width (340) + gaps (16 each side).
+const PANEL_RESERVE = 372
+
+// Reserve space on the right for the transcript panel and reflow the avatar
+// stage into the remaining width, so the two sit side by side rather than
+// the panel covering the avatar.
+function applyStageLayout() {
+  const dock = !transcriptPanelEl.hidden && window.innerWidth >= SIDE_BY_SIDE_MIN
+  stageReservePx = dock ? PANEL_RESERVE : 0
+  const root = document.documentElement.style
+  root.setProperty('--stage-reserve', stageReservePx + 'px')
+  root.setProperty('--stage-w', (window.innerWidth - stageReservePx) + 'px')
+  document.body.classList.toggle('transcript-docked', dock)
+  if (renderer) fitViewport()
+}
+
 function toggleTranscript(open) {
   transcriptPanelEl.hidden = open === undefined ? !transcriptPanelEl.hidden : !open
   transcriptBtnEl.classList.toggle('active', !transcriptPanelEl.hidden)
   if (!transcriptPanelEl.hidden) toggleSettings(false)
+  applyStageLayout()
 }
 transcriptBtnEl.addEventListener('click', () => toggleTranscript())
 transcriptCloseEl.addEventListener('click', () => toggleTranscript(false))
