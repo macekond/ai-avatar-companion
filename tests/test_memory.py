@@ -452,3 +452,30 @@ class TestDeleteProfile:
         assert mgr.delete_profile("###") is False
         assert (tmp_path / "child.json").exists()   # untouched
         assert mgr.delete_profile("") is False
+
+    def test_late_save_cannot_resurrect_deleted_profile(self, tmp_path):
+        # A background extraction task holds its own reference to the manager
+        # and may outlive the drain timeout. Its save() must not recreate the
+        # file the parent just deleted — "remove this child" has to stick.
+        mgr = MemoryManager(tmp_path, "lily")
+        memory = ChildMemory(profile=ChildProfile(name="Lily", age=8))
+        mgr.save(memory)
+        assert mgr.delete_profile("lily") is True
+
+        mgr.save(memory)   # the late task, still running
+
+        assert mgr.load() is None
+        assert mgr.list_profiles() == []
+
+    def test_deleting_another_profile_does_not_block_own_saves(self, tmp_path):
+        # Only the deleted slug is tombstoned; the manager stays usable for
+        # its own (still-live) profile.
+        mgr = MemoryManager(tmp_path, "lily")
+        memory = ChildMemory(profile=ChildProfile(name="Lily", age=8))
+        mgr.save(memory)
+        (tmp_path / "mia.json").write_text("{}")
+
+        assert mgr.delete_profile("mia") is True
+        mgr.save(memory)
+
+        assert mgr.load() is not None

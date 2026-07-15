@@ -469,15 +469,25 @@ const conversation = new Map()   // id → { el, youEl }
 // side by side (it would leave the avatar too cramped), so the panel falls
 // back to overlaying the avatar.
 const SIDE_BY_SIDE_MIN = 860
-// Right strip the docked panel occupies: its width (340) + gaps (16 each side).
-const PANEL_RESERVE = 372
+// Gap left of the panel and between it and the window edge. The panel's own
+// width comes from CSS at measure time — hardcoding it here would silently
+// misalign the stage the moment #transcript-panel's width changes.
+const PANEL_GAP = 16
+
+// Right strip the docked panel occupies: its rendered width plus a gap each
+// side. Measured rather than assumed; falls back to the CSS width if the panel
+// is hidden (getBoundingClientRect is 0 on a display:none element).
+function panelReserve() {
+  const w = transcriptPanelEl.getBoundingClientRect().width || 340
+  return w + PANEL_GAP * 2
+}
 
 // Reserve space on the right for the transcript panel and reflow the avatar
 // stage into the remaining width, so the two sit side by side rather than
 // the panel covering the avatar.
 function applyStageLayout() {
   const dock = !transcriptPanelEl.hidden && window.innerWidth >= SIDE_BY_SIDE_MIN
-  stageReservePx = dock ? PANEL_RESERVE : 0
+  stageReservePx = dock ? panelReserve() : 0
   const root = document.documentElement.style
   root.setProperty('--stage-reserve', stageReservePx + 'px')
   root.setProperty('--stage-w', (window.innerWidth - stageReservePx) + 'px')
@@ -650,12 +660,23 @@ const modalCancelEl  = document.getElementById('modal-cancel')
 const modalConfirmEl = document.getElementById('modal-confirm')
 let modalResolve = null
 let modalHasInput = false
+let modalReturnFocus = null
+
+// Tab order inside the dialog: the input (when shown) then the two buttons.
+function modalFocusables() {
+  return [modalInputEl, modalCancelEl, modalConfirmEl].filter(el => !el.hidden)
+}
 
 function closeModal(result) {
   if (!modalResolve) return
   const resolve = modalResolve
   modalResolve = null
   modalOverlayEl.hidden = true
+  // Hand focus back to whatever opened the dialog (the '+' or '✕' chip), so
+  // keyboard users don't get dumped at the top of the document.
+  const returnTo = modalReturnFocus
+  modalReturnFocus = null
+  if (returnTo && returnTo.isConnected) returnTo.focus()
   resolve(result)
 }
 
@@ -665,8 +686,10 @@ function openModal({ message, input = false, placeholder = '',
                     confirmLabel = 'OK', danger = false } = {}) {
   // A dialog already open resolves as cancelled before opening the new one.
   if (modalResolve) closeModal(modalHasInput ? null : false)
+  const opener = document.activeElement
   return new Promise(resolve => {
     modalResolve = resolve
+    modalReturnFocus = opener instanceof HTMLElement ? opener : null
     modalHasInput = input
     modalMessageEl.textContent = message
     modalInputEl.hidden = !input
@@ -688,12 +711,35 @@ modalOverlayEl.addEventListener('click', (e) => {
   if (e.target === modalOverlayEl) closeModal(modalHasInput ? null : false)
 })
 modalInputEl.addEventListener('keydown', (e) => {
-  if (e.code === 'Enter') { e.preventDefault(); confirmModal() }
+  // NumpadEnter is a distinct code from Enter — both submit the name.
+  if (e.code === 'Enter' || e.code === 'NumpadEnter') {
+    e.preventDefault()
+    confirmModal()
+  }
 })
 window.addEventListener('keydown', (e) => {
-  if (e.code === 'Escape' && !modalOverlayEl.hidden) {
+  if (modalOverlayEl.hidden) return
+  if (e.code === 'Escape') {
     e.stopPropagation()
     closeModal(modalHasInput ? null : false)
+    return
+  }
+  // aria-modal="true" promises focus stays in the dialog — implement it, or
+  // Tab walks off into the page behind the overlay.
+  if (e.code === 'Tab') {
+    const items = modalFocusables()
+    if (!items.length) return
+    const first = items[0]
+    const last = items[items.length - 1]
+    const onFirst = document.activeElement === first
+    const onLast = document.activeElement === last
+    if (e.shiftKey && (onFirst || !items.includes(document.activeElement))) {
+      e.preventDefault()
+      last.focus()
+    } else if (!e.shiftKey && (onLast || !items.includes(document.activeElement))) {
+      e.preventDefault()
+      first.focus()
+    }
   }
 }, true)
 

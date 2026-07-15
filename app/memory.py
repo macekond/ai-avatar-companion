@@ -20,11 +20,14 @@ Usage:
 from __future__ import annotations
 
 import json
+import logging
 import re
 from dataclasses import dataclass, field, asdict
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Optional
+
+log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -179,6 +182,10 @@ class MemoryManager:
         self._max_problems = max_problems
         self._topic_ttl = topic_ttl_days
         self._problem_ttl = problem_ttl_days
+        # Slugs deleted through this manager. A background extraction task can
+        # outlive the drain timeout and still call save(); without a tombstone
+        # that late write recreates the file the parent just deleted.
+        self._deleted: set[str] = set()
 
     @property
     def slug(self) -> str:
@@ -199,7 +206,14 @@ class MemoryManager:
             return None   # corrupt file treated as missing
 
     def save(self, memory: ChildMemory) -> None:
-        """Persist memory to disk, creating the directory if needed."""
+        """Persist memory to disk, creating the directory if needed.
+
+        A no-op once this slug has been deleted: a late background save must
+        not resurrect a profile the parent removed on purpose.
+        """
+        if self._slug in self._deleted:
+            log.info("Ignoring save for deleted profile: %s", self._slug)
+            return
         self._dir.mkdir(parents=True, exist_ok=True)
         memory.last_updated = _today()
         with open(self._path, "w", encoding="utf-8") as f:
@@ -303,8 +317,17 @@ class MemoryManager:
         safe = name_to_slug(slug, fallback="")
         if not safe:
             return False
+        # Tombstone before unlinking, so a save() racing this call is refused
+        # rather than recreating the file a moment later.
+        self._deleted.add(safe)
         try:
             (self._dir / f"{safe}.json").unlink()
             return True
         except FileNotFoundError:
+            return False
+        except OSError as exc:
+            # Permissions, a directory in the way, a read-only volume: report
+            # failure rather than raising into the session's main loop, whose
+            # only handler is for ConnectionClosed — an escape kills the session.
+            log.error("Could not delete profile %s: %s", safe, exc)
             return False

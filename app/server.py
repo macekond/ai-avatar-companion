@@ -57,6 +57,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+from app.appearance import AppearanceStore, DEFAULT_AVATAR_KEY
 from app.config import Config, default_config_path
 from app.memory import ChildMemory, ChildProfile, MemoryManager, name_to_slug
 from app.settings import load_settings, save_setting
@@ -72,7 +73,6 @@ AVAILABLE_VOICES = [
     {"id": "en_US-norman-medium",   "label": "Norman — deeper male (US)"},
 ]
 _VOICE_IDS = {v["id"] for v in AVAILABLE_VOICES}
-from app.appearance import AppearanceStore, DEFAULT_AVATAR_KEY
 from app.memory_extractor import MemoryExtractor
 from app.pipeline.llm import LLMPipeline
 from app.pipeline.stt import STTPipeline, SAMPLE_RATE
@@ -119,6 +119,12 @@ _REENGAGEMENT_HINT = (
 # up. Opening the input stream can block indefinitely when microphone
 # permission is missing (macOS TCC) — the session must not hang with it.
 RECORD_GRACE_S = 10.0
+
+# How long teardown/profile-swap waits for in-flight extraction tasks before
+# abandoning them. Abandoning does not stop the underlying thread, so anything
+# that must not race a late task cannot rely on this alone — see
+# MemoryManager's deleted-slug tombstone.
+DRAIN_TIMEOUT_S = 5.0
 
 
 def _record(stop: threading.Event) -> np.ndarray:
@@ -185,20 +191,42 @@ def _extract_age(text: str) -> Optional[int]:
 # One PTT turn helper
 # ---------------------------------------------------------------------------
 
+async def _await_ptt(next_raw, stash, wanted: str, timeout: float = 60.0) -> bool:
+    """Read until a ``wanted`` PTT message arrives; True if it did.
+
+    Anything else (avatar_loaded, set_level, …) is handed to ``stash`` for the
+    main loop to process later, never consumed as if it were the PTT message.
+    Swallowing one would shift every later read by one: the child's ptt_start
+    would be taken for the ptt_stop ending a recording that never captured
+    their answer. ``stash`` must not feed back into ``next_raw`` before this
+    returns, or the same message would be read and re-stashed forever.
+    """
+    while True:
+        try:
+            raw = await asyncio.wait_for(next_raw(), timeout=timeout)
+        except asyncio.TimeoutError:
+            return False
+        try:
+            mtype = json.loads(raw).get("type")
+        except (json.JSONDecodeError, TypeError, AttributeError):
+            continue        # malformed frame — drop it, keep waiting
+        if mtype == wanted:
+            return True
+        stash(raw)
+
+
 async def _one_ptt_turn(
-    ws,
+    next_raw,
+    stash,
     stt: STTPipeline,
     loop: asyncio.AbstractEventLoop,
     send,
 ) -> str:
-    """Wait for Space-press, record, and return the transcript (may be empty)."""
+    """Wait for Space-release, record, and return the transcript (may be empty)."""
     await send({"type": "state", "state": "listening"})
     stop_rec = threading.Event()
     rec_task = loop.run_in_executor(None, _record, stop_rec)
-    try:
-        raw = await asyncio.wait_for(ws.recv(), timeout=60.0)
-        json.loads(raw)  # consume ptt_stop
-    except asyncio.TimeoutError:
+    if not await _await_ptt(next_raw, stash, "ptt_stop"):
         stop_rec.set()
         await send({"type": "state", "state": "idle"})
         return ""
@@ -217,7 +245,8 @@ async def _one_ptt_turn(
 # ---------------------------------------------------------------------------
 
 async def _run_onboarding(
-    ws,
+    next_raw,
+    stash,
     config: Config,
     stt: STTPipeline,
     tts: TTSPipeline,
@@ -226,7 +255,14 @@ async def _run_onboarding(
     send,
     send_from_thread,
 ) -> ChildMemory:
-    """Two-turn onboarding: learn the child's name and age."""
+    """Two-turn onboarding: learn the child's name and age.
+
+    Reads through ``next_raw`` (the same buffer the main loop drains) rather
+    than the socket directly, so messages the UI sends on connect — notably
+    'avatar_loaded' from ws.onopen, which lands before the first question is
+    even asked — are stashed for the main loop instead of being mistaken for
+    the child's Space-press.
+    """
     avatar = config.personality.avatar_name
 
     def amp(v: float) -> None:
@@ -241,12 +277,9 @@ async def _run_onboarding(
     await send({"type": "amplitude", "value": 0.0})
     await send({"type": "state", "state": "idle"})
 
-    # consume ptt_start, then record
-    try:
-        await asyncio.wait_for(ws.recv(), timeout=60.0)
-    except asyncio.TimeoutError:
-        pass
-    name_transcript = await _one_ptt_turn(ws, stt, loop, send)
+    # wait for Space-press, then record
+    await _await_ptt(next_raw, stash, "ptt_start")
+    name_transcript = await _one_ptt_turn(next_raw, stash, stt, loop, send)
     name = _extract_name(name_transcript) if name_transcript else None
     if not name:
         name = "Friend"
@@ -259,11 +292,8 @@ async def _run_onboarding(
     await send({"type": "amplitude", "value": 0.0})
     await send({"type": "state", "state": "idle"})
 
-    try:
-        await asyncio.wait_for(ws.recv(), timeout=60.0)
-    except asyncio.TimeoutError:
-        pass
-    age_transcript = await _one_ptt_turn(ws, stt, loop, send)
+    await _await_ptt(next_raw, stash, "ptt_start")
+    age_transcript = await _one_ptt_turn(next_raw, stash, stt, loop, send)
     age = _extract_age(age_transcript) if age_transcript else None
 
     memory = ChildMemory(profile=ChildProfile(name=name, age=age))
@@ -348,10 +378,13 @@ async def _session(
     # memory save doesn't race a still-running background save.
     pending_tasks: list[asyncio.Task] = []
 
-    async def _drain_pending(timeout: float = 5.0) -> None:
+    async def _drain_pending(timeout: float | None = None) -> None:
         still_running = [t for t in pending_tasks if not t.done()]
         if still_running:
-            await asyncio.wait(still_running, timeout=timeout)
+            await asyncio.wait(
+                still_running,
+                timeout=DRAIN_TIMEOUT_S if timeout is None else timeout,
+            )
         pending_tasks.clear()
 
     def _apply_extracted_memory(mem_ref: ChildMemory) -> None:
@@ -363,6 +396,35 @@ async def _session(
         another. Gating on identity makes the stale callback a no-op."""
         if mem_ref is memory:
             llm.set_memory(mem_ref)
+
+    # Messages consumed by a phase they don't belong to — the barge-in watcher,
+    # the listening phase, or onboarding — are buffered here and drained before
+    # the next real read from the socket. Declared before onboarding because it
+    # reads through this buffer too.
+    buffered_msgs: list[str] = []
+
+    async def _next_raw() -> str:
+        if buffered_msgs:
+            return buffered_msgs.pop(0)
+        # ws.recv(), not async-for/__anext__: the real websockets
+        # ServerConnection has no __anext__ (only __aiter__), so iteration
+        # helpers must go through recv(). Raises ConnectionClosed on close.
+        return await ws.recv()
+
+    async def _onboard(mgr: MemoryManager) -> ChildMemory:
+        """Run onboarding, re-queueing anything it set aside for the main loop.
+
+        The stash is local, not buffered_msgs itself: _next_raw pops from
+        buffered_msgs, so stashing there mid-onboarding would re-serve the same
+        message to the reader that just set it aside — an infinite loop.
+        """
+        stashed: list[str] = []
+        result = await _run_onboarding(
+            _next_raw, stashed.append, config, stt, tts, mgr, loop,
+            send, send_from_thread,
+        )
+        buffered_msgs.extend(stashed)
+        return result
 
     # Level for this session — starts from config, updated by UI 'set_level'
     # so telemetry reflects what the child is actually practising.
@@ -416,9 +478,7 @@ async def _session(
     # ── Onboarding or memory-loaded ──────────────────────────────────────
     if mem_mgr and memory is None:
         await send({"type": "onboarding_start"})
-        memory = await _run_onboarding(
-            ws, config, stt, tts, mem_mgr, loop, send, send_from_thread,
-        )
+        memory = await _onboard(mem_mgr)
         llm.set_memory(memory)
     elif memory is not None:
         llm.set_memory(memory)
@@ -467,28 +527,13 @@ async def _session(
                     "active": new_slug})
         if memory is None:
             await send({"type": "onboarding_start"})
-            memory = await _run_onboarding(
-                ws, config, stt, tts, mem_mgr, loop, send, send_from_thread,
-            )
+            memory = await _onboard(mem_mgr)
             llm.set_memory(memory)
         else:
             await send({"type": "memory_loaded",
                         "name": memory.profile.name,
                         "age": memory.profile.age})
         await _send_greeting(config, memory, tts, send, send_from_thread)
-
-    # Messages consumed by the barge-in watcher (or by the listening phase)
-    # that belong to the main loop are buffered here and drained before the
-    # next real read from the socket.
-    buffered_msgs: list[str] = []
-
-    async def _next_raw() -> str:
-        if buffered_msgs:
-            return buffered_msgs.pop(0)
-        # ws.recv(), not async-for/__anext__: the real websockets
-        # ServerConnection has no __anext__ (only __aiter__), so iteration
-        # helpers must go through recv(). Raises ConnectionClosed on close.
-        return await ws.recv()
 
     try:
         while True:
@@ -549,7 +594,17 @@ async def _session(
                 raw_slug = msg.get("slug", "")
                 if not isinstance(raw_slug, str) or not raw_slug.strip():
                     continue
-                new_slug = name_to_slug(raw_slug)
+                # fallback="" so a name with no ASCII letters or digits at all
+                # ("李明", "Мария") is rejected instead of collapsing to the
+                # "child" default — two such names would otherwise share one
+                # profile and read each other's memory.
+                new_slug = name_to_slug(raw_slug, fallback="")
+                if not new_slug:
+                    await send({
+                        "type": "profile_error",
+                        "message": "Please use letters or numbers in the name.",
+                    })
+                    continue
                 await _swap_profile(new_slug)
                 continue
 
