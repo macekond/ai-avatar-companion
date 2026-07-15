@@ -267,7 +267,7 @@ class TestAvatarAppearance:
     async def test_avatar_loaded_sets_matching_appearance(self, base_config):
         llm = _mock_llm()
         ws = MockWebSocket([
-            json.dumps({"type": "avatar_loaded", "key": "AvatarSample_A"}),
+            json.dumps({"type": "avatar_loaded", "key": "Olivia"}),
         ])
         await _session(
             ws, base_config, _mock_stt(), llm, _mock_tts_with_amplitude(),

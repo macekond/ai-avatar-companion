@@ -257,7 +257,7 @@ Notes for recipients (Apple Silicon Macs only):
 **Avatar (VRM):**
 - **three.js / @pixiv/three-vrm** — MIT.
 - **Default model — VIPE Hero #2707** ([Open Source Avatars](https://www.opensourceavatars.com/en/finder?avatar=vipe-hero-2707)) — **CC-BY**: free to use, modify, and redistribute *with attribution*. Attribution: *VIPE Heroes Genesis by VIPE ([vipe.io](https://vipe.io)), via opensourceavatars.com (ToxSam).*
-- **Alternative — `AvatarSample_A.vrm`** (pixiv VRoid sample) — **CC0**, no attribution required.
+- **Alternative — `Olivia.vrm`** (100 Avatars #056 by Polygonal Mind, via [Open Source Avatars](https://www.opensourceavatars.com/)) — **CC0** (verified in the file's own VRM metadata): public domain, free to use, modify, and redistribute, no attribution required.
 
 **Voice (Piper):**
 - **Piper engine** (`piper-tts`) — **GPL-3.0-or-later**. Bundling it in the distributed app makes the app carry GPL obligations; fine for this open-source project.

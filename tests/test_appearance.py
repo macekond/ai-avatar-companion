@@ -30,7 +30,7 @@ def test_curated_lookup_returns_bundled_description(tmp_path):
 
 def test_curated_lookup_for_sample_avatar(tmp_path):
     store = AppearanceStore(tmp_path)
-    got = store.get("AvatarSample_A")
+    got = store.get("Olivia")
     assert got is not None
     assert got.source == "curated"
     assert got.description.strip()

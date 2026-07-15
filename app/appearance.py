@@ -42,11 +42,11 @@ _CURATED: dict[str, str] = {
         "sleeves and a little purple skull badge, plus a tiny fang and a small black "
         "'x' mark on your cheek. You come across as a friendly, energetic girl."
     ),
-    "AvatarSample_A": (
-        "You look like a sweet, gentle girl with a calm, kind vibe. You have short "
-        "dark-brown hair in a soft bob and warm brown eyes, with a shy little smile. "
-        "You wear a cream cardigan laced with blue ribbons over a black lace-trimmed "
-        "top. You come across as quiet and friendly."
+    "Olivia": (
+        "You look like a cheerful, friendly girl with a calm, easy-going vibe. You "
+        "have bright yellow hair styled into a tall pointed hood, with long strands "
+        "that frame your face and end in little gold beads. You wear a cosy black "
+        "high-necked top. You come across as sweet and approachable."
     ),
 }
 
