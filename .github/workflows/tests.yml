@@ -1,0 +1,41 @@
+name: Tests
+
+# Runs the offline pytest suite.
+#   • Automatically on every pull request targeting `main`.
+#   • On demand against any branch or PR via the "Run workflow" button
+#     (Actions tab → Tests → Run workflow) or the `gh` CLI:
+#       gh workflow run tests.yml --ref <branch>
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# Cancel superseded runs on the same ref to save CI minutes.
+concurrency:
+  group: tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    name: pytest (offline suite)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-ci.txt
+
+      - name: Install dependencies
+        # Lean, test-only dep set — see requirements-ci.txt. Runs the same
+        # suite as requirements-dev.txt without the heavy audio/ML installs.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-ci.txt
+
+      - name: Run tests
+        run: pytest -q
