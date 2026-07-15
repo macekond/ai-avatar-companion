@@ -271,7 +271,7 @@ Notes for recipients (Apple Silicon Macs only):
 
 Contributions are welcome! A few notes:
 
-- Run the tests before opening a PR: `.venv/bin/python -m pytest -q` (271 tests, offline, no hardware needed — see [TESTING.md](TESTING.md)).
+- Run the tests before opening a PR: `.venv/bin/python -m pytest -q` (offline, no hardware needed — see [TESTING.md](TESTING.md)).
 - Keep the local-first, privacy-first design: no telemetry leaves the device, audio never goes to the cloud.
 - The UI avatar layer is intentionally not unit-tested (browser WebGL); verify visual changes manually via `python run.py`.
 - Please describe *why* a change is needed, not just *what* it does.
