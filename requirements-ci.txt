@@ -1,0 +1,17 @@
+# Minimal dependency set for the offline pytest suite (used by CI).
+#
+# The offline tests import the heavy audio/ML stack (faster-whisper, piper-tts,
+# sounddevice) only lazily and mock it, so installing those — plus their large
+# transitive deps (ctranslate2, onnxruntime, av) and pyinstaller — just slows CI
+# down for zero extra coverage. This file installs only what is imported at
+# module load or patched by the tests. It runs the exact same test set as
+# `requirements-dev.txt` (verified: identical collection, no skips).
+#
+# Keep version constraints in sync with requirements.txt / requirements-dev.txt.
+ollama>=0.3.0
+PyYAML>=6.0.1
+python-dotenv>=1.0.0
+numpy>=1.24.0
+websockets>=12.0
+pytest>=8.0
+pytest-asyncio>=0.23
