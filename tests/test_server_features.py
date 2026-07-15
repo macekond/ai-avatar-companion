@@ -247,3 +247,43 @@ class TestSwitchProfileDrainsPending:
             f"stale extraction leaked Lily's memory after the switch: "
             f"{set_memory_names}"
         )
+
+
+# ── Avatar appearance wiring ────────────────────────────────────────────────
+
+class TestAvatarAppearance:
+    async def test_default_appearance_set_at_connect(self, base_config):
+        llm = _mock_llm()
+        ws = MockWebSocket([])   # no messages; just connect + disconnect
+        await _session(
+            ws, base_config, _mock_stt(), llm, _mock_tts_with_amplitude(),
+            None, None,
+        )
+        # Default avatar's curated description pushed to the pipeline at connect.
+        assert llm.set_appearance.called
+        first_arg = llm.set_appearance.call_args_list[0].args[0]
+        assert isinstance(first_arg, str) and first_arg.strip()
+
+    async def test_avatar_loaded_sets_matching_appearance(self, base_config):
+        llm = _mock_llm()
+        ws = MockWebSocket([
+            json.dumps({"type": "avatar_loaded", "key": "AvatarSample_A"}),
+        ])
+        await _session(
+            ws, base_config, _mock_stt(), llm, _mock_tts_with_amplitude(),
+            None, None,
+        )
+        # The most recent set_appearance reflects the loaded avatar (non-empty curated string).
+        last_arg = llm.set_appearance.call_args_list[-1].args[0]
+        assert isinstance(last_arg, str) and last_arg.strip()
+
+    async def test_unknown_avatar_clears_appearance(self, base_config):
+        llm = _mock_llm()
+        ws = MockWebSocket([
+            json.dumps({"type": "avatar_loaded", "key": "does_not_exist"}),
+        ])
+        await _session(
+            ws, base_config, _mock_stt(), llm, _mock_tts_with_amplitude(),
+            None, None,
+        )
+        assert llm.set_appearance.call_args_list[-1].args[0] is None

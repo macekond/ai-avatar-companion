@@ -20,6 +20,7 @@ Browser → server:
   {"type": "set_voice",      "voice": "en_US-kristin-medium"}
   {"type": "switch_profile", "slug": "mia"}
   {"type": "delete_profile", "slug": "mia"}
+  {"type": "avatar_loaded", "key": "VIPEHero_2707"}   # avatar changed → refresh appearance
 
 Server → browser:
   {"type": "init",          "level": "A"}
@@ -47,6 +48,7 @@ import logging
 import re
 import sys
 import threading
+from pathlib import Path
 from typing import Any, Optional
 
 import numpy as np
@@ -70,6 +72,7 @@ AVAILABLE_VOICES = [
     {"id": "en_US-norman-medium",   "label": "Norman — deeper male (US)"},
 ]
 _VOICE_IDS = {v["id"] for v in AVAILABLE_VOICES}
+from app.appearance import AppearanceStore, DEFAULT_AVATAR_KEY
 from app.memory_extractor import MemoryExtractor
 from app.pipeline.llm import LLMPipeline
 from app.pipeline.stt import STTPipeline, SAMPLE_RATE
@@ -360,6 +363,19 @@ async def _session(
     # after a hot-swap) inherits whatever conversation was in progress.
     llm.clear_history()
 
+    # Appearance: the avatar can answer "what do you look like?" from a curated
+    # (or cached auto-derived) description. Set the default avatar now; the UI's
+    # 'avatar_loaded' message refreshes it if a different avatar is shown.
+    appearance_store = AppearanceStore(
+        Path(config.memory.profiles_dir).expanduser().parent / "avatars"
+    )
+
+    def _apply_appearance(key: str) -> None:
+        found = appearance_store.get(key)
+        llm.set_appearance(found.description if found else None)
+
+    _apply_appearance(DEFAULT_AVATAR_KEY)
+
     # ── Load / initialise memory ─────────────────────────────────────────
     memory: Optional[ChildMemory] = mem_mgr.load() if mem_mgr else None
 
@@ -483,6 +499,11 @@ async def _session(
                 active_level = new_level
                 save_setting("level", new_level)
                 log.info("Level changed to: %s", new_level)
+                continue
+
+            # ── Avatar changed: refresh appearance description ───────────
+            if mtype == "avatar_loaded":
+                _apply_appearance(msg.get("key", ""))
                 continue
 
             # ── Voice change ─────────────────────────────────────────────
