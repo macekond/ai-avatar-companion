@@ -327,6 +327,11 @@ function connectWS() {
   ws.onopen = () => {
     console.log('[ws] connected')
     labelEl.textContent = 'Connected! Loading avatar…'
+    // Tell the server which avatar is on screen so it can load the matching
+    // appearance description ("what colour is your hair?"). The key is the VRM
+    // basename, derived from the static MODEL_PATH — no model load needed.
+    const avatarKey = MODEL_PATH.split('/').pop().replace(/\.vrm$/i, '')
+    wsSend({ type: 'avatar_loaded', key: avatarKey })
   }
 
   ws.onmessage = (e) => {

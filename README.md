@@ -163,6 +163,8 @@ Voice and level are persisted to `~/.ai-avatar/settings.json` and applied on the
 
 Tap the 📝 button (top-right) to open the **Conversation** panel — a running transcript of the session where each grammar fix is shown inline (e.g. ~~goed~~ → **went** *(past tense)*), so a parent or child can review what was gently corrected.
 
+Nova also knows what she looks like — ask "what colour is your hair?" or "are you a boy?" and she answers in character, grounded in the avatar on screen.
+
 Only permissively-licensed voices (public domain / CC0) are offered — see [Licence notes](#licence-notes).
 
 ---
