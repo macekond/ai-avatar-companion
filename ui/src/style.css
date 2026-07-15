@@ -132,11 +132,21 @@ html, body {
 }
 #transcript-panel[hidden] { display: none; }
 
+/* Docked beside the avatar: stretch into a full-height column that fills the
+   vertical space, rather than a short card that hugs its content. Stays below
+   the top-right control buttons (top: 64px) so its header doesn't collide. */
+body.transcript-docked #transcript-panel {
+  bottom: 16px;
+  max-height: none;
+}
+
 #transcript-list {
   overflow-y: auto;
   font-size: 0.85rem;
   line-height: 1.45;
 }
+/* Let the list grow to fill the docked column so the panel spans full height. */
+body.transcript-docked #transcript-list { flex: 1 1 auto; }
 .transcript-empty { color: #a08a76; font-style: italic; }
 
 .turn { padding: 8px 0; border-bottom: 1px solid rgba(150, 120, 90, 0.14); }
