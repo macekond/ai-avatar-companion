@@ -87,7 +87,7 @@ pip install -r requirements-dev.txt
 | `TTSPipeline.speak_streaming()` playback | Requires audio output device | `python main.py --voice` |
 | `STTPipeline.record()` | Requires microphone | `python main.py --voice` |
 | `app/server.py` WebSocket bind/accept | Infrastructure, not logic | `python run.py` |
-| Live2D rendering | Browser WebGL, no headless driver | `python run.py` + visual inspection |
+| VRM avatar rendering | Browser WebGL, no headless driver | `python run.py` + visual inspection |
 | Full voice loop latency | Hardware-dependent | Phase 2 exit criterion: release Space → first audio ≤ 1.5 s |
 
 The Phase 2 exit criteria from the design document serve as the manual test specification for hardware-dependent behaviour.

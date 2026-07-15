@@ -111,9 +111,9 @@ the app.
 ## Docs
 
 `ai-avatar-companion-design.md` is a **historical snapshot** — good for *why* a decision was made,
-unreliable for *how* things work now (its avatar sections still describe the pre-VRM Live2D stack).
-Current truth lives next to the code: the protocol in `app/server.py`'s docstring, the pipeline in the
-README, invariants here, test strategy in TESTING.md.
+unreliable for *how* things work now (its avatar sections describe a stack that was replaced; see
+`ui/README.md` for that history). Current truth lives next to the code: the protocol in
+`app/server.py`'s docstring, the pipeline in the README, invariants here, test strategy in TESTING.md.
 
 Prose that restates what code already says rots — a stale count or diagram costs more trust than it
 ever bought. Prefer facts a reader can't silently contradict: put them in a docstring beside the code,
