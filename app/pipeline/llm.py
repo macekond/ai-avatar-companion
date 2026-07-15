@@ -61,6 +61,11 @@ _PATTERN_REVIEW_HINT = (
     "If no pattern stands out, simply continue the conversation naturally."
 )
 
+_APPEARANCE_TEMPLATE = (
+    "About how you look — if asked about your appearance, answer in first "
+    "person and stay in character: {description}"
+)
+
 
 class LLMPipeline:
     """Wraps Ollama streaming to yield reply sentences one at a time.
@@ -74,6 +79,7 @@ class LLMPipeline:
         self._config = config
         self._base_prompt = config.format_system_prompt()
         self._memory = None
+        self._appearance: str | None = None
         self._system_prompt = self._build_prompt(config.child.level)
         self._history: list[dict[str, str]] = []
         self._pending_hint: str | None = None   # one-shot extra system message
@@ -85,6 +91,8 @@ class LLMPipeline:
             parts.append(instruction)
         if memory is not None:
             parts.append(self._format_memory_block(memory))
+        if self._appearance:
+            parts.append(_APPEARANCE_TEMPLATE.format(description=self._appearance))
         # Always last: the non-negotiable "reply only in English" rule. Placed
         # after everything else so the model treats it as the final word.
         parts.append(LANGUAGE_LOCK)
@@ -107,6 +115,15 @@ class LLMPipeline:
         """
         self._memory = memory
         self._system_prompt = self._build_prompt(self._config.child.level, memory)
+
+    def set_appearance(self, text: str | None) -> None:
+        """Set (or clear) the avatar's appearance description in the system prompt.
+
+        Pass a description string so the avatar can answer "what do you look
+        like?" in character. Pass None to remove it. Takes effect next turn.
+        """
+        self._appearance = text
+        self._system_prompt = self._build_prompt(self._config.child.level, self._memory)
 
     @staticmethod
     def _format_memory_block(memory) -> str:

@@ -10,6 +10,7 @@ import pytest
 from unittest.mock import MagicMock, patch
 
 from app.config import Config, ChildConfig, PersonalityConfig, LLMConfig
+from app.levels import LANGUAGE_LOCK
 from app.pipeline.llm import (
     LLMPipeline,
     _extract_sentences,
@@ -447,3 +448,39 @@ class TestChatMocked:
         with patch("ollama.chat", return_value=fake_stream("Nice!")):
             list(llm.chat("How are you?"))
         assert len(llm._history) == 4
+
+
+# ── Appearance injection ──────────────────────────────────────────────────────
+
+class TestAppearanceInjection:
+    def test_no_appearance_block_by_default(self):
+        pipe = make_pipeline()
+        assert "how you look" not in pipe._system_prompt.lower()
+
+    def test_set_appearance_adds_block_before_language_lock(self):
+        pipe = make_pipeline()
+        pipe.set_appearance("You have brown hair and a red top.")
+        prompt = pipe._system_prompt
+        assert "You have brown hair and a red top." in prompt
+        # Appearance must come before the non-negotiable language lock.
+        assert prompt.index("brown hair") < prompt.index(LANGUAGE_LOCK)
+
+    def test_set_appearance_none_removes_block(self):
+        pipe = make_pipeline()
+        pipe.set_appearance("You have brown hair and a red top.")
+        pipe.set_appearance(None)
+        assert "brown hair" not in pipe._system_prompt
+
+    def test_appearance_survives_level_change(self):
+        pipe = make_pipeline()
+        pipe.set_appearance("You have brown hair.")
+        pipe.set_level("B")
+        assert "brown hair" in pipe._system_prompt
+
+    def test_appearance_survives_memory_change(self):
+        pipe = make_pipeline()
+        pipe.set_appearance("You have brown hair.")
+        from app.memory import ChildMemory, ChildProfile
+        mem = ChildMemory(profile=ChildProfile(name="Lily", age=8))
+        pipe.set_memory(mem)
+        assert "brown hair" in pipe._system_prompt

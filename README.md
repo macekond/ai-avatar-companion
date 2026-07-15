@@ -163,6 +163,8 @@ Voice and level are persisted to `~/.ai-avatar/settings.json` and applied on the
 
 Tap the 📝 button (top-right) to open the **Conversation** panel — a running transcript of the session where each grammar fix is shown inline (e.g. ~~goed~~ → **went** *(past tense)*), so a parent or child can review what was gently corrected.
 
+Nova also knows what she looks like — ask "what colour is your hair?" or "are you a boy?" and she answers in character, grounded in the avatar on screen.
+
 Only permissively-licensed voices (public domain / CC0) are offered — see [Licence notes](#licence-notes).
 
 ---
@@ -255,7 +257,7 @@ Notes for recipients (Apple Silicon Macs only):
 **Avatar (VRM):**
 - **three.js / @pixiv/three-vrm** — MIT.
 - **Default model — VIPE Hero #2707** ([Open Source Avatars](https://www.opensourceavatars.com/en/finder?avatar=vipe-hero-2707)) — **CC-BY**: free to use, modify, and redistribute *with attribution*. Attribution: *VIPE Heroes Genesis by VIPE ([vipe.io](https://vipe.io)), via opensourceavatars.com (ToxSam).*
-- **Alternative — `AvatarSample_A.vrm`** (pixiv VRoid sample) — **CC0**, no attribution required.
+- **Alternative — `Olivia.vrm`** (100 Avatars #056 by Polygonal Mind, via [Open Source Avatars](https://www.opensourceavatars.com/)) — **CC0** (verified in the file's own VRM metadata): public domain, free to use, modify, and redistribute, no attribution required.
 
 **Voice (Piper):**
 - **Piper engine** (`piper-tts`) — **GPL-3.0-or-later**. Bundling it in the distributed app makes the app carry GPL obligations; fine for this open-source project.

@@ -19,9 +19,10 @@ License: **CC-BY** — free to use, modify, and redistribute **with
 attribution**. Attribution: *VIPE Heroes Genesis by VIPE
 ([vipe.io](https://vipe.io)), via opensourceavatars.com (ToxSam).*
 
-Alternative: `public/avatar/AvatarSample_A.vrm` — pixiv's official VRoid
-sample model, **CC0** (no attribution needed). Source:
-[madjin/vrm-samples](https://github.com/madjin/vrm-samples).
+Alternative: `public/avatar/Olivia.vrm` — 100 Avatars #056 by Polygonal Mind,
+**CC0** (public domain, no attribution needed; verified in the file's own VRM
+metadata). Source:
+[Open Source Avatars](https://www.opensourceavatars.com/) (ToxSam).
 
 To use a different avatar, drop any `.vrm` file in `public/avatar/` and update
 `MODEL_PATH` in `src/main.js`. The state machine uses standard VRM humanoid
