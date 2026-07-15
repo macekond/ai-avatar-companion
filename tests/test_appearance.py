@@ -3,9 +3,6 @@
 Pure Python — no Ollama, no hardware. Curated lookups never touch disk;
 derive/cache round-trips use a tmp_path cache dir.
 """
-import json
-from pathlib import Path
-
 import pytest
 
 from app.appearance import (
@@ -42,6 +39,12 @@ def test_curated_lookup_for_sample_avatar(tmp_path):
 def test_unknown_key_returns_none(tmp_path):
     store = AppearanceStore(tmp_path)
     assert store.get("no_such_avatar") is None
+
+
+def test_blank_key_returns_none(tmp_path):
+    store = AppearanceStore(tmp_path)
+    assert store.get("") is None
+    assert store.get("   ") is None
 
 
 # ── Colour mapping ──────────────────────────────────────────────────────────

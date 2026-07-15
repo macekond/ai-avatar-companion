@@ -104,6 +104,8 @@ class AppearanceStore:
         self._dir = Path(cache_dir).expanduser()
 
     def get(self, key: str) -> Optional[AvatarAppearance]:
+        if not key or not key.strip():
+            return None
         if key in _CURATED:
             return AvatarAppearance(
                 key=key,

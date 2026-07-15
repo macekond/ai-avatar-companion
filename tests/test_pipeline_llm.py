@@ -464,3 +464,11 @@ class TestAppearanceInjection:
         pipe.set_appearance("You have brown hair.")
         pipe.set_level("B")
         assert "brown hair" in pipe._system_prompt
+
+    def test_appearance_survives_memory_change(self):
+        pipe = make_pipeline()
+        pipe.set_appearance("You have brown hair.")
+        from app.memory import ChildMemory, ChildProfile
+        mem = ChildMemory(profile=ChildProfile(name="Lily", age=8))
+        pipe.set_memory(mem)
+        assert "brown hair" in pipe._system_prompt
