@@ -20,33 +20,75 @@ Usage:
 from __future__ import annotations
 
 import json
+import logging
 import re
 from dataclasses import dataclass, field, asdict
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Optional
 
+log = logging.getLogger(__name__)
+
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-def name_to_slug(name: str) -> str:
+def name_to_slug(name: str, fallback: str = "child") -> str:
     """Convert a display name to a filesystem-safe slug.
 
     Examples:
         "Lily"       → "lily"
         "Mary Kate"  → "mary_kate"
         "Björn"      → "bjrn"   (non-ASCII stripped)
+
+    Input that sanitises to nothing (empty, whitespace, or all non-ASCII)
+    returns ``fallback``. Callers that must not conflate junk with a real
+    profile — e.g. deletion — pass ``fallback=""`` and reject the empty result.
     """
     s = name.lower().strip()
     s = re.sub(r"\s+", "_", s)
     s = re.sub(r"[^a-z0-9_]", "", s)
-    return s or "child"
+    return s or fallback
 
 
 def _today() -> str:
     return date.today().isoformat()
+
+
+def humanize_since(iso_date: str, today: Optional[date] = None) -> str:
+    """Describe how long ago ``iso_date`` was, in kid-friendly relative terms.
+
+    Used to give the conversation model temporal awareness so it can say
+    things like "we talked about that yesterday". Buckets:
+
+        today · yesterday · N days ago · last week · N weeks ago ·
+        last month · N months ago
+
+    A future date (e.g. clock skew) collapses to "today".
+    """
+    today = today or date.today()
+    days = (today - date.fromisoformat(iso_date)).days
+    if days <= 0:
+        return "today"
+    if days == 1:
+        return "yesterday"
+    if days < 7:
+        return f"{days} days ago"
+    if days < 14:
+        return "last week"
+    if days < 28:
+        return f"{days // 7} weeks ago"
+    if days < 60:
+        return "last month"
+    return f"{days // 30} months ago"
+
+
+def today_context(today: Optional[date] = None) -> str:
+    """Return a spoken-style anchor for the current day, e.g.
+    "Tuesday, 14 July 2026" — no leading zero on the day, portable."""
+    today = today or date.today()
+    return f"{today.strftime('%A')}, {today.day} {today.strftime('%B')} {today.year}"
 
 
 # ---------------------------------------------------------------------------
@@ -140,6 +182,10 @@ class MemoryManager:
         self._max_problems = max_problems
         self._topic_ttl = topic_ttl_days
         self._problem_ttl = problem_ttl_days
+        # Slugs deleted through this manager. A background extraction task can
+        # outlive the drain timeout and still call save(); without a tombstone
+        # that late write recreates the file the parent just deleted.
+        self._deleted: set[str] = set()
 
     @property
     def slug(self) -> str:
@@ -160,7 +206,14 @@ class MemoryManager:
             return None   # corrupt file treated as missing
 
     def save(self, memory: ChildMemory) -> None:
-        """Persist memory to disk, creating the directory if needed."""
+        """Persist memory to disk, creating the directory if needed.
+
+        A no-op once this slug has been deleted: a late background save must
+        not resurrect a profile the parent removed on purpose.
+        """
+        if self._slug in self._deleted:
+            log.info("Ignoring save for deleted profile: %s", self._slug)
+            return
         self._dir.mkdir(parents=True, exist_ok=True)
         memory.last_updated = _today()
         with open(self._path, "w", encoding="utf-8") as f:
@@ -251,3 +304,30 @@ class MemoryManager:
         if not self._dir.exists():
             return []
         return sorted(p.stem for p in self._dir.glob("*.json"))
+
+    def delete_profile(self, slug: str) -> bool:
+        """Delete the profile JSON for ``slug``.
+
+        The slug is re-sanitised through ``name_to_slug`` so a crafted value
+        can never escape the profiles directory (path traversal). ``fallback=""``
+        means junk that sanitises to nothing returns False rather than silently
+        collapsing to the ``"child"`` default and deleting an unrelated profile.
+        Returns True if a file was removed, False if there was nothing to delete.
+        """
+        safe = name_to_slug(slug, fallback="")
+        if not safe:
+            return False
+        # Tombstone before unlinking, so a save() racing this call is refused
+        # rather than recreating the file a moment later.
+        self._deleted.add(safe)
+        try:
+            (self._dir / f"{safe}.json").unlink()
+            return True
+        except FileNotFoundError:
+            return False
+        except OSError as exc:
+            # Permissions, a directory in the way, a read-only volume: report
+            # failure rather than raising into the session's main loop, whose
+            # only handler is for ConnectionClosed — an escape kills the session.
+            log.error("Could not delete profile %s: %s", safe, exc)
+            return False

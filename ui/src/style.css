@@ -10,11 +10,13 @@ html, body {
   -webkit-user-select: none;
 }
 
-/* three.js canvas — fills the viewport */
+/* three.js canvas — fills the viewport, or the left "stage" when the
+   transcript panel is docked beside it (--stage-w is set from JS). */
 #canvas {
   position: fixed;
-  inset: 0;
-  width: 100% !important;
+  top: 0;
+  left: 0;
+  width: var(--stage-w, 100vw) !important;
   height: 100% !important;
 }
 
@@ -23,11 +25,13 @@ html, body {
   position: fixed;
   bottom: 0;
   left: 0;
-  right: 0;
+  /* Stay centred under the avatar stage, not behind the docked panel. */
+  right: var(--stage-reserve, 0);
   padding: 0 24px 32px;
   text-align: center;
   pointer-events: none;
   z-index: 20;
+  transition: right 0.25s ease;
 }
 
 #sentence-bubble {
@@ -128,11 +132,21 @@ html, body {
 }
 #transcript-panel[hidden] { display: none; }
 
+/* Docked beside the avatar: stretch into a full-height column that fills the
+   vertical space, rather than a short card that hugs its content. Stays below
+   the top-right control buttons (top: 64px) so its header doesn't collide. */
+body.transcript-docked #transcript-panel {
+  bottom: 16px;
+  max-height: none;
+}
+
 #transcript-list {
   overflow-y: auto;
   font-size: 0.85rem;
   line-height: 1.45;
 }
+/* Let the list grow to fill the docked column so the panel spans full height. */
+body.transcript-docked #transcript-list { flex: 1 1 auto; }
 .transcript-empty { color: #a08a76; font-style: italic; }
 
 .turn { padding: 8px 0; border-bottom: 1px solid rgba(150, 120, 90, 0.14); }
@@ -242,6 +256,36 @@ html, body {
   transform: scale(1.05);
 }
 .voice-chip { width: 100%; text-align: left; }
+.chip.danger {
+  background: rgba(200, 70, 55, 0.90);
+  border-color: transparent;
+  color: #fff;
+}
+.chip.danger:hover { background: rgba(180, 55, 42, 0.95); color: #fff; }
+
+/* ── Profile item (name chip + inline remove) ─────────────── */
+.profile-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+.profile-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: #b09a86;
+  font-size: 0.66rem;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.profile-remove:hover { background: rgba(200, 70, 55, 0.15); color: #c8463a; }
 .chip.loading {
   opacity: 0.6;
   cursor: wait;
@@ -288,7 +332,85 @@ html, body {
 }
 @keyframes toast-spin { to { transform: rotate(360deg); } }
 
+/* ── Modal dialog (in-app prompt / confirm) ───────────────── */
+#modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(60, 40, 24, 0.32);
+  backdrop-filter: blur(3px);
+  -webkit-backdrop-filter: blur(3px);
+}
+#modal-overlay[hidden] { display: none; }
+#modal {
+  width: 300px;
+  max-width: 100%;
+  padding: 20px;
+  border-radius: 16px;
+  background: rgba(255, 252, 248, 0.98);
+  box-shadow: 0 16px 48px rgba(90, 60, 40, 0.3);
+  color: #5a4a3a;
+}
+#modal-message {
+  margin: 0 0 14px;
+  font-size: 0.9rem;
+  font-weight: 600;
+  line-height: 1.4;
+}
+#modal-input {
+  width: 100%;
+  box-sizing: border-box;
+  margin-bottom: 16px;
+  padding: 8px 12px;
+  border: 1.5px solid rgba(150, 120, 90, 0.4);
+  border-radius: 10px;
+  background: #fff;
+  color: #4a3a2a;
+  font-size: 0.9rem;
+  font-family: inherit;
+}
+#modal-input[hidden] { display: none; }
+#modal-input:focus { outline: none; border-color: rgba(90, 70, 50, 0.7); }
+#modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 /* ── State-driven body classes ────────────────────────────────────── */
 body.listening  { background: radial-gradient(ellipse at 50% 30%, #eef8ff 0%, #d8eeff 60%, #b0d5f5 100%); }
 body.thinking   { background: radial-gradient(ellipse at 50% 30%, #f4eeff 0%, #e8d8ff 60%, #d0b0f5 100%); }
 body.didnt_catch { background: radial-gradient(ellipse at 50% 30%, #fff4ee 0%, #fde0d0 60%, #f5c0a0 100%); }
+
+/* Replay controls */
+#replay-last {
+  /* #overlay is pointer-events:none (click-through to the avatar); re-enable
+     events on the button itself or it can't be clicked. */
+  pointer-events: auto;
+  margin-top: 10px;
+  padding: 8px 16px;
+  border: none;
+  border-radius: 999px;
+  background: #ffffffcc;
+  color: #5a3a2a;
+  font: inherit;
+  font-size: 0.95rem;
+  cursor: pointer;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+}
+#replay-last:hover { background: #fff; }
+
+.replay-btn {
+  margin-left: 8px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font-size: 0.9rem;
+  opacity: 0.55;
+  vertical-align: middle;
+}
+.replay-btn:hover { opacity: 1; }

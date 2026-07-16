@@ -4,10 +4,13 @@ No Ollama server required — the chat() method is tested via mocking.
 All other logic is pure Python and needs no mocking.
 """
 
+from datetime import date, timedelta
+
 import pytest
 from unittest.mock import MagicMock, patch
 
 from app.config import Config, ChildConfig, PersonalityConfig, LLMConfig
+from app.levels import LANGUAGE_LOCK
 from app.pipeline.llm import (
     LLMPipeline,
     _extract_sentences,
@@ -143,6 +146,41 @@ class TestPromptBuilding:
         assert "Lily" in llm._system_prompt
 
 
+# ── Language lock ─────────────────────────────────────────────────────────
+
+class TestLanguageLock:
+    def test_language_lock_present_for_all_levels(self):
+        from app.levels import LEVELS
+        for level in LEVELS:
+            llm = make_pipeline(level=level)
+            assert "reply only in English" in llm._system_prompt, \
+                f"language lock missing for level {level}"
+
+    def test_language_lock_present_even_for_unknown_level(self):
+        llm = make_pipeline(level="A")
+        llm.set_level("INVALID")
+        assert "reply only in English" in llm._system_prompt
+
+    def test_language_lock_survives_memory_injection(self):
+        from app.memory import ChildMemory, ChildProfile
+        llm = make_pipeline()
+        llm.set_memory(ChildMemory(profile=ChildProfile(name="Lily", age=8)))
+        assert "reply only in English" in llm._system_prompt
+
+    def test_language_lock_is_last_in_prompt(self):
+        # Placed last so the small local model treats it as the final word.
+        from app.levels import LANGUAGE_LOCK
+        llm = make_pipeline()
+        assert llm._system_prompt.rstrip().endswith(LANGUAGE_LOCK.rstrip())
+
+    def test_language_lock_names_disguised_requests(self):
+        # The lock should explicitly anticipate reframing tricks, not just ban
+        # "speak Czech" — otherwise a small model rationalises the exceptions.
+        from app.levels import LANGUAGE_LOCK
+        low = LANGUAGE_LOCK.lower()
+        assert "explain" in low and "just this once" in low
+
+
 # ── set_memory ──────────────────────────────────────────────────────────
 
 class TestSetMemory:
@@ -220,6 +258,76 @@ class TestSetMemory:
         assert "football" in llm._system_prompt
         llm.set_memory(None)
         assert "football" not in llm._system_prompt
+
+
+# ── Temporal memory context ────────────────────────────────────────────────
+
+class TestMemoryTemporal:
+    """The memory block must anchor 'today' and tag mentions with relative time
+    so the model can naturally say things like 'yesterday we talked about...'."""
+
+    def _mem(self):
+        from app.memory import ChildMemory, ChildProfile, Topic, Problem
+        today = date.today()
+        mem = ChildMemory(profile=ChildProfile(name="Lily", age=8))
+        mem.topics = [
+            Topic("football", 3, (today - timedelta(days=1)).isoformat()),
+            Topic("cats", 1, (today - timedelta(days=5)).isoformat()),
+        ]
+        mem.problems = [
+            Problem("past_tense", "goed", "went", 2,
+                    (today - timedelta(days=1)).isoformat(), False),
+        ]
+        return mem
+
+    def test_prompt_includes_today_anchor(self):
+        llm = make_pipeline()
+        llm.set_memory(self._mem())
+        assert "Today is" in llm._system_prompt
+        assert date.today().strftime("%A") in llm._system_prompt
+
+    def test_topic_tagged_with_relative_time(self):
+        llm = make_pipeline()
+        llm.set_memory(self._mem())
+        # football was mentioned yesterday
+        assert "yesterday" in llm._system_prompt.lower()
+
+    def test_topic_keyword_still_present(self):
+        llm = make_pipeline()
+        llm.set_memory(self._mem())
+        assert "football" in llm._system_prompt
+        assert "cats" in llm._system_prompt
+
+    def test_challenge_tagged_with_relative_time(self):
+        llm = make_pipeline()
+        llm.set_memory(self._mem())
+        # problem last seen yesterday → the relative tag appears near the challenge
+        block = llm._system_prompt
+        assert "past_tense" in block
+        assert "yesterday" in block.lower()
+
+    def test_guidance_encourages_temporal_reference(self):
+        llm = make_pipeline()
+        llm.set_memory(self._mem())
+        low = llm._system_prompt.lower()
+        assert "yesterday" in low  # example phrasing offered to the model
+        assert "when" in low or "ago" in low
+
+    def test_no_anchor_when_memory_absent(self):
+        llm = make_pipeline()
+        assert "Today is" not in llm._system_prompt
+
+    def test_no_temporal_guidance_for_empty_memory(self):
+        # A freshly onboarded child has no topics/problems — the model must NOT
+        # be told "you know when each of these came up" (it would invent a
+        # shared past on the very first conversation).
+        from app.memory import ChildMemory, ChildProfile
+        llm = make_pipeline()
+        llm.set_memory(ChildMemory(profile=ChildProfile(name="Mia", age=7)))
+        block = llm._system_prompt
+        assert "Memory about Mia" in block        # header still present
+        assert "you know when each of these came up" not in block.lower()
+        assert "yesterday you told me about" not in block.lower()
 
 
 # ── Conversation history ───────────────────────────────────────────────────
@@ -340,3 +448,39 @@ class TestChatMocked:
         with patch("ollama.chat", return_value=fake_stream("Nice!")):
             list(llm.chat("How are you?"))
         assert len(llm._history) == 4
+
+
+# ── Appearance injection ──────────────────────────────────────────────────────
+
+class TestAppearanceInjection:
+    def test_no_appearance_block_by_default(self):
+        pipe = make_pipeline()
+        assert "how you look" not in pipe._system_prompt.lower()
+
+    def test_set_appearance_adds_block_before_language_lock(self):
+        pipe = make_pipeline()
+        pipe.set_appearance("You have brown hair and a red top.")
+        prompt = pipe._system_prompt
+        assert "You have brown hair and a red top." in prompt
+        # Appearance must come before the non-negotiable language lock.
+        assert prompt.index("brown hair") < prompt.index(LANGUAGE_LOCK)
+
+    def test_set_appearance_none_removes_block(self):
+        pipe = make_pipeline()
+        pipe.set_appearance("You have brown hair and a red top.")
+        pipe.set_appearance(None)
+        assert "brown hair" not in pipe._system_prompt
+
+    def test_appearance_survives_level_change(self):
+        pipe = make_pipeline()
+        pipe.set_appearance("You have brown hair.")
+        pipe.set_level("B")
+        assert "brown hair" in pipe._system_prompt
+
+    def test_appearance_survives_memory_change(self):
+        pipe = make_pipeline()
+        pipe.set_appearance("You have brown hair.")
+        from app.memory import ChildMemory, ChildProfile
+        mem = ChildMemory(profile=ChildProfile(name="Lily", age=8))
+        pipe.set_memory(mem)
+        assert "brown hair" in pipe._system_prompt

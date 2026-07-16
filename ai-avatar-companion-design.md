@@ -1,5 +1,14 @@
 # AI Avatar Companion — Design Document
 
+> ⚠️ **Historical snapshot — records the original intent, not the current system.**
+> Kept for the *why* behind the product decisions, which still holds. The *how* has
+> moved on: this document describes a Live2D/Cubism avatar stack that was replaced by
+> VRM (three.js + @pixiv/three-vrm) because Cubism Core is proprietary and can't ship
+> in an open-source repo — so its avatar, licensing, and file-layout sections are
+> superseded. For how the system works today: [README](README.md) for the pipeline,
+> `app/server.py`'s module docstring for the WebSocket protocol, [CLAUDE.md](CLAUDE.md)
+> for cross-file invariants, and [TESTING.md](TESTING.md) for the test strategy.
+
 > **Goal:** A simple, single-character conversation app for a child to practice English with an AI avatar. Local-first, privacy-respecting, low-latency.
 
 ---

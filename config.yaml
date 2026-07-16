@@ -51,10 +51,6 @@ models:
 audio:
   input_device: ""              # empty = OS default; substring-match to override (e.g. "AirPods")
 
-avatar:
-  model: nova/live2d/nova.model3.json
-  lip_sync: amplitude           # RMS → mouth-open; visemes are a possible Phase 4 upgrade
-
 safety:
   # NOTE: the keys below are declared for the future safety layer but are
   # NOT enforced yet (Phase 4 item). Setting them changes nothing today.

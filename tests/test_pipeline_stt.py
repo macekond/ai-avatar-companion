@@ -8,7 +8,9 @@ import pytest
 from unittest.mock import MagicMock
 
 from app.config import Config, ChildConfig, STTConfig
-from app.pipeline.stt import STTPipeline, SAMPLE_RATE, MIN_DURATION_S
+from app.pipeline.stt import (
+    STTPipeline, SAMPLE_RATE, MIN_DURATION_S, whisper_is_cached,
+)
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
@@ -73,6 +75,33 @@ class TestLengthGuard:
         ok = np.zeros(int(SAMPLE_RATE * MIN_DURATION_S), dtype=np.float32)
         stt.transcribe(ok)
         stt._model.transcribe.assert_called_once()
+
+
+# ── Cache detection (used by the setup screen) ──────────────────────────────
+
+class TestWhisperIsCached:
+    def _seed(self, cache_dir, model_id="small.en"):
+        repo = f"Systran/faster-whisper-{model_id}"
+        snap = cache_dir / ("models--" + repo.replace("/", "--")) / "snapshots" / "abc123"
+        snap.mkdir(parents=True)
+        (snap / "model.bin").write_bytes(b"x")
+
+    def test_returns_false_when_not_downloaded(self, tmp_path):
+        assert whisper_is_cached("small.en", cache_dir=tmp_path) is False
+
+    def test_returns_true_when_snapshot_present(self, tmp_path):
+        self._seed(tmp_path, "small.en")
+        assert whisper_is_cached("small.en", cache_dir=tmp_path) is True
+
+    def test_empty_snapshots_dir_is_not_cached(self, tmp_path):
+        # A bare models--…/snapshots dir with nothing in it means an interrupted
+        # or failed download — treat it as not cached so we still say downloading.
+        (tmp_path / "models--Systran--faster-whisper-small.en" / "snapshots").mkdir(parents=True)
+        assert whisper_is_cached("small.en", cache_dir=tmp_path) is False
+
+    def test_distinct_model_ids_do_not_collide(self, tmp_path):
+        self._seed(tmp_path, "small.en")
+        assert whisper_is_cached("medium.en", cache_dir=tmp_path) is False
 
 
 # ── no_speech_prob filtering ───────────────────────────────────────────────

@@ -3,7 +3,7 @@
 _session() is tested directly with:
   - MockWebSocket (from conftest) for the WebSocket interface
   - MagicMock instances for the three pipeline components
-  - app.server._record patched to avoid touching the sounddevice mic
+  - app.server._MicRecorder patched to avoid touching the sounddevice mic
 
 No real Ollama, mic, or speakers required.
 """
@@ -19,7 +19,7 @@ from app.pipeline.llm import LLMPipeline
 from app.pipeline.stt import STTPipeline
 from app.pipeline.tts import TTSPipeline
 from app.server import _session
-from tests.conftest import MockWebSocket
+from tests.conftest import MockWebSocket, make_fake_recorder
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
@@ -59,8 +59,9 @@ def ptt_turn(*extra_msgs: dict) -> list[str]:
 
 @pytest.fixture(autouse=True)
 def patch_record():
-    """Patch _record for every test in this module — no mic needed."""
-    with patch("app.server._record", return_value=DUMMY_AUDIO):
+    """Swap the mic recorder for every test in this module — no mic needed."""
+    with patch("app.server._MicRecorder",
+               return_value=make_fake_recorder(DUMMY_AUDIO)):
         yield
 
 

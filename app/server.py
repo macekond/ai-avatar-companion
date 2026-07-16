@@ -16,22 +16,31 @@ Browser → server:
   {"type": "ptt_start"}
   {"type": "ptt_stop"}
   {"type": "stop_speak"}                     # barge-in while speaking/thinking
+  {"type": "replay",         "text": "…"}    # re-speak a stored line
   {"type": "set_level",      "level": "B"}
   {"type": "set_voice",      "voice": "en_US-kristin-medium"}
   {"type": "switch_profile", "slug": "mia"}
+  {"type": "delete_profile", "slug": "mia"}
+  {"type": "avatar_loaded", "key": "VIPEHero_2707"}   # avatar changed → refresh appearance
 
 Server → browser:
   {"type": "init",          "level": "A"}
   {"type": "profiles",      "list": ["lily","mia"], "active": "lily"}
+  {"type": "profile_error", "message": "Can't remove the only child."}
   {"type": "onboarding_start"}
   {"type": "memory_loaded",  "name": "Lily", "age": 8}
   {"type": "state",         "state": "idle|listening|thinking|speaking|didnt_catch"}
   {"type": "transcript",    "text": "…"}
   {"type": "sentence",      "text": "…"}
   {"type": "amplitude",     "value": 0–1}
+  {"type": "conversation_reset"}                     # clear panel before replay
   {"type": "conversation_turn",       "id": 1, "you": "…", "nova": "…"}
   {"type": "conversation_correction", "id": 1, "kind": "past_tense",
                                       "wrong": "goed", "right": "went"}
+
+On connect (and on profile switch) the server replays the active child's saved
+transcript: a 'conversation_reset' followed by the stored 'conversation_turn' /
+'conversation_correction' messages, so history survives a relaunch.
 
 Run:
     python -m app.server
@@ -45,6 +54,7 @@ import logging
 import re
 import sys
 import threading
+from pathlib import Path
 from typing import Any, Optional
 
 import numpy as np
@@ -53,10 +63,13 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+from app.appearance import AppearanceStore, DEFAULT_AVATAR_KEY
 from app.config import Config, default_config_path
 from app.memory import ChildMemory, ChildProfile, MemoryManager, name_to_slug
 from app.settings import load_settings, save_setting
 from app.setup import check_ollama
+from app.logging_setup import configure_logging, logfmt_str
+from app.transcript import TranscriptStore
 
 # Curated voice list for the Settings panel. Deliberately limited to voices
 # with permissive licenses (public domain / CC0) — the previous default
@@ -70,7 +83,7 @@ AVAILABLE_VOICES = [
 _VOICE_IDS = {v["id"] for v in AVAILABLE_VOICES}
 from app.memory_extractor import MemoryExtractor
 from app.pipeline.llm import LLMPipeline
-from app.pipeline.stt import STTPipeline, SAMPLE_RATE
+from app.pipeline.stt import STTPipeline, SAMPLE_RATE, whisper_is_cached
 from app.pipeline.tts import TTSPipeline, voice_is_cached
 from app.telemetry import TelemetrySession
 
@@ -115,31 +128,97 @@ _REENGAGEMENT_HINT = (
 # permission is missing (macOS TCC) — the session must not hang with it.
 RECORD_GRACE_S = 10.0
 
+# How long teardown/profile-swap waits for in-flight extraction tasks before
+# abandoning them. Abandoning does not stop the underlying thread, so anything
+# that must not race a late task cannot rely on this alone — see
+# MemoryManager's deleted-slug tombstone.
+DRAIN_TIMEOUT_S = 5.0
 
-def _record(stop: threading.Event) -> np.ndarray:
-    """Record audio until *stop* is set. Called in a thread-pool executor.
 
-    Returns an empty array on any failure (no mic, permission denied) so the
-    caller flows into the didn't-catch path instead of crashing the session.
+class _MicRecorder:
+    """Session-scoped microphone capture over a single persistent input stream.
+
+    Opening and closing a CoreAudio input stream on *every* PTT turn eventually
+    wedges the device on macOS — the stream opens but its callback stops
+    delivering frames — so the server went permanently deaf a few minutes into
+    a session (field-observed: ~10 good turns, then every turn "didn't catch").
+    The CLI never hit this because `STTPipeline.record` keeps one stream open
+    and gates capture with a flag; this mirrors that.
+
+    Lifecycle per turn: `start()` clears the buffer and begins capturing (the
+    stream is opened lazily on the first call and reused thereafter); `stop()`
+    stops capturing and returns the audio. `close()` tears the stream down at
+    the end of the session. All three are safe to call from a worker thread.
     """
-    import sounddevice as sd
 
-    chunks: list[np.ndarray] = []
+    def __init__(self) -> None:
+        self._chunks: list[np.ndarray] = []
+        self._capturing = threading.Event()
+        self._lock = threading.Lock()
+        self._stream = None
+        self._failed = False
 
-    def _cb(indata: np.ndarray, frames: int, _time, _status) -> None:
-        chunks.append(indata.copy())
+    def _ensure_stream(self) -> None:
+        if self._stream is not None or self._failed:
+            return
+        import sounddevice as sd
 
-    try:
-        with sd.InputStream(samplerate=SAMPLE_RATE, channels=1,
-                            dtype="float32", callback=_cb):
-            stop.wait()
-    except Exception as exc:
-        log.error("Recording failed (mic unavailable or permission denied): %s", exc)
-        return np.zeros(0, dtype=np.float32)
+        def _cb(indata: np.ndarray, frames: int, _time, _status) -> None:
+            # Runs on PortAudio's thread for the whole session; only keep frames
+            # while a turn is actually capturing.
+            if self._capturing.is_set():
+                with self._lock:
+                    self._chunks.append(indata.copy())
 
-    if not chunks:
-        return np.zeros(0, dtype=np.float32)
-    return np.concatenate(chunks, axis=0).squeeze()
+        stream = None
+        try:
+            stream = sd.InputStream(samplerate=SAMPLE_RATE, channels=1,
+                                    dtype="float32", callback=_cb)
+            stream.start()
+            self._stream = stream
+        except Exception as exc:
+            # Missing mic permission (macOS TCC) surfaces here. Mark failed so
+            # every turn flows into the didn't-catch path instead of retrying a
+            # blocking open each time. Close a stream that constructed but
+            # failed to start, so it isn't leaked.
+            log.error("Microphone unavailable (permission denied?): %s", exc)
+            self._failed = True
+            if stream is not None:
+                try:
+                    stream.close()
+                except Exception:
+                    pass
+
+    def start(self) -> None:
+        with self._lock:
+            self._chunks = []
+        self._capturing.set()
+        self._ensure_stream()
+
+    def stop(self) -> np.ndarray:
+        """Stop capturing and return the recorded audio (empty on any failure)."""
+        self._capturing.clear()
+        with self._lock:
+            chunks, self._chunks = self._chunks, []
+        if not chunks:
+            # Distinguish a wedged/blank device (stream open, callback delivered
+            # nothing) from an unavailable one (open failed / never opened), so a
+            # field log tells a device wedge from a permission problem.
+            cause = ("stream_unavailable"
+                     if (self._failed or self._stream is None) else "no_frames")
+            log.warning("capture_empty cause=%s", cause)
+            return np.zeros(0, dtype=np.float32)
+        return np.concatenate(chunks, axis=0).squeeze()
+
+    def close(self) -> None:
+        self._capturing.clear()
+        stream, self._stream = self._stream, None
+        if stream is not None:
+            try:
+                stream.stop()
+                stream.close()
+            except Exception:
+                pass
 
 
 # ---------------------------------------------------------------------------
@@ -180,29 +259,49 @@ def _extract_age(text: str) -> Optional[int]:
 # One PTT turn helper
 # ---------------------------------------------------------------------------
 
+async def _await_ptt(next_raw, stash, wanted: str, timeout: float = 60.0) -> bool:
+    """Read until a ``wanted`` PTT message arrives; True if it did.
+
+    Anything else (avatar_loaded, set_level, …) is handed to ``stash`` for the
+    main loop to process later, never consumed as if it were the PTT message.
+    Swallowing one would shift every later read by one: the child's ptt_start
+    would be taken for the ptt_stop ending a recording that never captured
+    their answer. ``stash`` must not feed back into ``next_raw`` before this
+    returns, or the same message would be read and re-stashed forever.
+    """
+    while True:
+        try:
+            raw = await asyncio.wait_for(next_raw(), timeout=timeout)
+        except asyncio.TimeoutError:
+            return False
+        try:
+            mtype = json.loads(raw).get("type")
+        except (json.JSONDecodeError, TypeError, AttributeError):
+            continue        # malformed frame — drop it, keep waiting
+        if mtype == wanted:
+            return True
+        stash(raw)
+
+
 async def _one_ptt_turn(
-    ws,
+    next_raw,
+    stash,
     stt: STTPipeline,
-    loop: asyncio.AbstractEventLoop,
+    recorder: "_MicRecorder",
     send,
 ) -> str:
-    """Wait for Space-press, record, and return the transcript (may be empty)."""
+    """Wait for Space-release, record, and return the transcript (may be empty)."""
     await send({"type": "state", "state": "listening"})
-    stop_rec = threading.Event()
-    rec_task = loop.run_in_executor(None, _record, stop_rec)
     try:
-        raw = await asyncio.wait_for(ws.recv(), timeout=60.0)
-        json.loads(raw)  # consume ptt_stop
-    except asyncio.TimeoutError:
-        stop_rec.set()
+        await asyncio.wait_for(asyncio.to_thread(recorder.start), RECORD_GRACE_S)
+    except Exception:
+        # First-turn stream open can block without mic permission; don't hang.
+        log.error("Recording did not start — treating as no audio")
+    if not await _await_ptt(next_raw, stash, "ptt_stop"):
+        await asyncio.to_thread(recorder.stop)
         await send({"type": "state", "state": "idle"})
         return ""
-    stop_rec.set()
-    try:
-        audio = await asyncio.wait_for(rec_task, RECORD_GRACE_S)
-    except Exception:
-        log.error("Recording did not complete — treating as no audio")
-        audio = np.zeros(0, dtype=np.float32)
+    audio = await asyncio.to_thread(recorder.stop)
     await send({"type": "state", "state": "thinking"})
     return await asyncio.to_thread(stt.transcribe, audio)
 
@@ -212,16 +311,24 @@ async def _one_ptt_turn(
 # ---------------------------------------------------------------------------
 
 async def _run_onboarding(
-    ws,
+    next_raw,
+    stash,
     config: Config,
     stt: STTPipeline,
     tts: TTSPipeline,
     mem_mgr: MemoryManager,
-    loop: asyncio.AbstractEventLoop,
+    recorder: "_MicRecorder",
     send,
     send_from_thread,
 ) -> ChildMemory:
-    """Two-turn onboarding: learn the child's name and age."""
+    """Two-turn onboarding: learn the child's name and age.
+
+    Reads through ``next_raw`` (the same buffer the main loop drains) rather
+    than the socket directly, so messages the UI sends on connect — notably
+    'avatar_loaded' from ws.onopen, which lands before the first question is
+    even asked — are stashed for the main loop instead of being mistaken for
+    the child's Space-press.
+    """
     avatar = config.personality.avatar_name
 
     def amp(v: float) -> None:
@@ -236,12 +343,9 @@ async def _run_onboarding(
     await send({"type": "amplitude", "value": 0.0})
     await send({"type": "state", "state": "idle"})
 
-    # consume ptt_start, then record
-    try:
-        await asyncio.wait_for(ws.recv(), timeout=60.0)
-    except asyncio.TimeoutError:
-        pass
-    name_transcript = await _one_ptt_turn(ws, stt, loop, send)
+    # wait for Space-press, then record
+    await _await_ptt(next_raw, stash, "ptt_start")
+    name_transcript = await _one_ptt_turn(next_raw, stash, stt, recorder, send)
     name = _extract_name(name_transcript) if name_transcript else None
     if not name:
         name = "Friend"
@@ -254,11 +358,8 @@ async def _run_onboarding(
     await send({"type": "amplitude", "value": 0.0})
     await send({"type": "state", "state": "idle"})
 
-    try:
-        await asyncio.wait_for(ws.recv(), timeout=60.0)
-    except asyncio.TimeoutError:
-        pass
-    age_transcript = await _one_ptt_turn(ws, stt, loop, send)
+    await _await_ptt(next_raw, stash, "ptt_start")
+    age_transcript = await _one_ptt_turn(next_raw, stash, stt, recorder, send)
     age = _extract_age(age_transcript) if age_transcript else None
 
     memory = ChildMemory(profile=ChildProfile(name=name, age=age))
@@ -343,11 +444,57 @@ async def _session(
     # memory save doesn't race a still-running background save.
     pending_tasks: list[asyncio.Task] = []
 
-    async def _drain_pending(timeout: float = 5.0) -> None:
+    async def _drain_pending(timeout: float | None = None) -> None:
         still_running = [t for t in pending_tasks if not t.done()]
         if still_running:
-            await asyncio.wait(still_running, timeout=timeout)
+            await asyncio.wait(
+                still_running,
+                timeout=DRAIN_TIMEOUT_S if timeout is None else timeout,
+            )
         pending_tasks.clear()
+
+    def _apply_extracted_memory(mem_ref: ChildMemory) -> None:
+        """Refresh the LLM with freshly extracted memory — but only if that
+        child is still active. An extraction task schedules this via
+        call_soon_threadsafe; if a profile swap happened in the meantime, the
+        callback can land *after* the swap already loaded the new child's
+        memory, so re-applying the old ref would leak one child's context into
+        another. Gating on identity makes the stale callback a no-op."""
+        if mem_ref is memory:
+            llm.set_memory(mem_ref)
+
+    # Messages consumed by a phase they don't belong to — the barge-in watcher,
+    # the listening phase, or onboarding — are buffered here and drained before
+    # the next real read from the socket. Declared before onboarding because it
+    # reads through this buffer too.
+    buffered_msgs: list[str] = []
+
+    async def _next_raw() -> str:
+        if buffered_msgs:
+            return buffered_msgs.pop(0)
+        # ws.recv(), not async-for/__anext__: the real websockets
+        # ServerConnection has no __anext__ (only __aiter__), so iteration
+        # helpers must go through recv(). Raises ConnectionClosed on close.
+        return await ws.recv()
+
+    async def _onboard(mgr: MemoryManager) -> ChildMemory:
+        """Run onboarding, re-queueing anything it set aside for the main loop.
+
+        The stash is local, not buffered_msgs itself: _next_raw pops from
+        buffered_msgs, so stashing there mid-onboarding would re-serve the same
+        message to the reader that just set it aside — an infinite loop.
+        """
+        stashed: list[str] = []
+        result = await _run_onboarding(
+            _next_raw, stashed.append, config, stt, tts, mgr, recorder,
+            send, send_from_thread,
+        )
+        buffered_msgs.extend(stashed)
+        return result
+
+    # One microphone stream for the whole session (see _MicRecorder): opening a
+    # fresh CoreAudio stream per turn wedges the device after a few minutes.
+    recorder = _MicRecorder()
 
     # Level for this session — starts from config, updated by UI 'set_level'
     # so telemetry reflects what the child is actually practising.
@@ -357,6 +504,52 @@ async def _session(
     # session with a clean history — otherwise a fresh tab (or a second child
     # after a hot-swap) inherits whatever conversation was in progress.
     llm.clear_history()
+
+    # Appearance: the avatar can answer "what do you look like?" from a curated
+    # (or cached auto-derived) description. Set the default avatar now; the UI's
+    # 'avatar_loaded' message refreshes it if a different avatar is shown.
+    appearance_store = AppearanceStore(
+        Path(config.memory.profiles_dir).expanduser().parent / "avatars"
+    )
+
+    def _apply_appearance(key: str) -> None:
+        found = appearance_store.get(key)
+        llm.set_appearance(found.description if found else None)
+
+    _apply_appearance(DEFAULT_AVATAR_KEY)
+
+    # Persistent per-child conversation history (survives relaunch). Lives in a
+    # sibling dir of profiles/, like avatars/. Display-only — never fed back
+    # into the prompt.
+    transcripts_dir = (
+        Path(config.memory.profiles_dir).expanduser().parent / "transcripts"
+    )
+    transcript_store: Optional[TranscriptStore] = None
+    conv_turn_n = 0        # id for transcript entries (child↔Nova exchanges)
+    consecutive_short = 0
+
+    async def _load_transcript(slug: str) -> None:
+        """Repoint history at ``slug``, clear the UI panel, and replay stored turns.
+
+        Sending conversation_reset first means a reconnect or a profile switch
+        rebuilds the panel from disk instead of appending on top of what's
+        already shown. conv_turn_n continues past the last stored id so a live
+        turn never collides with a replayed one.
+        """
+        nonlocal transcript_store, conv_turn_n
+        await send({"type": "conversation_reset"})
+        transcript_store = TranscriptStore(transcripts_dir, slug) if mem_mgr else None
+        if transcript_store is None:
+            conv_turn_n = 0
+            return
+        for t in transcript_store.load():
+            await send({"type": "conversation_turn", "id": t["id"],
+                        "you": t["you"], "nova": t["nova"]})
+            for c in t["corrections"]:
+                await send({"type": "conversation_correction", "id": t["id"],
+                            "kind": c["kind"], "wrong": c["wrong"],
+                            "right": c["right"]})
+        conv_turn_n = transcript_store.last_id()
 
     # ── Load / initialise memory ─────────────────────────────────────────
     memory: Optional[ChildMemory] = mem_mgr.load() if mem_mgr else None
@@ -388,9 +581,7 @@ async def _session(
     # ── Onboarding or memory-loaded ──────────────────────────────────────
     if mem_mgr and memory is None:
         await send({"type": "onboarding_start"})
-        memory = await _run_onboarding(
-            ws, config, stt, tts, mem_mgr, loop, send, send_from_thread,
-        )
+        memory = await _onboard(mem_mgr)
         llm.set_memory(memory)
     elif memory is not None:
         llm.set_memory(memory)
@@ -400,34 +591,120 @@ async def _session(
     else:
         llm.set_memory(None)
 
+    # Replay this profile's saved conversation into the transcript panel.
+    if mem_mgr:
+        await _load_transcript(mem_mgr.slug)
+
     # ── Opening greeting ─────────────────────────────────────────────────
     await _send_greeting(config, memory, tts, send, send_from_thread)
 
     # ── Main loop ────────────────────────────────────────────────────────
-    consecutive_short = 0
-    conv_turn_n = 0   # id for transcript entries (child↔Nova exchanges)
+    async def _swap_profile(new_slug: str, save_current: bool = True) -> None:
+        """Hot-swap the active child profile to ``new_slug``.
 
-    # Messages consumed by the barge-in watcher (or by the listening phase)
-    # that belong to the main loop are buffered here and drained before the
-    # next real read from the socket.
-    buffered_msgs: list[str] = []
+        Drains in-flight extraction tasks first (a slow task from the previous
+        child would otherwise call llm.set_memory with the old memory *after*
+        the swap, leaking one child's context into another's). When the target
+        profile has no file yet, runs onboarding; otherwise greets normally.
 
-    async def _next_raw() -> str:
-        if buffered_msgs:
-            return buffered_msgs.pop(0)
-        # ws.recv(), not async-for/__anext__: the real websockets
-        # ServerConnection has no __anext__ (only __aiter__), so iteration
-        # helpers must go through recv(). Raises ConnectionClosed on close.
-        return await ws.recv()
+        ``save_current=False`` skips persisting the outgoing memory — used when
+        the outgoing profile was just deleted and must not be resurrected.
+        """
+        nonlocal mem_mgr, memory, consecutive_short
+        await _drain_pending()
+        if save_current and memory is not None:
+            mem_mgr.prune(memory)
+            mem_mgr.save(memory)
+        mem_mgr = MemoryManager(
+            config.memory.profiles_dir, new_slug,
+            max_topics=config.memory.max_topics,
+            max_problems=config.memory.max_problems,
+            topic_ttl_days=config.memory.topic_ttl_days,
+            problem_ttl_days=config.memory.problem_ttl_days,
+        )
+        memory = mem_mgr.load()
+        llm.set_memory(memory)
+        llm.clear_history()
+        consecutive_short = 0
+        await send({"type": "profiles",
+                    "list": mem_mgr.list_profiles(),
+                    "active": new_slug})
+        if memory is None:
+            await send({"type": "onboarding_start"})
+            memory = await _onboard(mem_mgr)
+            llm.set_memory(memory)
+        else:
+            await send({"type": "memory_loaded",
+                        "name": memory.profile.name,
+                        "age": memory.profile.age})
+        await _load_transcript(new_slug)
+        await _send_greeting(config, memory, tts, send, send_from_thread)
+
+    async def _run_speaking(speech_fn) -> None:
+        """Run speech_fn(stop_event) in a worker thread while watching the socket
+        for a `stop_speak` barge-in. Shared by the live reply and replay so both
+        interrupt identically. Non-stop_speak messages are buffered for the main
+        loop; a drained MockWebSocket (TimeoutError) simply ends the watcher.
+        """
+        stop_speaking = threading.Event()
+
+        async def _watch_for_stop() -> None:
+            while True:
+                try:
+                    raw3 = await ws.recv()
+                except (asyncio.TimeoutError, websockets.ConnectionClosed,
+                        StopAsyncIteration):
+                    return
+                try:
+                    m = json.loads(raw3)
+                except (ValueError, TypeError):
+                    continue
+                if m.get("type") == "stop_speak":
+                    stop_speaking.set()
+                    return
+                buffered_msgs.append(raw3)
+
+        pipeline_task = asyncio.create_task(asyncio.to_thread(speech_fn, stop_speaking))
+        watcher_task = asyncio.create_task(_watch_for_stop())
+        done, _ = await asyncio.wait(
+            {pipeline_task, watcher_task}, return_when=asyncio.FIRST_COMPLETED)
+        if watcher_task not in done:
+            watcher_task.cancel()
+            try:
+                await watcher_task
+            except asyncio.CancelledError:
+                pass
+        if pipeline_task not in done:
+            await pipeline_task
+
+    async def _speak_interruptible(text: str) -> None:
+        """Re-speak `text` (a replay) with the same barge-in as a live reply.
+
+        Pure playback: no transcript entry, no memory extraction, no telemetry.
+        """
+        await send({"type": "state", "state": "speaking"})
+        await send({"type": "sentence", "text": text})
+
+        def _speak(stop_speaking) -> None:
+            tts.speak_streaming(text, amplitude_cb, stop_speaking)
+
+        await _run_speaking(_speak)
+        await send({"type": "amplitude", "value": 0.0})
+        await send({"type": "state", "state": "idle"})
 
     try:
         while True:
             try:
                 raw = await _next_raw()
-            except (websockets.ConnectionClosed, StopAsyncIteration,
-                    asyncio.TimeoutError):
-                # ConnectionClosed: client left. TimeoutError: test mocks
-                # signal queue exhaustion this way.
+            except websockets.ConnectionClosed as exc:
+                # Log the close code/reason: 1001 "going away" is a page
+                # reload/navigation, 1006 an abnormal drop. This one line is
+                # what a field disconnect report needs.
+                log.info("client_disconnect code=%s reason=%s",
+                         exc.code, logfmt_str(exc.reason))
+                break
+            except (StopAsyncIteration, asyncio.TimeoutError):
+                # TimeoutError: test mocks signal queue exhaustion this way.
                 break
             msg = json.loads(raw)
             mtype = msg.get("type")
@@ -439,6 +716,18 @@ async def _session(
                 active_level = new_level
                 save_setting("level", new_level)
                 log.info("Level changed to: %s", new_level)
+                continue
+
+            # ── Avatar changed: refresh appearance description ───────────
+            if mtype == "avatar_loaded":
+                _apply_appearance(msg.get("key", ""))
+                continue
+
+            # ── Replay: re-speak a stored line (no new turn, no memory) ───
+            if mtype == "replay":
+                text = msg.get("text", "")
+                if isinstance(text, str) and text.strip():
+                    await _speak_interruptible(text.strip())
                 continue
 
             # ── Voice change ─────────────────────────────────────────────
@@ -474,40 +763,63 @@ async def _session(
                 raw_slug = msg.get("slug", "")
                 if not isinstance(raw_slug, str) or not raw_slug.strip():
                     continue
-                new_slug = name_to_slug(raw_slug)
-                # Drain in-flight extraction tasks BEFORE swapping profiles:
-                # a slow task from the previous child would otherwise call
-                # llm.set_memory with the old child's memory after the swap,
-                # leaking one child's context into another's conversation.
-                await _drain_pending()
-                if memory:
-                    mem_mgr.prune(memory)
-                    mem_mgr.save(memory)
-                mem_mgr = MemoryManager(
-                    config.memory.profiles_dir, new_slug,
-                    max_topics=config.memory.max_topics,
-                    max_problems=config.memory.max_problems,
-                    topic_ttl_days=config.memory.topic_ttl_days,
-                    problem_ttl_days=config.memory.problem_ttl_days,
-                )
-                memory = mem_mgr.load()
-                llm.set_memory(memory)
-                llm.clear_history()
-                consecutive_short = 0
-                await send({"type": "profiles",
-                            "list": mem_mgr.list_profiles(),
-                            "active": new_slug})
-                if memory is None:
-                    await send({"type": "onboarding_start"})
-                    memory = await _run_onboarding(
-                        ws, config, stt, tts, mem_mgr, loop, send, send_from_thread,
-                    )
-                    llm.set_memory(memory)
+                # fallback="" so a name with no ASCII letters or digits at all
+                # ("李明", "Мария") is rejected instead of collapsing to the
+                # "child" default — two such names would otherwise share one
+                # profile and read each other's memory.
+                new_slug = name_to_slug(raw_slug, fallback="")
+                if not new_slug:
+                    await send({
+                        "type": "profile_error",
+                        "message": "Please use letters or numbers in the name.",
+                    })
+                    continue
+                await _swap_profile(new_slug)
+                continue
+
+            # ── Profile delete ───────────────────────────────────────────
+            if mtype == "delete_profile" and mem_mgr:
+                # Sanitise the same way switch does — a client slug is never
+                # trusted to reach the filesystem unfiltered.
+                raw_slug = msg.get("slug", "")
+                if not isinstance(raw_slug, str) or not raw_slug.strip():
+                    continue
+                # fallback="" so junk that sanitises to nothing is rejected
+                # rather than collapsing to the "child" default and deleting
+                # an unrelated profile.
+                target = name_to_slug(raw_slug, fallback="")
+                profiles = mem_mgr.list_profiles()
+                if not target or target not in profiles:
+                    continue
+                # Refuse to delete the last remaining child — the app always
+                # needs an active profile to fall back to.
+                if len(profiles) <= 1:
+                    await send({"type": "profile_error",
+                                "message": "Can't remove the only child."})
+                    continue
+                remaining = [p for p in profiles if p != target]
+                if target == mem_mgr.slug:
+                    # Drain in-flight extraction tasks BEFORE unlinking: a
+                    # pending task holds the outgoing profile's MemoryManager
+                    # and would re-create the file via save() if we deleted
+                    # first. save_current=False then skips the explicit re-save
+                    # during the swap.
+                    await _drain_pending()
+                    mem_mgr.delete_profile(target)
+                    # Delete via the live store instance so it's tombstoned: a
+                    # correction task that outlived the drain holds this same
+                    # object and would otherwise recreate the file.
+                    (transcript_store or
+                     TranscriptStore(transcripts_dir, target)).delete()
+                    await _swap_profile(remaining[0], save_current=False)
                 else:
-                    await send({"type": "memory_loaded",
-                                "name": memory.profile.name,
-                                "age": memory.profile.age})
-                await _send_greeting(config, memory, tts, send, send_from_thread)
+                    mem_mgr.delete_profile(target)
+                    # Non-active profile has no in-flight tasks (draining happens
+                    # when switching away from it), so a fresh instance is fine.
+                    TranscriptStore(transcripts_dir, target).delete()
+                    await send({"type": "profiles",
+                                "list": remaining,
+                                "active": mem_mgr.slug})
                 continue
 
             if mtype != "ptt_start":
@@ -515,8 +827,14 @@ async def _session(
 
             # ── LISTENING ────────────────────────────────────────────────
             await send({"type": "state", "state": "listening"})
-            stop_rec = threading.Event()
-            rec_task = loop.run_in_executor(None, _record, stop_rec)
+            try:
+                # start() opens the persistent stream on the first turn; later
+                # turns just re-arm capture. Bounded so a permission-blocked
+                # open can't hang the session.
+                await asyncio.wait_for(
+                    asyncio.to_thread(recorder.start), RECORD_GRACE_S)
+            except Exception:
+                log.error("Recording did not start — treating as no audio")
             # Read until ptt_stop; anything else that arrives mid-recording
             # (e.g. a set_level click) is stashed and replayed to the main
             # loop after this turn instead of being swallowed.
@@ -536,17 +854,10 @@ async def _session(
                 pass
             buffered_msgs.extend(stashed)
             if not got_stop:
-                stop_rec.set()
+                await asyncio.to_thread(recorder.stop)   # discard partial audio
                 await send({"type": "state", "state": "idle"})
                 continue
-            stop_rec.set()
-            try:
-                audio = await asyncio.wait_for(rec_task, RECORD_GRACE_S)
-            except Exception:
-                # Stream open can hang without mic permission; don't let the
-                # session hang with it — flow into the didn't-catch path.
-                log.error("Recording did not complete — treating as no audio")
-                audio = np.zeros(0, dtype=np.float32)
+            audio = await asyncio.to_thread(recorder.stop)
 
             # ── THINKING ─────────────────────────────────────────────────
             await send({"type": "state", "state": "thinking"})
@@ -579,7 +890,6 @@ async def _session(
 
             # ── SPEAKING ─────────────────────────────────────────────────
             await send({"type": "state", "state": "speaking"})
-            stop_speaking = threading.Event()
             spoken_sentences: list[str] = []
 
             reengagement_fired = bool(
@@ -601,7 +911,7 @@ async def _session(
                     )
                 amplitude_cb(value)
 
-            def _run_pipeline() -> None:
+            def _run_pipeline(stop_speaking) -> None:
                 try:
                     for i, sentence in enumerate(llm.chat(transcript)):
                         if i == 0:
@@ -617,46 +927,10 @@ async def _session(
                     send_from_thread({"type": "sentence",
                                       "text": "My brain is napping — try again!"})
 
-            # Barge-in: while the pipeline runs, watch the socket for a
-            # `stop_speak` message. When one arrives, set the shared stop
-            # event so TTS aborts and the pipeline breaks after the current
-            # sentence. Other messages are buffered for the main loop.
-            # (Catching asyncio.TimeoutError also lets MockWebSocket-based
-            # tests terminate the watcher when their message queue drains.)
-            async def _watch_for_stop() -> None:
-                while True:
-                    try:
-                        raw3 = await ws.recv()
-                    except (asyncio.TimeoutError,
-                            websockets.ConnectionClosed,
-                            StopAsyncIteration):
-                        return
-                    try:
-                        m = json.loads(raw3)
-                    except (ValueError, TypeError):
-                        continue
-                    if m.get("type") == "stop_speak":
-                        stop_speaking.set()
-                        return
-                    buffered_msgs.append(raw3)
-
-            _turn_t0 = _time.monotonic()
-            pipeline_task = asyncio.create_task(asyncio.to_thread(_run_pipeline))
-            watcher_task = asyncio.create_task(_watch_for_stop())
-            done, _ = await asyncio.wait(
-                {pipeline_task, watcher_task},
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            if watcher_task not in done:
-                watcher_task.cancel()
-                try:
-                    await watcher_task
-                except asyncio.CancelledError:
-                    pass
-            if pipeline_task not in done:
-                # Watcher fired first: wait for the pipeline to unwind (TTS
-                # honors stop_speaking; loop breaks after current sentence).
-                await pipeline_task
+            # Barge-in while the reply streams: a `stop_speak` sets the shared
+            # stop event (TTS aborts, loop breaks after the current sentence);
+            # other messages are buffered for the main loop. See _run_speaking.
+            await _run_speaking(_run_pipeline)
 
             total_ms = int((_time.monotonic() - _ptt_stop_t) * 1000)
             llm_ttft_ms = _llm_ttft_ms[0] if _llm_ttft_ms else 0
@@ -666,18 +940,22 @@ async def _session(
             # ── Transcript entry (immediate; corrections patched in later) ──
             if spoken_sentences and transcript:
                 conv_turn_n += 1
+                nova_reply = " ".join(spoken_sentences)
                 await send({
                     "type": "conversation_turn",
                     "id": conv_turn_n,
                     "you": transcript,
-                    "nova": " ".join(spoken_sentences),
+                    "nova": nova_reply,
                 })
+                if transcript_store:
+                    transcript_store.append_turn(conv_turn_n, transcript, nova_reply)
 
             # ── POST-TURN EXTRACTION + TELEMETRY ───────────────────────────
             if mem_mgr and memory and extractor and spoken_sentences and transcript:
                 full_reply = " ".join(spoken_sentences)
                 _mem_ref = memory
                 _mgr_ref = mem_mgr
+                _store_ref = transcript_store   # bound now so a later swap can't misroute
                 _conv_id = conv_turn_n
 
                 _tel_ref = telemetry
@@ -707,9 +985,12 @@ async def _session(
                                 "wrong": wrong,
                                 "right": right,
                             })
+                            if _store_ref:
+                                _store_ref.append_correction(
+                                    _conv_id, ptype, wrong, right)
                         _mgr_ref.prune(_mem_ref)
                         _mgr_ref.save(_mem_ref)
-                        loop.call_soon_threadsafe(llm.set_memory, _mem_ref)
+                        loop.call_soon_threadsafe(_apply_extracted_memory, _mem_ref)
                         # Record telemetry turn with extracted metadata
                         if _tel_ref:
                             _tel_ref.log_turn(
@@ -755,6 +1036,7 @@ async def _session(
         # timeout are abandoned — safe, because telemetry._write no-ops
         # once the file handle is closed.
         await _drain_pending()
+        recorder.close()
         if mem_mgr and memory:
             try:
                 mem_mgr.prune(memory)
@@ -780,6 +1062,10 @@ async def _main(profile_slug: Optional[str] = None, port: int = PORT,
         config.models.tts.voice = _saved["voice"]
     if _saved.get("level"):
         config.child.level = _saved["level"]
+
+    # Persist the server's own log beside telemetry (the packaged app's stderr
+    # is otherwise lost). After config load so log_dir is known.
+    configure_logging(config.telemetry.log_dir)
 
     if profile_slug is None:
         profile_slug = name_to_slug(config.child.name)
@@ -833,10 +1119,20 @@ async def _main(profile_slug: Optional[str] = None, port: int = PORT,
             await _broadcast_setup("ollama_missing", msg)
             await asyncio.sleep(3.0)
 
-        # Phase B: model load (downloads on first run, cached afterwards).
-        await _broadcast_setup(
-            "downloading_models",
-            "Loading voice models — the first run downloads about 600 MB.")
+        # Phase B: model load. Only advertise a download when something
+        # actually needs fetching — otherwise a cached relaunch (models already
+        # on disk) shows the "downloading ~600 MB, only happens once" screen and
+        # looks like it's re-downloading every time.
+        need_download = not (
+            voice_is_cached(config.models.tts.voice)
+            and whisper_is_cached(config.models.stt.model)
+        )
+        if need_download:
+            await _broadcast_setup(
+                "downloading_models",
+                "Loading voice models — the first run downloads about 600 MB.")
+        else:
+            await _broadcast_setup("loading_models")
         pipelines["stt"] = await asyncio.to_thread(STTPipeline, config)
         pipelines["tts"] = await asyncio.to_thread(TTSPipeline, config)
         pipelines["llm"] = LLMPipeline(config)   # no local weights; cheap

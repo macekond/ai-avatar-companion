@@ -32,6 +32,8 @@ const canvasEl   = document.getElementById('canvas')
 const bubbleEl   = document.getElementById('sentence-bubble')
 const labelEl    = document.getElementById('state-label')
 const transcriptEl = document.getElementById('transcript')
+const replayLastEl = document.getElementById('replay-last')
+let lastReply = null       // most recent Nova reply text, for "Say it again"
 
 // ── App state ─────────────────────────────────────────────────────────────
 let renderer  = null
@@ -43,6 +45,7 @@ let ws        = null
 let state     = 'idle'
 let amplitude = 0          // smoothed lip-sync value
 let targetAmp = 0
+let stageReservePx = 0     // px reserved on the right for the transcript panel
 let pttActive = false      // true while Space is held
 let fadeTimer = null       // for bubble fade-out
 
@@ -75,13 +78,16 @@ function initThree() {
 
   clock = new THREE.Clock()
   renderer.setAnimationLoop(onTick)
-  window.addEventListener('resize', fitViewport)
+  window.addEventListener('resize', applyStageLayout)
 }
 
 function fitViewport() {
-  camera.aspect = window.innerWidth / window.innerHeight
+  // The avatar stage shrinks to the left when the transcript panel is docked
+  // beside it, so the model stays fully visible instead of being covered.
+  const w = Math.max(1, window.innerWidth - stageReservePx)
+  camera.aspect = w / window.innerHeight
   camera.updateProjectionMatrix()
-  renderer.setSize(window.innerWidth, window.innerHeight)
+  renderer.setSize(w, window.innerHeight)
 }
 
 // ── Blink scheduler ───────────────────────────────────────────────────────
@@ -187,6 +193,7 @@ function resetExpressions() {
 
 function applyState(newState) {
   state = newState
+  updateReplayLast()
 
   // Background tint via body class
   document.body.className = newState === 'idle' || newState === 'speaking' ? '' : newState
@@ -275,6 +282,11 @@ const SETUP_MESSAGES = {
       + 'This only happens once.',
     spinner: true,
   },
+  loading_models: {
+    title: 'Waking Nova up…',
+    body: 'Loading the voice models — just a moment.',
+    spinner: true,
+  },
   warming_up: {
     title: 'Almost there…',
     body: 'Warming up so replies come fast.',
@@ -327,6 +339,11 @@ function connectWS() {
   ws.onopen = () => {
     console.log('[ws] connected')
     labelEl.textContent = 'Connected! Loading avatar…'
+    // Tell the server which avatar is on screen so it can load the matching
+    // appearance description ("what colour is your hair?"). The key is the VRM
+    // basename, derived from the static MODEL_PATH — no model load needed.
+    const avatarKey = MODEL_PATH.split('/').pop().replace(/\.vrm$/i, '')
+    wsSend({ type: 'avatar_loaded', key: avatarKey })
   }
 
   ws.onmessage = (e) => {
@@ -337,6 +354,9 @@ function connectWS() {
         break
       case 'profiles':
         renderProfileSelector(msg.list, msg.active)
+        break
+      case 'profile_error':
+        showToast(msg.message)
         break
       case 'memory_loaded':
         // Profile loaded — update active highlight (slug not sent, use active from profiles)
@@ -371,8 +391,13 @@ function connectWS() {
       case 'voice_status':
         updateVoiceStatus(msg.state, msg.voice)
         break
+      case 'conversation_reset':
+        resetConversation()
+        break
       case 'conversation_turn':
         addConversationTurn(msg.id, msg.you, msg.nova)
+        lastReply = msg.nova
+        updateReplayLast()
         break
       case 'conversation_correction':
         addConversationCorrection(msg.id, msg.kind, msg.wrong, msg.right)
@@ -398,8 +423,17 @@ function wsSend(data) {
 // ── Keyboard PTT ──────────────────────────────────────────────────────────
 // True hold-to-talk via keydown/keyup — works natively in the browser,
 // no Accessibility permission needed.
+// While a modal dialog is open, Space belongs to it — typing into the
+// name field, or activating the focused button — not to push-to-talk.
+// Without this guard, Space is preventDefault-ed away from the input (so
+// multi-word names can't be typed) and fires a spurious ptt_start/stop_speak.
+function pttBlocked() {
+  return !modalOverlayEl.hidden
+}
+
 window.addEventListener('keydown', (e) => {
   if (e.code !== 'Space' || e.repeat) return
+  if (pttBlocked()) return
   e.preventDefault()
   if (state === 'idle' && !pttActive) {
     pttActive = true
@@ -413,6 +447,7 @@ window.addEventListener('keydown', (e) => {
 
 window.addEventListener('keyup', (e) => {
   if (e.code !== 'Space') return
+  if (pttBlocked()) return
   e.preventDefault()
   if (pttActive) {
     pttActive = false
@@ -443,16 +478,82 @@ const transcriptCloseEl = document.getElementById('transcript-close')
 const transcriptListEl  = document.getElementById('transcript-list')
 const conversation = new Map()   // id → { el, youEl }
 
+// Below this width there isn't room to sit the avatar and the transcript
+// side by side (it would leave the avatar too cramped), so the panel falls
+// back to overlaying the avatar.
+const SIDE_BY_SIDE_MIN = 860
+// Gap left of the panel and between it and the window edge. The panel's own
+// width comes from CSS at measure time — hardcoding it here would silently
+// misalign the stage the moment #transcript-panel's width changes.
+const PANEL_GAP = 16
+
+// Right strip the docked panel occupies: its rendered width plus a gap each
+// side. Measured rather than assumed; falls back to the CSS width if the panel
+// is hidden (getBoundingClientRect is 0 on a display:none element).
+function panelReserve() {
+  const w = transcriptPanelEl.getBoundingClientRect().width || 340
+  return w + PANEL_GAP * 2
+}
+
+// Reserve space on the right for the transcript panel and reflow the avatar
+// stage into the remaining width, so the two sit side by side rather than
+// the panel covering the avatar.
+function applyStageLayout() {
+  const dock = !transcriptPanelEl.hidden && window.innerWidth >= SIDE_BY_SIDE_MIN
+  stageReservePx = dock ? panelReserve() : 0
+  const root = document.documentElement.style
+  root.setProperty('--stage-reserve', stageReservePx + 'px')
+  root.setProperty('--stage-w', (window.innerWidth - stageReservePx) + 'px')
+  document.body.classList.toggle('transcript-docked', dock)
+  if (renderer) fitViewport()
+}
+
 function toggleTranscript(open) {
   transcriptPanelEl.hidden = open === undefined ? !transcriptPanelEl.hidden : !open
   transcriptBtnEl.classList.toggle('active', !transcriptPanelEl.hidden)
   if (!transcriptPanelEl.hidden) toggleSettings(false)
+  applyStageLayout()
 }
 transcriptBtnEl.addEventListener('click', () => toggleTranscript())
 transcriptCloseEl.addEventListener('click', () => toggleTranscript(false))
 window.addEventListener('keydown', (e) => {
   if (e.code === 'Escape' && !transcriptPanelEl.hidden) toggleTranscript(false)
 })
+
+// Clear the panel back to its empty state. Sent by the server before it
+// replays a profile's saved history (on connect or profile switch), so a
+// reconnect rebuilds the list from disk instead of stacking on top of it.
+function resetConversation() {
+  conversation.clear()
+  lastReply = null
+  updateReplayLast()
+  transcriptListEl.innerHTML =
+    '<p class="transcript-empty">Your chat with Nova will appear here.</p>'
+}
+
+// Ask the server to re-speak `text`. No-op unless idle — a replay must not
+// overlap the live pipeline or another replay.
+function requestReplay(text) {
+  if (state !== 'idle' || !text) return
+  wsSend({ type: 'replay', text })
+}
+
+// Small 🔊 button appended to a Nova line so the child can hear it again.
+function replayButton(text) {
+  const b = document.createElement('button')
+  b.className = 'replay-btn'
+  b.textContent = '🔊'
+  b.title = 'Hear it again'
+  b.setAttribute('aria-label', 'Hear it again')
+  b.addEventListener('click', () => requestReplay(text))
+  return b
+}
+
+// The "Say it again" control shows only when idle and there's a reply to repeat.
+function updateReplayLast() {
+  replayLastEl.hidden = !(state === 'idle' && lastReply)
+}
+replayLastEl.addEventListener('click', () => requestReplay(lastReply))
 
 function addConversationTurn(id, you, nova) {
   const empty = transcriptListEl.querySelector('.transcript-empty')
@@ -467,7 +568,7 @@ function addConversationTurn(id, you, nova) {
 
   const novaEl = document.createElement('div')
   novaEl.className = 'turn-nova'
-  novaEl.append(tag('Nova'), textNode(nova))
+  novaEl.append(tag('Nova'), textNode(nova), replayButton(nova))
 
   turn.append(youEl, novaEl)
   transcriptListEl.appendChild(turn)
@@ -597,22 +698,145 @@ function hideToast() {
   if (toastEl) toastEl.classList.remove('visible')
 }
 
+// ── Modal dialog (prompt / confirm) ───────────────────────────────
+// window.prompt()/confirm() are no-ops in the Tauri webview, so profile
+// add/remove use this in-app dialog instead.
+const modalOverlayEl = document.getElementById('modal-overlay')
+const modalMessageEl = document.getElementById('modal-message')
+const modalInputEl   = document.getElementById('modal-input')
+const modalCancelEl  = document.getElementById('modal-cancel')
+const modalConfirmEl = document.getElementById('modal-confirm')
+let modalResolve = null
+let modalHasInput = false
+let modalReturnFocus = null
+
+// Tab order inside the dialog: the input (when shown) then the two buttons.
+function modalFocusables() {
+  return [modalInputEl, modalCancelEl, modalConfirmEl].filter(el => !el.hidden)
+}
+
+function closeModal(result) {
+  if (!modalResolve) return
+  const resolve = modalResolve
+  modalResolve = null
+  modalOverlayEl.hidden = true
+  // Hand focus back to whatever opened the dialog (the '+' or '✕' chip), so
+  // keyboard users don't get dumped at the top of the document.
+  const returnTo = modalReturnFocus
+  modalReturnFocus = null
+  if (returnTo && returnTo.isConnected) returnTo.focus()
+  resolve(result)
+}
+
+// Returns a Promise: a trimmed string (or null if cancelled) when `input`,
+// otherwise a boolean confirm result.
+function openModal({ message, input = false, placeholder = '',
+                    confirmLabel = 'OK', danger = false } = {}) {
+  // A dialog already open resolves as cancelled before opening the new one.
+  if (modalResolve) closeModal(modalHasInput ? null : false)
+  const opener = document.activeElement
+  return new Promise(resolve => {
+    modalResolve = resolve
+    modalReturnFocus = opener instanceof HTMLElement ? opener : null
+    modalHasInput = input
+    modalMessageEl.textContent = message
+    modalInputEl.hidden = !input
+    modalInputEl.value = ''
+    modalInputEl.placeholder = placeholder
+    modalConfirmEl.textContent = confirmLabel
+    modalConfirmEl.classList.toggle('danger', danger)
+    modalOverlayEl.hidden = false
+    setTimeout(() => (input ? modalInputEl : modalConfirmEl).focus(), 0)
+  })
+}
+
+function confirmModal() {
+  closeModal(modalHasInput ? modalInputEl.value.trim() || null : true)
+}
+modalConfirmEl.addEventListener('click', confirmModal)
+modalCancelEl.addEventListener('click', () => closeModal(modalHasInput ? null : false))
+modalOverlayEl.addEventListener('click', (e) => {
+  if (e.target === modalOverlayEl) closeModal(modalHasInput ? null : false)
+})
+modalInputEl.addEventListener('keydown', (e) => {
+  // NumpadEnter is a distinct code from Enter — both submit the name.
+  if (e.code === 'Enter' || e.code === 'NumpadEnter') {
+    e.preventDefault()
+    confirmModal()
+  }
+})
+window.addEventListener('keydown', (e) => {
+  if (modalOverlayEl.hidden) return
+  if (e.code === 'Escape') {
+    e.stopPropagation()
+    closeModal(modalHasInput ? null : false)
+    return
+  }
+  // aria-modal="true" promises focus stays in the dialog — implement it, or
+  // Tab walks off into the page behind the overlay.
+  if (e.code === 'Tab') {
+    const items = modalFocusables()
+    if (!items.length) return
+    const first = items[0]
+    const last = items[items.length - 1]
+    const onFirst = document.activeElement === first
+    const onLast = document.activeElement === last
+    if (e.shiftKey && (onFirst || !items.includes(document.activeElement))) {
+      e.preventDefault()
+      last.focus()
+    } else if (!e.shiftKey && (onLast || !items.includes(document.activeElement))) {
+      e.preventDefault()
+      first.focus()
+    }
+  }
+}, true)
+
 // ── Profile selector ──────────────────────────────────────────────
 const profileSelectorEl = document.getElementById('profile-selector')
 
+function displayName(slug) {
+  // Capitalize slug (underscores → spaces): mia_rose → Mia Rose
+  return slug.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
+}
+
 function renderProfileSelector(profiles, activeSlug) {
   profileSelectorEl.innerHTML = ''
+  // Only offer removal when more than one child exists — the app always needs
+  // an active profile to fall back to.
+  const canRemove = profiles.length > 1
 
   profiles.forEach(slug => {
+    const item = document.createElement('span')
+    item.className = 'profile-item'
+
     const btn = document.createElement('button')
     btn.className = 'chip' + (slug === activeSlug ? ' active' : '')
-    // Display name: capitalize slug (underscores → spaces)
-    btn.textContent = slug.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
+    btn.textContent = displayName(slug)
     btn.dataset.slug = slug
     btn.addEventListener('click', () => {
-      wsSend({ type: 'switch_profile', slug })
+      if (slug !== activeSlug) wsSend({ type: 'switch_profile', slug })
     })
-    profileSelectorEl.appendChild(btn)
+    item.appendChild(btn)
+
+    if (canRemove) {
+      const removeBtn = document.createElement('button')
+      removeBtn.className = 'profile-remove'
+      removeBtn.textContent = '✕'
+      removeBtn.setAttribute('aria-label', `Remove ${displayName(slug)}`)
+      removeBtn.title = `Remove ${displayName(slug)}`
+      removeBtn.addEventListener('click', async (e) => {
+        e.stopPropagation()
+        const ok = await openModal({
+          message: `Remove ${displayName(slug)}? This permanently deletes their saved progress.`,
+          confirmLabel: 'Remove',
+          danger: true,
+        })
+        if (ok) wsSend({ type: 'delete_profile', slug })
+      })
+      item.appendChild(removeBtn)
+    }
+
+    profileSelectorEl.appendChild(item)
   })
 
   // '+' button to add a new child (triggers onboarding for a fresh slug)
@@ -620,12 +844,17 @@ function renderProfileSelector(profiles, activeSlug) {
   addBtn.className = 'chip'
   addBtn.textContent = '+'
   addBtn.title = 'Add a new child'
-  addBtn.addEventListener('click', () => {
-    const rawName = prompt('Enter the new child\'s name:')
+  addBtn.addEventListener('click', async () => {
+    const rawName = await openModal({
+      message: "What's the new child's name?",
+      input: true,
+      placeholder: 'Name',
+      confirmLabel: 'Add',
+    })
     if (!rawName) return
-    // Build a slug client-side (server will create the profile)
-    const slug = rawName.toLowerCase().trim().replace(/\s+/g, '_').replace(/[^a-z0-9_]/g, '')
-    if (slug) wsSend({ type: 'switch_profile', slug })
+    // Send the raw name — the server runs it through name_to_slug (the single
+    // source of truth for slugs), so we don't duplicate that logic here.
+    wsSend({ type: 'switch_profile', slug: rawName })
   })
   profileSelectorEl.appendChild(addBtn)
 }

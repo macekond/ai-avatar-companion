@@ -14,12 +14,14 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterator
+from datetime import date
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from app.config import Config
 
-from app.levels import instructions_for
+from app.levels import LANGUAGE_LOCK, instructions_for
+from app.memory import humanize_since, today_context
 
 # ---------------------------------------------------------------------------
 # Sentence boundary detection
@@ -59,6 +61,11 @@ _PATTERN_REVIEW_HINT = (
     "If no pattern stands out, simply continue the conversation naturally."
 )
 
+_APPEARANCE_TEMPLATE = (
+    "About how you look — if asked about your appearance, answer in first "
+    "person and stay in character: {description}"
+)
+
 
 class LLMPipeline:
     """Wraps Ollama streaming to yield reply sentences one at a time.
@@ -72,6 +79,7 @@ class LLMPipeline:
         self._config = config
         self._base_prompt = config.format_system_prompt()
         self._memory = None
+        self._appearance: str | None = None
         self._system_prompt = self._build_prompt(config.child.level)
         self._history: list[dict[str, str]] = []
         self._pending_hint: str | None = None   # one-shot extra system message
@@ -83,6 +91,11 @@ class LLMPipeline:
             parts.append(instruction)
         if memory is not None:
             parts.append(self._format_memory_block(memory))
+        if self._appearance:
+            parts.append(_APPEARANCE_TEMPLATE.format(description=self._appearance))
+        # Always last: the non-negotiable "reply only in English" rule. Placed
+        # after everything else so the model treats it as the final word.
+        parts.append(LANGUAGE_LOCK)
         return "\n\n".join(parts)
 
     def set_level(self, level: str) -> None:
@@ -103,12 +116,30 @@ class LLMPipeline:
         self._memory = memory
         self._system_prompt = self._build_prompt(self._config.child.level, memory)
 
+    def set_appearance(self, text: str | None) -> None:
+        """Set (or clear) the avatar's appearance description in the system prompt.
+
+        Pass a description string so the avatar can answer "what do you look
+        like?" in character. Pass None to remove it. Takes effect next turn.
+        """
+        self._appearance = text
+        self._system_prompt = self._build_prompt(self._config.child.level, self._memory)
+
     @staticmethod
     def _format_memory_block(memory) -> str:
-        """Render a concise memory context block for the system prompt."""
+        """Render a concise memory context block for the system prompt.
+
+        Each remembered topic/challenge is tagged with how long ago it came
+        up (relative to today), and the block opens with today's date. This
+        gives the model the temporal awareness kids enjoy — "today is
+        Saturday", "yesterday we talked about football".
+        """
         profile = memory.profile
         age_str = f" (age {profile.age})" if profile.age else ""
-        lines = [f"Memory about {profile.name}{age_str}:"]
+        lines = [
+            f"Today is {today_context()}.",
+            f"Memory about {profile.name}{age_str}:",
+        ]
 
         if memory.topics:
             recent = sorted(
@@ -116,17 +147,32 @@ class LLMPipeline:
                 key=lambda t: t.last_mentioned,
                 reverse=True,
             )[:5]
-            lines.append("- Recent topics of interest: " +
-                         ", ".join(t.keyword for t in recent))
+            lines.append("- Recent topics of interest: " + ", ".join(
+                f"{t.keyword} ({humanize_since(t.last_mentioned)})"
+                for t in recent
+            ))
 
         unresolved = [p for p in memory.problems if not p.resolved]
         if unresolved:
             top = sorted(unresolved, key=lambda p: p.times_seen, reverse=True)[:3]
             details = "; ".join(
-                f"{p.type} (e.g. '{p.example}' → '{p.correction}')"
+                f"{p.type} (e.g. '{p.example}' → '{p.correction}', "
+                f"came up {humanize_since(p.last_seen)})"
                 for p in top
             )
             lines.append(f"- Known language challenges: {details}")
+
+        # Only prompt the model to reference *when* things came up if there is
+        # actually remembered history. Emitting this for a freshly onboarded
+        # child (no topics, no challenges) primes it to invent a shared past
+        # ("yesterday you told me about…") on the very first conversation.
+        if memory.topics or unresolved:
+            lines.append(
+                "- You know when each of these came up, so refer to it naturally "
+                "when it fits (e.g. \"yesterday you told me about...\", \"happy "
+                f"{date.today().strftime('%A')}!\") — kids love talking about today, "
+                "yesterday and what's coming up."
+            )
 
         hints = []
         if memory.topics:

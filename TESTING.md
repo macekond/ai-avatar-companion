@@ -9,7 +9,7 @@ pytest tests/ -q           # quiet — summary only
 pytest tests/ --tb=short   # on failure: short traceback
 ```
 
-All 258 tests run offline. No Ollama, mic, or speakers required.
+The whole suite runs offline. No Ollama, mic, or speakers required.
 
 ---
 
@@ -21,25 +21,28 @@ The pipeline is split into three clearly bounded stages — STT, LLM, TTS — ea
 - **Integration tests** verify that two or more components wire together correctly.
 - **Hardware-dependent code** (TTS playback, mic recording) is intentionally excluded from automated tests; it is validated manually via `python main.py --voice` and `python run.py`.
 
-The goal is a suite that runs fast (< 2 s), requires no credentials or hardware setup, and catches regressions in the logic that is hardest to verify by eye — config parsing, sentence streaming, state machine transitions, correction logic, amplitude wiring.
+The goal is a suite that runs in seconds, requires no credentials or hardware setup, and catches regressions in the logic that is hardest to verify by eye — config parsing, sentence streaming, state machine transitions, correction logic, amplitude wiring.
 
 ---
 
 ## Test files
 
-| File | Type | Tests | What it covers |
-|---|---|---|---|
-| `test_levels.py` | Unit | 20 | CEFR level definitions, correction intensity escalation, forbidden phrasing, CEFR labels, grammar content per level |
-| `test_config.py` | Unit | 22 | `_filter()` helper, dataclass defaults, `Config.load()` from YAML, `format_system_prompt()` placeholder substitution |
-| `test_pipeline_llm.py` | Unit | 31 | `_extract_sentences()` edge cases, prompt building for all 5 levels, `set_level()`, history trimming with recency, pattern-review injection timing, `chat()` via mocked Ollama |
-| `test_pipeline_stt.py` | Unit | 17 | Sample-rate constant, length guard, `no_speech_prob` boundary conditions (at/above/below threshold), `avg_logprob` floor, multi-segment joining and filtering |
-| `test_pipeline_integration.py` | Integration | 24 | LLM→TTS per-sentence handoff, amplitude callback wiring, stop-event pre-emption and mid-stream halt, level→prompt content, STT confidence threshold gating |
-| `test_server_integration.py` | Integration | 37 | WebSocket session handler (`_session`): on-connect greeting, full PTT state sequence, transcript forwarding, empty-transcript `didnt_catch` path, `set_level` routing, unknown messages, two-turn conversations, profile switching, re-engagement |
-| `test_server_security.py` | Integration | 10 | Security regressions: server-side slug sanitization (path-traversal), Origin allow-list (live socket: allowed/no-Origin connect, `null`/cross-origin rejected), pending-task drain on teardown |
-| `test_server_features.py` | Integration | 6 | Barge-in via `stop_speak`, non-stop messages buffered during speaking, `set_level` reaches telemetry, `first_audio_ms` capture, profile-switch drains in-flight extraction |
-| `test_memory.py` | Unit | ~40 | `ChildMemory` dataclass, TTL pruning, count-cap pruning, resolved-problem fast expiry, corrupt-file recovery, `name_to_slug` |
-| `test_memory_extractor.py` | Unit | ~25 | Extraction JSON parsing, problem-format parsing, engaged/topic/problem extraction |
-| `test_telemetry.py` | Unit | ~25 | Session start/end events, turn logging, aggregates, didnt_catch, `first_audio_ms` |
+| File | Type | What it covers |
+|---|---|---|
+| `test_levels.py` | Unit | CEFR level definitions, correction intensity escalation, forbidden phrasing, CEFR labels, grammar content per level, per-level reply-length caps |
+| `test_config.py` | Unit | `_filter()` helper, dataclass defaults, `Config.load()` from YAML, `format_system_prompt()` placeholder substitution |
+| `test_pipeline_llm.py` | Unit | `_extract_sentences()` edge cases, prompt building for all 5 levels, `set_level()`, history trimming with recency, pattern-review injection timing, `chat()` via mocked Ollama, `LANGUAGE_LOCK` ordering, temporal memory guidance |
+| `test_pipeline_stt.py` | Unit | Sample-rate constant, length guard, `no_speech_prob` boundary conditions (at/above/below threshold), `avg_logprob` floor, multi-segment joining and filtering |
+| `test_appearance.py` | Unit | Curated appearance lookups, derive/cache round-trip, blank-key guard, appearance surviving a memory change |
+| `test_memory.py` | Unit | `ChildMemory` dataclass, TTL pruning, count-cap pruning, resolved-problem fast expiry, corrupt-file recovery, `name_to_slug` + `fallback`, `delete_profile` (traversal, junk slugs, deleted-slug tombstone) |
+| `test_memory_extractor.py` | Unit | Extraction JSON parsing, problem-format parsing, engaged/topic/problem extraction |
+| `test_telemetry.py` | Unit | Session start/end events, turn logging, aggregates, didnt_catch, `first_audio_ms` |
+| `test_pipeline_integration.py` | Integration | LLM→TTS per-sentence handoff, amplitude callback wiring, stop-event pre-emption and mid-stream halt, level→prompt content, STT confidence threshold gating |
+| `test_server_integration.py` | Integration | WebSocket session handler (`_session`): on-connect greeting, full PTT state sequence, transcript forwarding, empty-transcript `didnt_catch` path, `set_level` routing, unknown messages, two-turn conversations, profile switching, re-engagement |
+| `test_server_security.py` | Integration | Security regressions: server-side slug sanitization (path-traversal), Origin allow-list (live socket: allowed/no-Origin connect, `null`/cross-origin rejected), pending-task drain on teardown |
+| `test_server_features.py` | Integration | Barge-in via `stop_speak`, non-stop messages buffered during speaking, `set_level` reaches telemetry, `first_audio_ms` capture, profile-switch drains in-flight extraction, `delete_profile` handler (last-child guard, hot-swap, resurrection), avatar appearance wiring incl. the onboarding path |
+| `test_server_settings.py` | Integration | Settings panel backend: voice list, `set_voice`, persistence to `~/.ai-avatar/settings.json` |
+| `test_server_transcript.py` | Integration | `conversation_turn` + `conversation_correction` emission |
 
 ---
 
@@ -84,7 +87,7 @@ pip install -r requirements-dev.txt
 | `TTSPipeline.speak_streaming()` playback | Requires audio output device | `python main.py --voice` |
 | `STTPipeline.record()` | Requires microphone | `python main.py --voice` |
 | `app/server.py` WebSocket bind/accept | Infrastructure, not logic | `python run.py` |
-| Live2D rendering | Browser WebGL, no headless driver | `python run.py` + visual inspection |
+| VRM avatar rendering | Browser WebGL, no headless driver | `python run.py` + visual inspection |
 | Full voice loop latency | Hardware-dependent | Phase 2 exit criterion: release Space → first audio ≤ 1.5 s |
 
 The Phase 2 exit criteria from the design document serve as the manual test specification for hardware-dependent behaviour.

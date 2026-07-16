@@ -116,12 +116,6 @@ class AudioConfig:
 
 
 @dataclass
-class AvatarConfig:
-    model: str = "nova/live2d/nova.model3.json"
-    lip_sync: str = "amplitude"
-
-
-@dataclass
 class SafetyConfig:
     # NYI (not yet implemented) — placeholders for the Phase 4 safety layer.
     # These fields are read by config.yaml but no enforcement code exists yet.
@@ -168,7 +162,6 @@ class Config:
     privacy: PrivacyConfig = field(default_factory=PrivacyConfig)
     models: ModelsConfig = field(default_factory=ModelsConfig)
     audio: AudioConfig = field(default_factory=AudioConfig)
-    avatar: AvatarConfig = field(default_factory=AvatarConfig)
     safety: SafetyConfig = field(default_factory=SafetyConfig)
     telemetry: TelemetryConfig = field(default_factory=TelemetryConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
@@ -213,7 +206,6 @@ class Config:
             privacy=PrivacyConfig(**_filter(PrivacyConfig, raw.get("privacy", {}))),
             models=models,
             audio=AudioConfig(**_filter(AudioConfig, raw.get("audio", {}))),
-            avatar=AvatarConfig(**_filter(AvatarConfig, raw.get("avatar", {}))),
             safety=SafetyConfig(**_filter(SafetyConfig, raw.get("safety", {}))),
             telemetry=TelemetryConfig(**_filter(TelemetryConfig, raw.get("telemetry", {}))),
             memory=MemoryConfig(**_filter(MemoryConfig, raw.get("memory", {}))),

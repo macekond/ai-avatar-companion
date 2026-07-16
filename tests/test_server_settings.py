@@ -11,7 +11,7 @@ from app.pipeline.llm import LLMPipeline
 from app.pipeline.stt import STTPipeline
 from app.pipeline.tts import TTSPipeline
 from app.server import _session, AVAILABLE_VOICES, _VOICE_IDS
-from tests.conftest import MockWebSocket
+from tests.conftest import MockWebSocket, make_fake_recorder
 
 
 DUMMY_AUDIO = np.zeros(16_000, dtype=np.float32)
@@ -40,7 +40,8 @@ def _mock_tts(reload_ok: bool = True, current: str = "en_US-kristin-medium") -> 
 
 @pytest.fixture(autouse=True)
 def _no_mic():
-    with patch("app.server._record", return_value=DUMMY_AUDIO):
+    with patch("app.server._MicRecorder",
+               return_value=make_fake_recorder(DUMMY_AUDIO)):
         yield
 
 
