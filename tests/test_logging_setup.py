@@ -67,3 +67,13 @@ class TestLogfmtStr:
 
     def test_embedded_quote_escaped(self):
         assert logfmt_str('a"b') == '"a\\"b"'
+
+    def test_newline_is_quoted_and_escaped(self):
+        # A control char must never pass through bare — a client-controlled close
+        # reason with a newline would otherwise inject a second log line.
+        result = logfmt_str("x\ninjected")
+        assert "\n" not in result
+        assert result == '"x\\ninjected"'
+
+    def test_tab_is_quoted_and_escaped(self):
+        assert logfmt_str("a\tb") == '"a\\tb"'

@@ -53,8 +53,15 @@ def configure_logging(log_dir: str | Path) -> None:
 
 
 def logfmt_str(value) -> str:
-    """Quote a value for a logfmt field: bare token when safe, else quoted."""
+    """Quote a value for a logfmt field: bare token when safe, else quoted.
+
+    Anything with whitespace, a quote, `=`, or a control char is quoted and
+    escaped — a bare control char (e.g. a newline in a client-supplied close
+    reason) would otherwise inject a second line into the log.
+    """
     s = "" if value is None else str(value)
-    if s == "" or any(c in s for c in ' "='):
-        return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
-    return s
+    if s and s.isprintable() and not any(c in s for c in ' "='):
+        return s
+    esc = (s.replace("\\", "\\\\").replace('"', '\\"')
+            .replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t"))
+    return '"' + esc + '"'
