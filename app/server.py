@@ -16,6 +16,7 @@ Browser → server:
   {"type": "ptt_start"}
   {"type": "ptt_stop"}
   {"type": "stop_speak"}                     # barge-in while speaking/thinking
+  {"type": "replay",         "text": "…"}    # re-speak a stored line
   {"type": "set_level",      "level": "B"}
   {"type": "set_voice",      "voice": "en_US-kristin-medium"}
   {"type": "switch_profile", "slug": "mia"}
@@ -632,6 +633,58 @@ async def _session(
         await _load_transcript(new_slug)
         await _send_greeting(config, memory, tts, send, send_from_thread)
 
+    async def _run_speaking(speech_fn) -> None:
+        """Run speech_fn(stop_event) in a worker thread while watching the socket
+        for a `stop_speak` barge-in. Shared by the live reply and replay so both
+        interrupt identically. Non-stop_speak messages are buffered for the main
+        loop; a drained MockWebSocket (TimeoutError) simply ends the watcher.
+        """
+        stop_speaking = threading.Event()
+
+        async def _watch_for_stop() -> None:
+            while True:
+                try:
+                    raw3 = await ws.recv()
+                except (asyncio.TimeoutError, websockets.ConnectionClosed,
+                        StopAsyncIteration):
+                    return
+                try:
+                    m = json.loads(raw3)
+                except (ValueError, TypeError):
+                    continue
+                if m.get("type") == "stop_speak":
+                    stop_speaking.set()
+                    return
+                buffered_msgs.append(raw3)
+
+        pipeline_task = asyncio.create_task(asyncio.to_thread(speech_fn, stop_speaking))
+        watcher_task = asyncio.create_task(_watch_for_stop())
+        done, _ = await asyncio.wait(
+            {pipeline_task, watcher_task}, return_when=asyncio.FIRST_COMPLETED)
+        if watcher_task not in done:
+            watcher_task.cancel()
+            try:
+                await watcher_task
+            except asyncio.CancelledError:
+                pass
+        if pipeline_task not in done:
+            await pipeline_task
+
+    async def _speak_interruptible(text: str) -> None:
+        """Re-speak `text` (a replay) with the same barge-in as a live reply.
+
+        Pure playback: no transcript entry, no memory extraction, no telemetry.
+        """
+        await send({"type": "state", "state": "speaking"})
+        await send({"type": "sentence", "text": text})
+
+        def _speak(stop_speaking) -> None:
+            tts.speak_streaming(text, amplitude_cb, stop_speaking)
+
+        await _run_speaking(_speak)
+        await send({"type": "amplitude", "value": 0.0})
+        await send({"type": "state", "state": "idle"})
+
     try:
         while True:
             try:
@@ -656,6 +709,13 @@ async def _session(
             # ── Avatar changed: refresh appearance description ───────────
             if mtype == "avatar_loaded":
                 _apply_appearance(msg.get("key", ""))
+                continue
+
+            # ── Replay: re-speak a stored line (no new turn, no memory) ───
+            if mtype == "replay":
+                text = msg.get("text", "")
+                if isinstance(text, str) and text.strip():
+                    await _speak_interruptible(text.strip())
                 continue
 
             # ── Voice change ─────────────────────────────────────────────
@@ -818,7 +878,6 @@ async def _session(
 
             # ── SPEAKING ─────────────────────────────────────────────────
             await send({"type": "state", "state": "speaking"})
-            stop_speaking = threading.Event()
             spoken_sentences: list[str] = []
 
             reengagement_fired = bool(
@@ -840,7 +899,7 @@ async def _session(
                     )
                 amplitude_cb(value)
 
-            def _run_pipeline() -> None:
+            def _run_pipeline(stop_speaking) -> None:
                 try:
                     for i, sentence in enumerate(llm.chat(transcript)):
                         if i == 0:
@@ -856,46 +915,11 @@ async def _session(
                     send_from_thread({"type": "sentence",
                                       "text": "My brain is napping — try again!"})
 
-            # Barge-in: while the pipeline runs, watch the socket for a
-            # `stop_speak` message. When one arrives, set the shared stop
-            # event so TTS aborts and the pipeline breaks after the current
-            # sentence. Other messages are buffered for the main loop.
-            # (Catching asyncio.TimeoutError also lets MockWebSocket-based
-            # tests terminate the watcher when their message queue drains.)
-            async def _watch_for_stop() -> None:
-                while True:
-                    try:
-                        raw3 = await ws.recv()
-                    except (asyncio.TimeoutError,
-                            websockets.ConnectionClosed,
-                            StopAsyncIteration):
-                        return
-                    try:
-                        m = json.loads(raw3)
-                    except (ValueError, TypeError):
-                        continue
-                    if m.get("type") == "stop_speak":
-                        stop_speaking.set()
-                        return
-                    buffered_msgs.append(raw3)
-
+            # Barge-in while the reply streams: a `stop_speak` sets the shared
+            # stop event (TTS aborts, loop breaks after the current sentence);
+            # other messages are buffered for the main loop. See _run_speaking.
             _turn_t0 = _time.monotonic()
-            pipeline_task = asyncio.create_task(asyncio.to_thread(_run_pipeline))
-            watcher_task = asyncio.create_task(_watch_for_stop())
-            done, _ = await asyncio.wait(
-                {pipeline_task, watcher_task},
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            if watcher_task not in done:
-                watcher_task.cancel()
-                try:
-                    await watcher_task
-                except asyncio.CancelledError:
-                    pass
-            if pipeline_task not in done:
-                # Watcher fired first: wait for the pipeline to unwind (TTS
-                # honors stop_speaking; loop breaks after current sentence).
-                await pipeline_task
+            await _run_speaking(_run_pipeline)
 
             total_ms = int((_time.monotonic() - _ptt_stop_t) * 1000)
             llm_ttft_ms = _llm_ttft_ms[0] if _llm_ttft_ms else 0
