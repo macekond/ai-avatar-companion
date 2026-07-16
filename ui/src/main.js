@@ -279,6 +279,11 @@ const SETUP_MESSAGES = {
       + 'This only happens once.',
     spinner: true,
   },
+  loading_models: {
+    title: 'Waking Nova up…',
+    body: 'Loading the voice models — just a moment.',
+    spinner: true,
+  },
   warming_up: {
     title: 'Almost there…',
     body: 'Warming up so replies come fast.',
@@ -382,6 +387,9 @@ function connectWS() {
         break
       case 'voice_status':
         updateVoiceStatus(msg.state, msg.voice)
+        break
+      case 'conversation_reset':
+        resetConversation()
         break
       case 'conversation_turn':
         addConversationTurn(msg.id, msg.you, msg.nova)
@@ -506,6 +514,15 @@ transcriptCloseEl.addEventListener('click', () => toggleTranscript(false))
 window.addEventListener('keydown', (e) => {
   if (e.code === 'Escape' && !transcriptPanelEl.hidden) toggleTranscript(false)
 })
+
+// Clear the panel back to its empty state. Sent by the server before it
+// replays a profile's saved history (on connect or profile switch), so a
+// reconnect rebuilds the list from disk instead of stacking on top of it.
+function resetConversation() {
+  conversation.clear()
+  transcriptListEl.innerHTML =
+    '<p class="transcript-empty">Your chat with Nova will appear here.</p>'
+}
 
 function addConversationTurn(id, you, nova) {
   const empty = transcriptListEl.querySelector('.transcript-empty')

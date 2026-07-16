@@ -12,10 +12,12 @@ once to start, press once to stop) is the correct interaction model.
 """
 from __future__ import annotations
 
+import os
 import sys
 import termios
 import threading
 import tty
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -25,6 +27,29 @@ if TYPE_CHECKING:
 
 SAMPLE_RATE = 16_000   # Whisper requires 16 kHz
 MIN_DURATION_S = 0.3   # recordings shorter than this are silently discarded
+
+
+def whisper_is_cached(model_id: str, cache_dir: "Path | None" = None) -> bool:
+    """True if the faster-whisper model is already downloaded (no fetch needed).
+
+    Bare size names ("small.en") resolve to Systran's HuggingFace repo; a
+    model_id that is itself a local directory or an explicit "org/repo" is used
+    as-is. Mirrors tts.voice_is_cached so the setup screen can honestly say
+    "loading" rather than "downloading ~600 MB" on cached launches.
+
+    A `models--…/snapshots` folder with no snapshot inside means an interrupted
+    download — reported as *not* cached so the first-run message still shows.
+    """
+    if os.path.isdir(model_id):
+        return True
+    repo = model_id if "/" in model_id else f"Systran/faster-whisper-{model_id}"
+    if cache_dir is not None:
+        base = Path(cache_dir)
+    else:
+        from huggingface_hub.constants import HF_HUB_CACHE
+        base = Path(HF_HUB_CACHE)
+    snapshots = base / ("models--" + repo.replace("/", "--")) / "snapshots"
+    return snapshots.is_dir() and any(snapshots.iterdir())
 
 _STOP_KEYS = {' ', '\r', '\n'}  # Space or Enter = stop recording
 _QUIT_KEYS = {'\x03', '\x1b', 'q', 'Q'}  # Ctrl-C, Escape, q = exit

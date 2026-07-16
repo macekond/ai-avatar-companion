@@ -32,9 +32,14 @@ Server → browser:
   {"type": "transcript",    "text": "…"}
   {"type": "sentence",      "text": "…"}
   {"type": "amplitude",     "value": 0–1}
+  {"type": "conversation_reset"}                     # clear panel before replay
   {"type": "conversation_turn",       "id": 1, "you": "…", "nova": "…"}
   {"type": "conversation_correction", "id": 1, "kind": "past_tense",
                                       "wrong": "goed", "right": "went"}
+
+On connect (and on profile switch) the server replays the active child's saved
+transcript: a 'conversation_reset' followed by the stored 'conversation_turn' /
+'conversation_correction' messages, so history survives a relaunch.
 
 Run:
     python -m app.server
@@ -62,6 +67,7 @@ from app.config import Config, default_config_path
 from app.memory import ChildMemory, ChildProfile, MemoryManager, name_to_slug
 from app.settings import load_settings, save_setting
 from app.setup import check_ollama
+from app.transcript import TranscriptStore
 
 # Curated voice list for the Settings panel. Deliberately limited to voices
 # with permissive licenses (public domain / CC0) — the previous default
@@ -75,7 +81,7 @@ AVAILABLE_VOICES = [
 _VOICE_IDS = {v["id"] for v in AVAILABLE_VOICES}
 from app.memory_extractor import MemoryExtractor
 from app.pipeline.llm import LLMPipeline
-from app.pipeline.stt import STTPipeline, SAMPLE_RATE
+from app.pipeline.stt import STTPipeline, SAMPLE_RATE, whisper_is_cached
 from app.pipeline.tts import TTSPipeline, voice_is_cached
 from app.telemetry import TelemetrySession
 
@@ -127,30 +133,84 @@ RECORD_GRACE_S = 10.0
 DRAIN_TIMEOUT_S = 5.0
 
 
-def _record(stop: threading.Event) -> np.ndarray:
-    """Record audio until *stop* is set. Called in a thread-pool executor.
+class _MicRecorder:
+    """Session-scoped microphone capture over a single persistent input stream.
 
-    Returns an empty array on any failure (no mic, permission denied) so the
-    caller flows into the didn't-catch path instead of crashing the session.
+    Opening and closing a CoreAudio input stream on *every* PTT turn eventually
+    wedges the device on macOS — the stream opens but its callback stops
+    delivering frames — so the server went permanently deaf a few minutes into
+    a session (field-observed: ~10 good turns, then every turn "didn't catch").
+    The CLI never hit this because `STTPipeline.record` keeps one stream open
+    and gates capture with a flag; this mirrors that.
+
+    Lifecycle per turn: `start()` clears the buffer and begins capturing (the
+    stream is opened lazily on the first call and reused thereafter); `stop()`
+    stops capturing and returns the audio. `close()` tears the stream down at
+    the end of the session. All three are safe to call from a worker thread.
     """
-    import sounddevice as sd
 
-    chunks: list[np.ndarray] = []
+    def __init__(self) -> None:
+        self._chunks: list[np.ndarray] = []
+        self._capturing = threading.Event()
+        self._lock = threading.Lock()
+        self._stream = None
+        self._failed = False
 
-    def _cb(indata: np.ndarray, frames: int, _time, _status) -> None:
-        chunks.append(indata.copy())
+    def _ensure_stream(self) -> None:
+        if self._stream is not None or self._failed:
+            return
+        import sounddevice as sd
 
-    try:
-        with sd.InputStream(samplerate=SAMPLE_RATE, channels=1,
-                            dtype="float32", callback=_cb):
-            stop.wait()
-    except Exception as exc:
-        log.error("Recording failed (mic unavailable or permission denied): %s", exc)
-        return np.zeros(0, dtype=np.float32)
+        def _cb(indata: np.ndarray, frames: int, _time, _status) -> None:
+            # Runs on PortAudio's thread for the whole session; only keep frames
+            # while a turn is actually capturing.
+            if self._capturing.is_set():
+                with self._lock:
+                    self._chunks.append(indata.copy())
 
-    if not chunks:
-        return np.zeros(0, dtype=np.float32)
-    return np.concatenate(chunks, axis=0).squeeze()
+        stream = None
+        try:
+            stream = sd.InputStream(samplerate=SAMPLE_RATE, channels=1,
+                                    dtype="float32", callback=_cb)
+            stream.start()
+            self._stream = stream
+        except Exception as exc:
+            # Missing mic permission (macOS TCC) surfaces here. Mark failed so
+            # every turn flows into the didn't-catch path instead of retrying a
+            # blocking open each time. Close a stream that constructed but
+            # failed to start, so it isn't leaked.
+            log.error("Microphone unavailable (permission denied?): %s", exc)
+            self._failed = True
+            if stream is not None:
+                try:
+                    stream.close()
+                except Exception:
+                    pass
+
+    def start(self) -> None:
+        with self._lock:
+            self._chunks = []
+        self._capturing.set()
+        self._ensure_stream()
+
+    def stop(self) -> np.ndarray:
+        """Stop capturing and return the recorded audio (empty on any failure)."""
+        self._capturing.clear()
+        with self._lock:
+            chunks, self._chunks = self._chunks, []
+        if not chunks:
+            return np.zeros(0, dtype=np.float32)
+        return np.concatenate(chunks, axis=0).squeeze()
+
+    def close(self) -> None:
+        self._capturing.clear()
+        stream, self._stream = self._stream, None
+        if stream is not None:
+            try:
+                stream.stop()
+                stream.close()
+            except Exception:
+                pass
 
 
 # ---------------------------------------------------------------------------
@@ -219,23 +279,21 @@ async def _one_ptt_turn(
     next_raw,
     stash,
     stt: STTPipeline,
-    loop: asyncio.AbstractEventLoop,
+    recorder: "_MicRecorder",
     send,
 ) -> str:
     """Wait for Space-release, record, and return the transcript (may be empty)."""
     await send({"type": "state", "state": "listening"})
-    stop_rec = threading.Event()
-    rec_task = loop.run_in_executor(None, _record, stop_rec)
+    try:
+        await asyncio.wait_for(asyncio.to_thread(recorder.start), RECORD_GRACE_S)
+    except Exception:
+        # First-turn stream open can block without mic permission; don't hang.
+        log.error("Recording did not start — treating as no audio")
     if not await _await_ptt(next_raw, stash, "ptt_stop"):
-        stop_rec.set()
+        await asyncio.to_thread(recorder.stop)
         await send({"type": "state", "state": "idle"})
         return ""
-    stop_rec.set()
-    try:
-        audio = await asyncio.wait_for(rec_task, RECORD_GRACE_S)
-    except Exception:
-        log.error("Recording did not complete — treating as no audio")
-        audio = np.zeros(0, dtype=np.float32)
+    audio = await asyncio.to_thread(recorder.stop)
     await send({"type": "state", "state": "thinking"})
     return await asyncio.to_thread(stt.transcribe, audio)
 
@@ -251,7 +309,7 @@ async def _run_onboarding(
     stt: STTPipeline,
     tts: TTSPipeline,
     mem_mgr: MemoryManager,
-    loop: asyncio.AbstractEventLoop,
+    recorder: "_MicRecorder",
     send,
     send_from_thread,
 ) -> ChildMemory:
@@ -279,7 +337,7 @@ async def _run_onboarding(
 
     # wait for Space-press, then record
     await _await_ptt(next_raw, stash, "ptt_start")
-    name_transcript = await _one_ptt_turn(next_raw, stash, stt, loop, send)
+    name_transcript = await _one_ptt_turn(next_raw, stash, stt, recorder, send)
     name = _extract_name(name_transcript) if name_transcript else None
     if not name:
         name = "Friend"
@@ -293,7 +351,7 @@ async def _run_onboarding(
     await send({"type": "state", "state": "idle"})
 
     await _await_ptt(next_raw, stash, "ptt_start")
-    age_transcript = await _one_ptt_turn(next_raw, stash, stt, loop, send)
+    age_transcript = await _one_ptt_turn(next_raw, stash, stt, recorder, send)
     age = _extract_age(age_transcript) if age_transcript else None
 
     memory = ChildMemory(profile=ChildProfile(name=name, age=age))
@@ -420,11 +478,15 @@ async def _session(
         """
         stashed: list[str] = []
         result = await _run_onboarding(
-            _next_raw, stashed.append, config, stt, tts, mgr, loop,
+            _next_raw, stashed.append, config, stt, tts, mgr, recorder,
             send, send_from_thread,
         )
         buffered_msgs.extend(stashed)
         return result
+
+    # One microphone stream for the whole session (see _MicRecorder): opening a
+    # fresh CoreAudio stream per turn wedges the device after a few minutes.
+    recorder = _MicRecorder()
 
     # Level for this session — starts from config, updated by UI 'set_level'
     # so telemetry reflects what the child is actually practising.
@@ -447,6 +509,39 @@ async def _session(
         llm.set_appearance(found.description if found else None)
 
     _apply_appearance(DEFAULT_AVATAR_KEY)
+
+    # Persistent per-child conversation history (survives relaunch). Lives in a
+    # sibling dir of profiles/, like avatars/. Display-only — never fed back
+    # into the prompt.
+    transcripts_dir = (
+        Path(config.memory.profiles_dir).expanduser().parent / "transcripts"
+    )
+    transcript_store: Optional[TranscriptStore] = None
+    conv_turn_n = 0        # id for transcript entries (child↔Nova exchanges)
+    consecutive_short = 0
+
+    async def _load_transcript(slug: str) -> None:
+        """Repoint history at ``slug``, clear the UI panel, and replay stored turns.
+
+        Sending conversation_reset first means a reconnect or a profile switch
+        rebuilds the panel from disk instead of appending on top of what's
+        already shown. conv_turn_n continues past the last stored id so a live
+        turn never collides with a replayed one.
+        """
+        nonlocal transcript_store, conv_turn_n
+        await send({"type": "conversation_reset"})
+        transcript_store = TranscriptStore(transcripts_dir, slug) if mem_mgr else None
+        if transcript_store is None:
+            conv_turn_n = 0
+            return
+        for t in transcript_store.load():
+            await send({"type": "conversation_turn", "id": t["id"],
+                        "you": t["you"], "nova": t["nova"]})
+            for c in t["corrections"]:
+                await send({"type": "conversation_correction", "id": t["id"],
+                            "kind": c["kind"], "wrong": c["wrong"],
+                            "right": c["right"]})
+        conv_turn_n = transcript_store.last_id()
 
     # ── Load / initialise memory ─────────────────────────────────────────
     memory: Optional[ChildMemory] = mem_mgr.load() if mem_mgr else None
@@ -488,13 +583,14 @@ async def _session(
     else:
         llm.set_memory(None)
 
+    # Replay this profile's saved conversation into the transcript panel.
+    if mem_mgr:
+        await _load_transcript(mem_mgr.slug)
+
     # ── Opening greeting ─────────────────────────────────────────────────
     await _send_greeting(config, memory, tts, send, send_from_thread)
 
     # ── Main loop ────────────────────────────────────────────────────────
-    consecutive_short = 0
-    conv_turn_n = 0   # id for transcript entries (child↔Nova exchanges)
-
     async def _swap_profile(new_slug: str, save_current: bool = True) -> None:
         """Hot-swap the active child profile to ``new_slug``.
 
@@ -533,6 +629,7 @@ async def _session(
             await send({"type": "memory_loaded",
                         "name": memory.profile.name,
                         "age": memory.profile.age})
+        await _load_transcript(new_slug)
         await _send_greeting(config, memory, tts, send, send_from_thread)
 
     try:
@@ -637,9 +734,17 @@ async def _session(
                     # during the swap.
                     await _drain_pending()
                     mem_mgr.delete_profile(target)
+                    # Delete via the live store instance so it's tombstoned: a
+                    # correction task that outlived the drain holds this same
+                    # object and would otherwise recreate the file.
+                    (transcript_store or
+                     TranscriptStore(transcripts_dir, target)).delete()
                     await _swap_profile(remaining[0], save_current=False)
                 else:
                     mem_mgr.delete_profile(target)
+                    # Non-active profile has no in-flight tasks (draining happens
+                    # when switching away from it), so a fresh instance is fine.
+                    TranscriptStore(transcripts_dir, target).delete()
                     await send({"type": "profiles",
                                 "list": remaining,
                                 "active": mem_mgr.slug})
@@ -650,8 +755,14 @@ async def _session(
 
             # ── LISTENING ────────────────────────────────────────────────
             await send({"type": "state", "state": "listening"})
-            stop_rec = threading.Event()
-            rec_task = loop.run_in_executor(None, _record, stop_rec)
+            try:
+                # start() opens the persistent stream on the first turn; later
+                # turns just re-arm capture. Bounded so a permission-blocked
+                # open can't hang the session.
+                await asyncio.wait_for(
+                    asyncio.to_thread(recorder.start), RECORD_GRACE_S)
+            except Exception:
+                log.error("Recording did not start — treating as no audio")
             # Read until ptt_stop; anything else that arrives mid-recording
             # (e.g. a set_level click) is stashed and replayed to the main
             # loop after this turn instead of being swallowed.
@@ -671,17 +782,10 @@ async def _session(
                 pass
             buffered_msgs.extend(stashed)
             if not got_stop:
-                stop_rec.set()
+                await asyncio.to_thread(recorder.stop)   # discard partial audio
                 await send({"type": "state", "state": "idle"})
                 continue
-            stop_rec.set()
-            try:
-                audio = await asyncio.wait_for(rec_task, RECORD_GRACE_S)
-            except Exception:
-                # Stream open can hang without mic permission; don't let the
-                # session hang with it — flow into the didn't-catch path.
-                log.error("Recording did not complete — treating as no audio")
-                audio = np.zeros(0, dtype=np.float32)
+            audio = await asyncio.to_thread(recorder.stop)
 
             # ── THINKING ─────────────────────────────────────────────────
             await send({"type": "state", "state": "thinking"})
@@ -801,18 +905,22 @@ async def _session(
             # ── Transcript entry (immediate; corrections patched in later) ──
             if spoken_sentences and transcript:
                 conv_turn_n += 1
+                nova_reply = " ".join(spoken_sentences)
                 await send({
                     "type": "conversation_turn",
                     "id": conv_turn_n,
                     "you": transcript,
-                    "nova": " ".join(spoken_sentences),
+                    "nova": nova_reply,
                 })
+                if transcript_store:
+                    transcript_store.append_turn(conv_turn_n, transcript, nova_reply)
 
             # ── POST-TURN EXTRACTION + TELEMETRY ───────────────────────────
             if mem_mgr and memory and extractor and spoken_sentences and transcript:
                 full_reply = " ".join(spoken_sentences)
                 _mem_ref = memory
                 _mgr_ref = mem_mgr
+                _store_ref = transcript_store   # bound now so a later swap can't misroute
                 _conv_id = conv_turn_n
 
                 _tel_ref = telemetry
@@ -842,6 +950,9 @@ async def _session(
                                 "wrong": wrong,
                                 "right": right,
                             })
+                            if _store_ref:
+                                _store_ref.append_correction(
+                                    _conv_id, ptype, wrong, right)
                         _mgr_ref.prune(_mem_ref)
                         _mgr_ref.save(_mem_ref)
                         loop.call_soon_threadsafe(_apply_extracted_memory, _mem_ref)
@@ -890,6 +1001,7 @@ async def _session(
         # timeout are abandoned — safe, because telemetry._write no-ops
         # once the file handle is closed.
         await _drain_pending()
+        recorder.close()
         if mem_mgr and memory:
             try:
                 mem_mgr.prune(memory)
@@ -968,10 +1080,20 @@ async def _main(profile_slug: Optional[str] = None, port: int = PORT,
             await _broadcast_setup("ollama_missing", msg)
             await asyncio.sleep(3.0)
 
-        # Phase B: model load (downloads on first run, cached afterwards).
-        await _broadcast_setup(
-            "downloading_models",
-            "Loading voice models — the first run downloads about 600 MB.")
+        # Phase B: model load. Only advertise a download when something
+        # actually needs fetching — otherwise a cached relaunch (models already
+        # on disk) shows the "downloading ~600 MB, only happens once" screen and
+        # looks like it's re-downloading every time.
+        need_download = not (
+            voice_is_cached(config.models.tts.voice)
+            and whisper_is_cached(config.models.stt.model)
+        )
+        if need_download:
+            await _broadcast_setup(
+                "downloading_models",
+                "Loading voice models — the first run downloads about 600 MB.")
+        else:
+            await _broadcast_setup("loading_models")
         pipelines["stt"] = await asyncio.to_thread(STTPipeline, config)
         pipelines["tts"] = await asyncio.to_thread(TTSPipeline, config)
         pipelines["llm"] = LLMPipeline(config)   # no local weights; cheap

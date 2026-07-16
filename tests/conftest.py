@@ -26,6 +26,25 @@ def base_config() -> Config:
     return config
 
 
+# ── Fake microphone recorder ───────────────────────────────────────────────
+
+def make_fake_recorder(audio=None):
+    """Stand-in for app.server._MicRecorder — no real mic.
+
+    `_session` builds the recorder itself, so tests patch app.server._MicRecorder
+    with `return_value=make_fake_recorder(...)`. start()/close() are no-ops and
+    stop() yields the fixed audio the test wants transcribed.
+    """
+    import numpy as np
+    from unittest.mock import MagicMock
+
+    rec = MagicMock()
+    rec.stop.return_value = (
+        np.zeros(16_000, dtype=np.float32) if audio is None else audio
+    )
+    return rec
+
+
 # ── MockWebSocket ──────────────────────────────────────────────────────────
 
 class MockWebSocket:
