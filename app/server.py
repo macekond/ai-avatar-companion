@@ -918,7 +918,6 @@ async def _session(
             # Barge-in while the reply streams: a `stop_speak` sets the shared
             # stop event (TTS aborts, loop breaks after the current sentence);
             # other messages are buffered for the main loop. See _run_speaking.
-            _turn_t0 = _time.monotonic()
             await _run_speaking(_run_pipeline)
 
             total_ms = int((_time.monotonic() - _ptt_stop_t) * 1000)

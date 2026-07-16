@@ -388,6 +388,9 @@ body.didnt_catch { background: radial-gradient(ellipse at 50% 30%, #fff4ee 0%, #
 
 /* Replay controls */
 #replay-last {
+  /* #overlay is pointer-events:none (click-through to the avatar); re-enable
+     events on the button itself or it can't be clicked. */
+  pointer-events: auto;
   margin-top: 10px;
   padding: 8px 16px;
   border: none;
