@@ -201,6 +201,12 @@ class _MicRecorder:
         with self._lock:
             chunks, self._chunks = self._chunks, []
         if not chunks:
+            # Distinguish a wedged/blank device (stream open, callback delivered
+            # nothing) from an unavailable one (open failed / never opened), so a
+            # field log tells a device wedge from a permission problem.
+            cause = ("stream_unavailable"
+                     if (self._failed or self._stream is None) else "no_frames")
+            log.warning("capture_empty cause=%s", cause)
             return np.zeros(0, dtype=np.float32)
         return np.concatenate(chunks, axis=0).squeeze()
 

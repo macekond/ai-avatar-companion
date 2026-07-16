@@ -16,6 +16,7 @@ they measure how many times the stream is actually constructed.
 from __future__ import annotations
 
 import json
+import logging
 import sys
 from unittest.mock import MagicMock, patch
 
@@ -25,7 +26,7 @@ import pytest
 from app.pipeline.llm import LLMPipeline
 from app.pipeline.stt import STTPipeline
 from app.pipeline.tts import TTSPipeline
-from app.server import _session
+from app.server import _session, _MicRecorder
 from tests.conftest import MockWebSocket
 
 
@@ -95,3 +96,32 @@ class TestInputStreamLifetime:
             f"got {len(counting_sounddevice)} opens (one per turn wedges the "
             f"CoreAudio device)"
         )
+
+
+class TestCaptureEmptyBreadcrumb:
+    """When a turn captures nothing, stop() names the cause so a field log tells
+    a wedged/blank device (no_frames) from an unavailable one (stream_unavailable)."""
+
+    async def test_no_frames_logs_no_frames(self, caplog):
+        opens: list = []
+        fake = MagicMock()
+        fake.InputStream.side_effect = lambda **kw: _FakeInputStream(opens, **kw)
+        with patch.dict(sys.modules, {"sounddevice": fake}):
+            rec = _MicRecorder()
+            rec.start()                      # opens; the fake never fires callback
+            with caplog.at_level(logging.WARNING, logger="nova.server"):
+                audio = rec.stop()
+            rec.close()
+        assert audio.size == 0
+        assert "capture_empty cause=no_frames" in caplog.text
+
+    async def test_stream_unavailable_logs_stream_unavailable(self, caplog):
+        fake = MagicMock()
+        fake.InputStream.side_effect = RuntimeError("mic permission denied")
+        with patch.dict(sys.modules, {"sounddevice": fake}):
+            rec = _MicRecorder()
+            rec.start()                      # open raises → _failed = True
+            with caplog.at_level(logging.WARNING, logger="nova.server"):
+                audio = rec.stop()
+        assert audio.size == 0
+        assert "capture_empty cause=stream_unavailable" in caplog.text
