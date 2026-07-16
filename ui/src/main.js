@@ -32,6 +32,8 @@ const canvasEl   = document.getElementById('canvas')
 const bubbleEl   = document.getElementById('sentence-bubble')
 const labelEl    = document.getElementById('state-label')
 const transcriptEl = document.getElementById('transcript')
+const replayLastEl = document.getElementById('replay-last')
+let lastReply = null       // most recent Nova reply text, for "Say it again"
 
 // ── App state ─────────────────────────────────────────────────────────────
 let renderer  = null
@@ -191,6 +193,7 @@ function resetExpressions() {
 
 function applyState(newState) {
   state = newState
+  updateReplayLast()
 
   // Background tint via body class
   document.body.className = newState === 'idle' || newState === 'speaking' ? '' : newState
@@ -393,6 +396,8 @@ function connectWS() {
         break
       case 'conversation_turn':
         addConversationTurn(msg.id, msg.you, msg.nova)
+        lastReply = msg.nova
+        updateReplayLast()
         break
       case 'conversation_correction':
         addConversationCorrection(msg.id, msg.kind, msg.wrong, msg.right)
@@ -520,9 +525,35 @@ window.addEventListener('keydown', (e) => {
 // reconnect rebuilds the list from disk instead of stacking on top of it.
 function resetConversation() {
   conversation.clear()
+  lastReply = null
+  updateReplayLast()
   transcriptListEl.innerHTML =
     '<p class="transcript-empty">Your chat with Nova will appear here.</p>'
 }
+
+// Ask the server to re-speak `text`. No-op unless idle — a replay must not
+// overlap the live pipeline or another replay.
+function requestReplay(text) {
+  if (state !== 'idle' || !text) return
+  wsSend({ type: 'replay', text })
+}
+
+// Small 🔊 button appended to a Nova line so the child can hear it again.
+function replayButton(text) {
+  const b = document.createElement('button')
+  b.className = 'replay-btn'
+  b.textContent = '🔊'
+  b.title = 'Hear it again'
+  b.setAttribute('aria-label', 'Hear it again')
+  b.addEventListener('click', () => requestReplay(text))
+  return b
+}
+
+// The "Say it again" control shows only when idle and there's a reply to repeat.
+function updateReplayLast() {
+  replayLastEl.hidden = !(state === 'idle' && lastReply)
+}
+replayLastEl.addEventListener('click', () => requestReplay(lastReply))
 
 function addConversationTurn(id, you, nova) {
   const empty = transcriptListEl.querySelector('.transcript-empty')
@@ -537,7 +568,7 @@ function addConversationTurn(id, you, nova) {
 
   const novaEl = document.createElement('div')
   novaEl.className = 'turn-nova'
-  novaEl.append(tag('Nova'), textNode(nova))
+  novaEl.append(tag('Nova'), textNode(nova), replayButton(nova))
 
   turn.append(youEl, novaEl)
   transcriptListEl.appendChild(turn)

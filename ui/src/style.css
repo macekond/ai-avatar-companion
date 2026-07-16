@@ -385,3 +385,29 @@ body.transcript-docked #transcript-list { flex: 1 1 auto; }
 body.listening  { background: radial-gradient(ellipse at 50% 30%, #eef8ff 0%, #d8eeff 60%, #b0d5f5 100%); }
 body.thinking   { background: radial-gradient(ellipse at 50% 30%, #f4eeff 0%, #e8d8ff 60%, #d0b0f5 100%); }
 body.didnt_catch { background: radial-gradient(ellipse at 50% 30%, #fff4ee 0%, #fde0d0 60%, #f5c0a0 100%); }
+
+/* Replay controls */
+#replay-last {
+  margin-top: 10px;
+  padding: 8px 16px;
+  border: none;
+  border-radius: 999px;
+  background: #ffffffcc;
+  color: #5a3a2a;
+  font: inherit;
+  font-size: 0.95rem;
+  cursor: pointer;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+}
+#replay-last:hover { background: #fff; }
+
+.replay-btn {
+  margin-left: 8px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font-size: 0.9rem;
+  opacity: 0.55;
+  vertical-align: middle;
+}
+.replay-btn:hover { opacity: 1; }
