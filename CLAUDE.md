@@ -92,6 +92,16 @@ the packaged app — `config.yaml`. Settings-panel values (voice, level) are per
 **over** `config.yaml` defaults at startup, so `config.yaml` is not the last word at runtime.
 `config.yaml`'s `child.name` is only a default profile *selector*, never a memory store.
 
+### Logging
+
+Server logs go through stdlib `logging`. `app.logging_setup.configure_logging` attaches a rotating
+plain-text `nova.log` beside the telemetry files, because the packaged app's stderr goes nowhere.
+Conventions: standard levels; machine-relevant diagnostic events use logfmt `event key=value`
+(`client_disconnect code=1001`, `capture_empty cause=no_frames`) with snake_case names matching the
+telemetry `event` vocabulary; and — non-negotiable — never log transcript text or child speech to it.
+The app promises audio never leaves the device; telemetry storing transcripts is the one deliberate,
+separate exception.
+
 ### Constraints worth knowing before you write code
 
 `window.prompt()` and `confirm()` are **no-ops in the Tauri WKWebView** — they return null without
