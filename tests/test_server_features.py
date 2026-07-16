@@ -10,6 +10,7 @@ Covers:
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import time
 from pathlib import Path
@@ -505,3 +506,33 @@ class TestAvatarAppearance:
             f"Olivia's appearance never applied — avatar_loaded was swallowed "
             f"by onboarding. set_appearance calls: {applied}"
         )
+
+
+# ── Disconnect diagnostics ───────────────────────────────────────────────────
+
+class _ClosingWebSocket(MockWebSocket):
+    """MockWebSocket that raises ConnectionClosed (not TimeoutError) when its
+    queue drains, so the main loop's disconnect branch runs with a real code."""
+
+    def __init__(self, messages, code=1001, reason="going away"):
+        super().__init__(messages)
+        self._code = code
+        self._reason = reason
+
+    async def recv(self):
+        msg = self._next_raw()
+        if msg is None:
+            from websockets.exceptions import ConnectionClosed
+            from websockets.frames import Close
+            raise ConnectionClosed(rcvd=Close(self._code, self._reason), sent=None)
+        return msg
+
+
+class TestDisconnectLog:
+    async def test_client_disconnect_logs_close_code(self, base_config, caplog):
+        ws = _ClosingWebSocket([], code=1001, reason="going away")
+        with caplog.at_level(logging.INFO, logger="nova.server"):
+            await _session(ws, base_config, _mock_stt(),
+                           _mock_llm(["hi."]), _mock_tts_with_amplitude())
+        assert "client_disconnect code=1001" in caplog.text
+        assert 'reason="going away"' in caplog.text

@@ -68,6 +68,7 @@ from app.config import Config, default_config_path
 from app.memory import ChildMemory, ChildProfile, MemoryManager, name_to_slug
 from app.settings import load_settings, save_setting
 from app.setup import check_ollama
+from app.logging_setup import configure_logging, logfmt_str
 from app.transcript import TranscriptStore
 
 # Curated voice list for the Settings panel. Deliberately limited to voices
@@ -689,10 +690,15 @@ async def _session(
         while True:
             try:
                 raw = await _next_raw()
-            except (websockets.ConnectionClosed, StopAsyncIteration,
-                    asyncio.TimeoutError):
-                # ConnectionClosed: client left. TimeoutError: test mocks
-                # signal queue exhaustion this way.
+            except websockets.ConnectionClosed as exc:
+                # Log the close code/reason: 1001 "going away" is a page
+                # reload/navigation, 1006 an abnormal drop. This one line is
+                # what a field disconnect report needs.
+                log.info("client_disconnect code=%s reason=%s",
+                         exc.code, logfmt_str(exc.reason))
+                break
+            except (StopAsyncIteration, asyncio.TimeoutError):
+                # TimeoutError: test mocks signal queue exhaustion this way.
                 break
             msg = json.loads(raw)
             mtype = msg.get("type")
@@ -1050,6 +1056,10 @@ async def _main(profile_slug: Optional[str] = None, port: int = PORT,
         config.models.tts.voice = _saved["voice"]
     if _saved.get("level"):
         config.child.level = _saved["level"]
+
+    # Persist the server's own log beside telemetry (the packaged app's stderr
+    # is otherwise lost). After config load so log_dir is known.
+    configure_logging(config.telemetry.log_dir)
 
     if profile_slug is None:
         profile_slug = name_to_slug(config.child.name)
