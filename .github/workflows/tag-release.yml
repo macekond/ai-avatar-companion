@@ -1,0 +1,64 @@
+name: Tag Release
+
+# Safety net: after a push to main, auto-create the tag `v<version>` (from
+# src-tauri/tauri.conf.json) if it doesn't already exist. So a version bump
+# that lands on main can never ship untagged — and can never accidentally
+# fall out of the "release build" path in packaging/build.sh, which only
+# emits the clean Nova_<version>_aarch64.dmg name when HEAD carries that
+# exact tag.
+#
+# If a themed tag was created manually before the merge and pushed (e.g.
+# "Nova v0.3.0 — multilingual profiles"), this run is a no-op. If it was
+# forgotten, we tag with a plain "Nova v<version>" message so the release
+# path still works; the human can amend the tag message locally if they
+# want the theme back, but the automation guarantees the tag exists.
+on:
+  push:
+    branches: [main]
+
+# One tag-creation attempt at a time. Prevents a race if two merges land
+# back-to-back (a second run would just no-op once the first pushes the tag).
+concurrency:
+  group: tag-release
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # required to push tags back to origin
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Need full tag history so `git rev-parse` sees whether v<version>
+          # was already pushed manually.
+          fetch-depth: 0
+
+      - name: Read version from tauri.conf.json
+        id: v
+        run: |
+          VERSION=$(python3 -c "import json;print(json.load(open('src-tauri/tauri.conf.json'))['version'])")
+          # Fail loudly on an obviously malformed version rather than tagging
+          # something like `vfoo`.
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::Bad version: $VERSION"; exit 1; }
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Skip if v<version> already tagged
+        id: check
+        run: |
+          if git rev-parse --verify --quiet "refs/tags/v${{ steps.v.outputs.version }}" >/dev/null; then
+            echo "Tag v${{ steps.v.outputs.version }} already exists — nothing to do."
+            echo "already-tagged=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "already-tagged=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create and push tag
+        if: steps.check.outputs.already-tagged == 'false'
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "v${VERSION}" -m "Nova v${VERSION}"
+          git push origin "v${VERSION}"

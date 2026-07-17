@@ -259,9 +259,14 @@ Notes for recipients (Apple Silicon Macs only):
 - **Default model — VIPE Hero #2707** ([Open Source Avatars](https://www.opensourceavatars.com/en/finder?avatar=vipe-hero-2707)) — **CC-BY**: free to use, modify, and redistribute *with attribution*. Attribution: *VIPE Heroes Genesis by VIPE ([vipe.io](https://vipe.io)), via opensourceavatars.com (ToxSam).*
 - **Alternative — `Olivia.vrm`** (100 Avatars #056 by Polygonal Mind, via [Open Source Avatars](https://www.opensourceavatars.com/)) — **CC0** (verified in the file's own VRM metadata): public domain, free to use, modify, and redistribute, no attribution required.
 
-**Voice (Piper):**
+**Voice — English (Piper):**
 - **Piper engine** (`piper-tts`) — **GPL-3.0-or-later**. Bundling it in the distributed app makes the app carry GPL obligations; fine for this open-source project.
 - **Shipped voices** are all permissively licensed: `kristin`, `ljspeech`, `norman` (public domain, LibriVox / LJ-Speech) and `joe` (CC0). The Blizzard-licensed `en_US-lessac` (research-use-only) is deliberately **not** offered.
+
+**Voice — Japanese (Kokoro):**
+- **Kokoro-82M** (`kokoro-onnx`) — **Apache-2.0**, free for commercial use and redistribution; runs offline on onnxruntime. Piper has no usable Japanese voice, so Japanese profiles use Kokoro. Shipped voices: `jf_alpha`, `jf_gongitsune`, `jf_nezumi`, `jm_kumo`.
+- **Japanese g2p** — `misaki[ja]` → `pyopenjtalk` / OpenJTalk / hts_engine / `unidic` — all **BSD-family** (redistribution-for-a-fee OK).
+- *Verify the pinned Kokoro model/voice revision's licence at bundle time (as done for Piper), and bundle the OpenJTalk/unidic dictionary so the packaged app needs no network for Japanese.*
 
 **Everything else** — faster-whisper, Ollama client, websockets, etc. — is MIT / Apache 2.0 / BSD.
 

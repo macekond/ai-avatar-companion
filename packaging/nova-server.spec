@@ -12,13 +12,29 @@ binaries = []
 hiddenimports = []
 
 # Packages with native libs / data files that PyInstaller's static analysis
-# misses: ctranslate2 dylibs (faster-whisper), onnxruntime (piper),
-# espeak-ng-data + espeakbridge (piper 1.4 bundles them in the package).
-for pkg in ("faster_whisper", "ctranslate2", "piper", "onnxruntime"):
-    d, b, h = collect_all(pkg)
-    datas += d
-    binaries += b
-    hiddenimports += h
+# misses: ctranslate2 dylibs (faster-whisper), onnxruntime (piper & kokoro),
+# espeak-ng-data + espeakbridge (piper 1.4 bundles them in the package),
+# and the Japanese g2p chain (misaki → pyopenjtalk + unidic dictionary).
+# The unidic dict in particular is a lot of data files that would otherwise
+# fail to resolve at runtime inside the frozen bundle.
+#
+# NOTE (verify at bundle time): the exact unidic package name may be
+# `unidic_lite` depending on what misaki[ja] pulls in — check `pip show`
+# after `pip install -r requirements.txt` and adjust if needed. Kokoro is
+# lazy-loaded (only for Japanese profiles), but its deps must still be
+# frozen in for the packaged app to reach the neural path at all.
+for pkg in ("faster_whisper", "ctranslate2", "piper", "onnxruntime",
+            "kokoro_onnx", "misaki", "pyopenjtalk", "unidic_lite"):
+    try:
+        d, b, h = collect_all(pkg)
+        datas += d
+        binaries += b
+        hiddenimports += h
+    except Exception:
+        # Missing optional package (e.g. unidic vs unidic_lite naming) — the
+        # runtime falls back to macOS 'say -v Kyoko' for Japanese, so a frozen
+        # build still works, just without the neural Kokoro voice.
+        pass
 
 hiddenimports += [
     "sounddevice",        # PyInstaller hook bundles libportaudio

@@ -87,9 +87,11 @@ into another's. `_apply_extracted_memory` gates on object identity to make late 
 
 ### State that lives outside the repo
 
-`~/.ai-avatar/` holds `profiles/<slug>.json` (one file per child), `settings.json`, `logs/`, and — in
-the packaged app — `config.yaml`. Settings-panel values (voice, level) are persisted there and applied
-**over** `config.yaml` defaults at startup, so `config.yaml` is not the last word at runtime.
+`~/.ai-avatar/` holds `profiles/<slug>.json` (one file per child), `transcripts/<slug>.jsonl`,
+`logs/`, and — in the packaged app — `config.yaml`. Each child's practice language, level, and
+chosen voice are per-profile fields on `ChildProfile`, not global state: a global voice or level
+would be wrong across languages (a CEFR level is meaningless for a Japanese profile, and voice
+catalogs are language-specific). `config.yaml` supplies the seed defaults for a first-run profile;
 `config.yaml`'s `child.name` is only a default profile *selector*, never a memory store.
 
 ### Logging
@@ -117,6 +119,20 @@ VRM's own embedded `licenseName` metadata rather than trusting a listing page. A
 
 The UI avatar layer (three.js/VRM) is intentionally not unit-tested; verify visual changes by running
 the app.
+
+## Release
+
+Feature branches target a specific release: `feat/<slug>-<version>` (e.g. `feat/manage-kids-0.2.0`,
+`feat/multilingual-profiles-0.3.0`). One PR to `main`; tag `v<version>` after merge.
+
+The app's version lives in three files that must move together — `src-tauri/Cargo.toml`,
+`src-tauri/tauri.conf.json`, `ui/package.json` — pinned by `tests/test_version_sync.py`, so a
+bump that touches only one fails `make test` before the drift ships.
+
+Tagging is a safety net: `.github/workflows/tag-release.yml` auto-creates `v<version>` on every
+push to `main` if the tag doesn't already exist (plain `Nova v<version>` message). Tag manually
+before pushing when you want a themed message (`git tag -a v0.3.0 -m "Nova v0.3.0 — <theme>"`);
+either way the tag is what `packaging/build.sh` looks for to emit a clean-named release DMG.
 
 ## Docs
 
