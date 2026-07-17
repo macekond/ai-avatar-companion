@@ -77,7 +77,7 @@ class TestOnConnect:
         ws = MockWebSocket([])
         base_config.child.level = "B"
         await _session(ws, base_config, mock_stt(), mock_llm(), mock_tts())
-        assert ws.sent[0] == {"type": "init", "level": "B"}
+        assert ws.sent[0] == {"type": "init", "level": "B", "language": "en"}
 
     async def test_greeting_contains_child_name(self, base_config):
         ws = MockWebSocket([])
@@ -372,6 +372,6 @@ class TestReEngagement:
             call_count[0] += 1
             return "yes" if call_count[0] == 1 else "I went to the park today with my family"
         stt = mock_stt()
-        stt.transcribe.side_effect = lambda _: alternate_transcript()
+        stt.transcribe.side_effect = lambda *_a, **_k: alternate_transcript()
         await _session(ws, base_config, stt, mock_llm(), mock_tts(), mem_mgr)
         # Should complete without error regardless of counter state
