@@ -1,5 +1,7 @@
 # AI Avatar Companion
 
+[![Latest release](https://img.shields.io/github/v/release/macekond/ai-avatar-companion?label=release&sort=semver)](https://github.com/macekond/ai-avatar-companion/releases/latest)
+
 A local-first language-practice companion for children (English or Japanese). A child speaks to an animated 3D avatar that listens, thinks, and replies — all running on-device. No cloud, no accounts, no ads.
 
 **Download:** [latest release](https://github.com/macekond/ai-avatar-companion/releases/latest) (macOS, Apple Silicon `.dmg`) — or [build it yourself](#building-the-macos-app-dmg).
