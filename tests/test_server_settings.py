@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 
+from app.memory import ChildMemory, ChildProfile, MemoryManager
 from app.pipeline.llm import LLMPipeline
 from app.pipeline.stt import STTPipeline
 from app.pipeline.tts import TTSPipeline
@@ -29,11 +30,15 @@ def _mock_llm() -> MagicMock:
     return llm
 
 
-def _mock_tts(reload_ok: bool = True, current: str = "en_US-kristin-medium") -> MagicMock:
+def _mock_tts(reload_ok: bool = True, current: str = "en_US-kristin-medium",
+              language: str = "en") -> MagicMock:
     tts = MagicMock(spec=TTSPipeline)
     tts.reload_voice.return_value = reload_ok
-    # spec=TTSPipeline exposes current_voice as a property; set it explicitly
+    # spec=TTSPipeline exposes current_voice/language as properties; set them so
+    # _configure_active() sees "already on this voice+language" and doesn't fire
+    # a spurious connect-time reload (which would double the reload count).
     type(tts).current_voice = property(lambda self: current)
+    type(tts).language = property(lambda self: language)
     tts.speak_streaming.side_effect = lambda t, cb=None, stop=None: cb(0.0) if cb else None
     return tts
 
@@ -53,12 +58,16 @@ class TestSettingsOnConnect:
         await _session(ws, base_config, _mock_stt(), _mock_llm(), _mock_tts())
         s = ws.sent_of_type("settings")
         assert len(s) == 1
-        assert s[0]["voices"] == AVAILABLE_VOICES
+        # Per-language now: the active language plus its levels + voices.
+        assert s[0]["language"] == "en"
+        assert s[0]["voices"] == AVAILABLE_VOICES["en"]
         assert s[0]["level"] == base_config.child.level
+        assert s[0]["levels"] == ["Pre A", "A", "B", "C1", "C2"]
+        assert "ja" in s[0]["languages"]
         assert "voice" in s[0]
 
     async def test_voice_list_only_permissive_licenses(self):
-        # Strict allowlist: every shipped voice must be public-domain / CC0.
+        # Strict allowlist: every shipped English voice must be public-domain/CC0.
         # Adding any voice here without confirming its license fails the test.
         # Verified licenses (rhasspy/piper-voices MODEL_CARD):
         #   kristin  public domain   ljspeech public domain
@@ -69,34 +78,57 @@ class TestSettingsOnConnect:
             "en_US-joe-medium",
             "en_US-norman-medium",
         }
-        ids = {v["id"] for v in AVAILABLE_VOICES}
+        ids = {v["id"] for v in AVAILABLE_VOICES["en"]}
         assert ids <= PERMISSIVE, f"unvetted voice(s): {ids - PERMISSIVE}"
         # lessac is Blizzard-licensed (research only) — must never return.
         assert "en_US-lessac-medium" not in ids
+
+    async def test_japanese_voices_are_kokoro(self):
+        # Japanese voices are Kokoro (Apache-2.0) ids, not Piper ja_JP-* ids.
+        ids = {v["id"] for v in AVAILABLE_VOICES["ja"]}
+        assert ids == {"jf_alpha", "jf_gongitsune", "jf_nezumi", "jm_kumo"}
 
 
 # ── set_voice handler ──────────────────────────────────────────────────────
 
 class TestSetVoice:
-    async def test_valid_voice_triggers_reload_and_persists(self, base_config):
+    async def test_valid_voice_triggers_reload(self, base_config):
         ws = MockWebSocket([json.dumps({"type": "set_voice",
                                         "voice": "en_US-joe-medium"})])
-        tts = _mock_tts(reload_ok=True, current="en_US-joe-medium")
-        with patch("app.server.save_setting") as save, \
-             patch("app.server.voice_is_cached", return_value=True):
+        # Mock reports it's already on the config default (kristin/en) so the
+        # connect-time _configure_active() doesn't add a reload — set_voice is
+        # then the only reload call.
+        tts = _mock_tts(reload_ok=True)
+        with patch("app.server.voice_is_cached", return_value=True):
             await _session(ws, base_config, _mock_stt(), _mock_llm(), tts)
-        tts.reload_voice.assert_called_once_with("en_US-joe-medium")
-        save.assert_any_call("voice", "en_US-joe-medium")
+        # Voice reload now carries the active language so the backend routes
+        # correctly (Piper for en, Kokoro for ja).
+        tts.reload_voice.assert_called_once_with("en_US-joe-medium", "en")
         statuses = ws.sent_of_type("voice_status")
         assert statuses[0]["state"] == "loading"
         assert statuses[-1]["state"] == "ready"
+
+    async def test_valid_voice_persists_to_profile(self, base_config, tmp_path):
+        # Voice is per-profile now (voices are language-scoped): the chosen id
+        # lands on the child's profile file, not global settings.json.
+        profiles_dir = tmp_path / "profiles"
+        profiles_dir.mkdir()
+        base_config.memory.profiles_dir = str(profiles_dir)
+        mem_mgr = MemoryManager(profiles_dir, "lily")
+        mem_mgr.save(ChildMemory(profile=ChildProfile(name="Lily", language="en")))
+
+        ws = MockWebSocket([json.dumps({"type": "set_voice",
+                                        "voice": "en_US-joe-medium"})])
+        tts = _mock_tts(reload_ok=True, current="en_US-joe-medium")
+        with patch("app.server.voice_is_cached", return_value=True):
+            await _session(ws, base_config, _mock_stt(), _mock_llm(), tts, mem_mgr)
+        assert MemoryManager(profiles_dir, "lily").load().profile.voice == "en_US-joe-medium"
 
     async def test_cached_voice_reports_loading(self, base_config):
         ws = MockWebSocket([json.dumps({"type": "set_voice",
                                         "voice": "en_US-joe-medium"})])
         tts = _mock_tts(reload_ok=True, current="en_US-joe-medium")
-        with patch("app.server.save_setting"), \
-             patch("app.server.voice_is_cached", return_value=True):
+        with patch("app.server.voice_is_cached", return_value=True):
             await _session(ws, base_config, _mock_stt(), _mock_llm(), tts)
         assert ws.sent_of_type("voice_status")[0]["state"] == "loading"
 
@@ -104,8 +136,7 @@ class TestSetVoice:
         ws = MockWebSocket([json.dumps({"type": "set_voice",
                                         "voice": "en_US-norman-medium"})])
         tts = _mock_tts(reload_ok=True, current="en_US-norman-medium")
-        with patch("app.server.save_setting"), \
-             patch("app.server.voice_is_cached", return_value=False):
+        with patch("app.server.voice_is_cached", return_value=False):
             await _session(ws, base_config, _mock_stt(), _mock_llm(), tts)
         statuses = ws.sent_of_type("voice_status")
         assert statuses[0]["state"] == "downloading"
@@ -115,29 +146,129 @@ class TestSetVoice:
         ws = MockWebSocket([json.dumps({"type": "set_voice",
                                         "voice": "../evil"})])
         tts = _mock_tts()
-        with patch("app.server.save_setting") as save:
-            await _session(ws, base_config, _mock_stt(), _mock_llm(), tts)
+        await _session(ws, base_config, _mock_stt(), _mock_llm(), tts)
         tts.reload_voice.assert_not_called()
-        save.assert_not_called()
         assert ws.sent_of_type("voice_status") == []
 
-    async def test_reload_failure_reports_error_and_no_persist(self, base_config):
+    async def test_reload_failure_reports_error(self, base_config, tmp_path):
+        # A failed reload must not persist the voice onto the profile.
+        profiles_dir, mem_mgr = _profile(tmp_path, base_config, language="en")
         ws = MockWebSocket([json.dumps({"type": "set_voice",
                                         "voice": "en_US-norman-medium"})])
         tts = _mock_tts(reload_ok=False, current="en_US-kristin-medium")
-        with patch("app.server.save_setting") as save:
-            await _session(ws, base_config, _mock_stt(), _mock_llm(), tts)
-        # Attempted, but failed → no voice persisted
-        for c in save.call_args_list:
-            assert c.args[0] != "voice"
+        await _session(ws, base_config, _mock_stt(), _mock_llm(), tts, mem_mgr)
+        assert MemoryManager(profiles_dir, "lily").load().profile.voice == ""
         assert ws.sent_of_type("voice_status")[-1]["state"] == "error"
 
 
 # ── set_level now persists ─────────────────────────────────────────────────
 
 class TestLevelPersistence:
-    async def test_set_level_persists(self, base_config):
+    async def test_set_level_persists_to_profile(self, base_config, tmp_path):
+        # Level is per-profile now: set_level writes the child's profile file.
+        profiles_dir = tmp_path / "profiles"
+        profiles_dir.mkdir()
+        base_config.memory.profiles_dir = str(profiles_dir)
+        mem_mgr = MemoryManager(profiles_dir, "lily")
+        mem_mgr.save(ChildMemory(profile=ChildProfile(name="Lily",
+                                                       language="en", level="A")))
         ws = MockWebSocket([json.dumps({"type": "set_level", "level": "C1"})])
-        with patch("app.server.save_setting") as save:
-            await _session(ws, base_config, _mock_stt(), _mock_llm(), _mock_tts())
-        save.assert_any_call("level", "C1")
+        await _session(ws, base_config, _mock_stt(), _mock_llm(), _mock_tts(), mem_mgr)
+        assert MemoryManager(profiles_dir, "lily").load().profile.level == "C1"
+
+    async def test_out_of_taxonomy_level_ignored(self, base_config, tmp_path):
+        # A JLPT level for an English profile must be rejected (would blank the
+        # level prompt), leaving the stored level unchanged.
+        profiles_dir = tmp_path / "profiles"
+        profiles_dir.mkdir()
+        base_config.memory.profiles_dir = str(profiles_dir)
+        mem_mgr = MemoryManager(profiles_dir, "lily")
+        mem_mgr.save(ChildMemory(profile=ChildProfile(name="Lily",
+                                                      language="en", level="A")))
+        ws = MockWebSocket([json.dumps({"type": "set_level", "level": "N5"})])
+        llm = _mock_llm()
+        await _session(ws, base_config, _mock_stt(), llm, _mock_tts(), mem_mgr)
+        assert MemoryManager(profiles_dir, "lily").load().profile.level == "A"
+        llm.set_level.assert_not_called()
+
+
+# ── set_language handler ────────────────────────────────────────────────────
+
+def _profile(tmp_path, base_config, slug="lily", **kw):
+    profiles_dir = tmp_path / "profiles"
+    profiles_dir.mkdir(exist_ok=True)
+    base_config.memory.profiles_dir = str(profiles_dir)
+    mgr = MemoryManager(profiles_dir, slug)
+    mgr.save(ChildMemory(profile=ChildProfile(name=slug.title(), **kw)))
+    return profiles_dir, mgr
+
+
+class TestSetLanguage:
+    async def test_switch_to_japanese_resets_level_and_reconfigures(
+            self, base_config, tmp_path):
+        profiles_dir, mem_mgr = _profile(tmp_path, base_config,
+                                         language="en", level="B")
+        ws = MockWebSocket([json.dumps({"type": "set_language", "language": "ja"})])
+        llm = _mock_llm()
+        tts = _mock_tts()
+        await _session(ws, base_config, _mock_stt(), llm, tts, mem_mgr)
+
+        prof = MemoryManager(profiles_dir, "lily").load().profile
+        assert prof.language == "ja"
+        assert prof.level == "N5"          # reset to the JLPT default
+        assert prof.voice == ""            # reset to language default
+        llm.set_language_level.assert_any_call("ja", "N5")
+        assert any(c.args[1] == "ja" for c in tts.reload_voice.call_args_list)
+        s = ws.sent_of_type("settings")[-1]
+        assert s["language"] == "ja"
+        assert s["levels"] == ["N5", "N4", "N3", "N2", "N1"]
+
+    async def test_unknown_language_ignored(self, base_config, tmp_path):
+        profiles_dir, mem_mgr = _profile(tmp_path, base_config, language="en")
+        ws = MockWebSocket([json.dumps({"type": "set_language", "language": "zz"})])
+        await _session(ws, base_config, _mock_stt(), _mock_llm(), _mock_tts(), mem_mgr)
+        assert MemoryManager(profiles_dir, "lily").load().profile.language == "en"
+
+
+class TestJapaneseProfile:
+    async def test_connect_configures_pipeline_for_japanese(
+            self, base_config, tmp_path):
+        _, mem_mgr = _profile(tmp_path, base_config, slug="yuki",
+                              language="ja", level="N4")
+        ws = MockWebSocket([])
+        llm = _mock_llm()
+        tts = _mock_tts()
+        await _session(ws, base_config, _mock_stt(), llm, tts, mem_mgr)
+        # LLM + TTS both configured for Japanese on connect.
+        llm.set_language_level.assert_any_call("ja", "N4")
+        assert any(c.args[1] == "ja" for c in tts.reload_voice.call_args_list)
+        s = ws.sent_of_type("settings")[-1]
+        assert s["language"] == "ja"
+        assert s["voice"] in {"jf_alpha", "jf_gongitsune", "jf_nezumi", "jm_kumo"}
+
+
+class TestModalProfileCreation:
+    async def test_switch_with_language_creates_and_skips_onboarding(
+            self, base_config, tmp_path):
+        profiles_dir, mem_mgr = _profile(tmp_path, base_config, slug="lily")
+        ws = MockWebSocket([json.dumps({
+            "type": "switch_profile", "slug": "yuki",
+            "language": "ja", "level": "N4",
+        })])
+        await _session(ws, base_config, _mock_stt(), _mock_llm(), _mock_tts(), mem_mgr)
+        created = MemoryManager(profiles_dir, "yuki").load()
+        assert created is not None
+        assert created.profile.language == "ja"
+        assert created.profile.level == "N4"
+        assert created.profile.name == "yuki"
+        # Parent typed the name + picked language/level → no spoken onboarding.
+        assert ws.sent_of_type("onboarding_start") == []
+
+    async def test_switch_without_language_still_onboards(
+            self, base_config, tmp_path):
+        profiles_dir, mem_mgr = _profile(tmp_path, base_config, slug="lily")
+        ws = MockWebSocket([json.dumps({"type": "switch_profile", "slug": "newkid"})])
+        # No mic input queued after → onboarding's first _await_ptt drains and
+        # the session ends; we only assert onboarding was entered.
+        await _session(ws, base_config, _mock_stt(), _mock_llm(), _mock_tts(), mem_mgr)
+        assert ws.sent_of_type("onboarding_start") != []

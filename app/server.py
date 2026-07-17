@@ -17,18 +17,27 @@ Browser → server:
   {"type": "ptt_stop"}
   {"type": "stop_speak"}                     # barge-in while speaking/thinking
   {"type": "replay",         "text": "…"}    # re-speak a stored line
-  {"type": "set_level",      "level": "B"}
+  {"type": "set_level",      "level": "B"}    # valid for the active language only
+  {"type": "set_language",   "language": "ja"}  # resets level+voice to lang defaults
   {"type": "set_voice",      "voice": "en_US-kristin-medium"}
-  {"type": "switch_profile", "slug": "mia"}
+  {"type": "switch_profile", "slug": "mia"}   # + optional "language"/"level" to CREATE
   {"type": "delete_profile", "slug": "mia"}
   {"type": "avatar_loaded", "key": "VIPEHero_2707"}   # avatar changed → refresh appearance
 
+Language + level are per-profile (stored on ChildProfile): "en" uses CEFR levels
+(Pre A/A/B/C1/C2) with Piper voices; "ja" uses JLPT (N5..N1) with Kokoro voices.
+switch_profile to a NEW slug carrying "language"+"level" creates that profile from
+the modal and skips spoken onboarding; without them the spoken onboarding runs.
+
 Server → browser:
-  {"type": "init",          "level": "A"}
+  {"type": "init",          "level": "A", "language": "en"}
+  {"type": "settings", "language": "en", "languages": ["en","ja"],
+                       "levels": ["Pre A","A","B","C1","C2"], "level": "A",
+                       "voices": [{"id","label"}, …], "voice": "en_US-kristin-medium"}
   {"type": "profiles",      "list": ["lily","mia"], "active": "lily"}
   {"type": "profile_error", "message": "Can't remove the only child."}
   {"type": "onboarding_start"}
-  {"type": "memory_loaded",  "name": "Lily", "age": 8}
+  {"type": "memory_loaded",  "name": "Lily", "age": 8, "language": "en", "level": "A"}
   {"type": "state",         "state": "idle|listening|thinking|speaking|didnt_catch"}
   {"type": "transcript",    "text": "…"}
   {"type": "sentence",      "text": "…"}
@@ -66,25 +75,60 @@ load_dotenv()
 from app.appearance import AppearanceStore, DEFAULT_AVATAR_KEY
 from app.config import Config, default_config_path
 from app.memory import ChildMemory, ChildProfile, MemoryManager, name_to_slug
-from app.settings import load_settings, save_setting
 from app.setup import check_ollama
 from app.logging_setup import configure_logging, logfmt_str
 from app.transcript import TranscriptStore
 
-# Curated voice list for the Settings panel. Deliberately limited to voices
-# with permissive licenses (public domain / CC0) — the previous default
-# en_US-lessac was Blizzard-licensed (research only) and is excluded.
-AVAILABLE_VOICES = [
-    {"id": "en_US-kristin-medium", "label": "Kristin — bright, younger (US)"},
-    {"id": "en_US-ljspeech-medium", "label": "LJ — calm, clear (US)"},
-    {"id": "en_US-joe-medium",      "label": "Joe — friendly male (US)"},
-    {"id": "en_US-norman-medium",   "label": "Norman — deeper male (US)"},
-]
-_VOICE_IDS = {v["id"] for v in AVAILABLE_VOICES}
+# Curated voice list for the Settings panel, keyed by practice language.
+# English voices are Piper (permissive licenses only — the previous default
+# en_US-lessac was Blizzard-licensed/research-only and is excluded). Japanese
+# voices are Kokoro (Apache-2.0). Voices are language-specific, so the picker
+# and set_voice validation are both scoped to the active profile's language.
+AVAILABLE_VOICES = {
+    "en": [
+        {"id": "en_US-kristin-medium", "label": "Kristin — bright, younger (US)"},
+        {"id": "en_US-ljspeech-medium", "label": "LJ — calm, clear (US)"},
+        {"id": "en_US-joe-medium",      "label": "Joe — friendly male (US)"},
+        {"id": "en_US-norman-medium",   "label": "Norman — deeper male (US)"},
+    ],
+    "ja": [
+        {"id": "jf_alpha",      "label": "Alpha — warm female (JP)"},
+        {"id": "jf_gongitsune", "label": "Gongitsune — gentle female (JP)"},
+        {"id": "jf_nezumi",     "label": "Nezumi — bright female (JP)"},
+        {"id": "jm_kumo",       "label": "Kumo — friendly male (JP)"},
+    ],
+}
+_VOICE_IDS = {lang: {v["id"] for v in vs} for lang, vs in AVAILABLE_VOICES.items()}
+
+
+def _voices_for(language: str) -> list[dict]:
+    """Voice catalog for *language* (English list if language is unknown)."""
+    return AVAILABLE_VOICES.get(language, AVAILABLE_VOICES["en"])
+
+
+def _is_valid_voice(language: str, voice_id: str) -> bool:
+    return voice_id in _VOICE_IDS.get(language, set())
+
+
+def _default_voice_for(language: str, config: "Config") -> str:
+    """Default voice id for *language*: config's voice for English, else the
+    first catalog entry (Kokoro default for Japanese)."""
+    if language == "en":
+        return config.models.tts.voice
+    vs = AVAILABLE_VOICES.get(language, [])
+    return vs[0]["id"] if vs else ""
+
+
+def _voice_download_pending(language: str, voice_id: str) -> bool:
+    """True if selecting this voice will trigger a first-use model download."""
+    if language == "ja":
+        return not kokoro_is_cached()
+    return not voice_is_cached(voice_id)
 from app.memory_extractor import MemoryExtractor
 from app.pipeline.llm import LLMPipeline
 from app.pipeline.stt import STTPipeline, SAMPLE_RATE, whisper_is_cached
-from app.pipeline.tts import TTSPipeline, voice_is_cached
+from app.pipeline.tts import TTSPipeline, voice_is_cached, kokoro_is_cached
+from app.levels import LANGUAGES, levels_for, default_level_for
 from app.telemetry import TelemetrySession
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -496,9 +540,43 @@ async def _session(
     # fresh CoreAudio stream per turn wedges the device after a few minutes.
     recorder = _MicRecorder()
 
-    # Level for this session — starts from config, updated by UI 'set_level'
-    # so telemetry reflects what the child is actually practising.
+    # Active practice language / level / voice for THIS session. Seeded from
+    # config, then set from the loaded profile (or a profile swap). STT reads
+    # active_language per turn; the LLM prompt and TTS backend are rebuilt via
+    # _configure_active(). Telemetry and the Settings panel reflect what the
+    # child is actually practising.
+    active_language = getattr(config.child, "language", "en")
     active_level = config.child.level
+    active_voice = config.models.tts.voice
+
+    async def _configure_active(mem: Optional[ChildMemory]) -> None:
+        """Point LLM + TTS at *mem*'s profile language/level/voice.
+
+        A level is only valid inside its language's taxonomy, so both move
+        together. TTS reload can load or download a model, so it runs off the
+        event loop and only when the voice/language actually changed.
+        """
+        nonlocal active_language, active_level, active_voice
+        prof = mem.profile if mem is not None else None
+        if prof is not None:
+            active_language = getattr(prof, "language", "") or config.child.language
+            active_level = getattr(prof, "level", "") or default_level_for(active_language)
+            active_voice = getattr(prof, "voice", "") or _default_voice_for(active_language, config)
+        llm.set_language_level(active_language, active_level)
+        if (active_voice, active_language) != (tts.current_voice, tts.language):
+            await asyncio.to_thread(tts.reload_voice, active_voice, active_language)
+
+    async def _send_settings() -> None:
+        """Send the Settings-panel state for the ACTIVE profile's language."""
+        await send({
+            "type": "settings",
+            "language": active_language,
+            "languages": LANGUAGES,
+            "levels": levels_for(active_language),
+            "level": active_level,
+            "voices": _voices_for(active_language),
+            "voice": active_voice,
+        })
 
     # The LLM pipeline is shared across WebSocket connections, so start each
     # session with a clean history — otherwise a fresh tab (or a second child
@@ -554,17 +632,17 @@ async def _session(
     # ── Load / initialise memory ─────────────────────────────────────────
     memory: Optional[ChildMemory] = mem_mgr.load() if mem_mgr else None
 
+    # Point the pipeline at the loaded profile's language/level/voice before
+    # announcing state, so init/settings/telemetry reflect the real profile.
+    await _configure_active(memory)
+
     # ── On-connect messages ──────────────────────────────────────────────
     log.info("Client connected")
-    await send({"type": "init", "level": active_level})
+    await send({"type": "init", "level": active_level, "language": active_language})
 
-    # Settings panel state: available voices + current selection + level.
-    await send({
-        "type": "settings",
-        "voices": AVAILABLE_VOICES,
-        "voice": config.models.tts.voice,
-        "level": active_level,
-    })
+    # Settings panel state: language, levels + voices for that language, current
+    # selections.
+    await _send_settings()
 
     if mem_mgr:
         await send({
@@ -582,12 +660,16 @@ async def _session(
     if mem_mgr and memory is None:
         await send({"type": "onboarding_start"})
         memory = await _onboard(mem_mgr)
+        await _configure_active(memory)
+        await _send_settings()
         llm.set_memory(memory)
     elif memory is not None:
         llm.set_memory(memory)
         await send({"type": "memory_loaded",
                     "name": memory.profile.name,
-                    "age": memory.profile.age})
+                    "age": memory.profile.age,
+                    "language": memory.profile.language,
+                    "level": memory.profile.level})
     else:
         llm.set_memory(None)
 
@@ -599,13 +681,26 @@ async def _session(
     await _send_greeting(config, memory, tts, send, send_from_thread)
 
     # ── Main loop ────────────────────────────────────────────────────────
-    async def _swap_profile(new_slug: str, save_current: bool = True) -> None:
+    async def _swap_profile(
+        new_slug: str,
+        save_current: bool = True,
+        create_language: Optional[str] = None,
+        create_level: Optional[str] = None,
+        create_name: Optional[str] = None,
+    ) -> None:
         """Hot-swap the active child profile to ``new_slug``.
 
         Drains in-flight extraction tasks first (a slow task from the previous
         child would otherwise call llm.set_memory with the old memory *after*
-        the swap, leaking one child's context into another's). When the target
-        profile has no file yet, runs onboarding; otherwise greets normally.
+        the swap, leaking one child's context into another's). Then rebuilds the
+        pipeline (LLM prompt language/level, STT language, TTS voice) for the new
+        profile via _configure_active().
+
+        When the target profile has no file yet:
+          - if *create_language* is given (parent chose name+language+level in
+            the Settings modal), the profile is created directly from those and
+            the spoken name/age onboarding is skipped;
+          - otherwise the spoken onboarding runs (first-run / legacy path).
 
         ``save_current=False`` skips persisting the outgoing memory — used when
         the outgoing profile was just deleted and must not be resurrected.
@@ -623,20 +718,44 @@ async def _session(
             problem_ttl_days=config.memory.problem_ttl_days,
         )
         memory = mem_mgr.load()
-        llm.set_memory(memory)
+        llm.set_memory(memory)      # may be None; clears the previous child
         llm.clear_history()
         consecutive_short = 0
         await send({"type": "profiles",
                     "list": mem_mgr.list_profiles(),
                     "active": new_slug})
-        if memory is None:
+        if memory is None and create_language:
+            # Parent-created via the modal: build the profile from the chosen
+            # name/language/level and skip spoken onboarding.
+            lang = create_language if create_language in LANGUAGES else config.child.language
+            lvl = create_level if create_level in levels_for(lang) else default_level_for(lang)
+            memory = ChildMemory(profile=ChildProfile(
+                name=(create_name or new_slug).strip() or new_slug,
+                language=lang, level=lvl,
+            ))
+            mem_mgr.save(memory)
+            llm.set_memory(memory)
+            await _configure_active(memory)
+            await _send_settings()
+            await send({"type": "memory_loaded",
+                        "name": memory.profile.name, "age": memory.profile.age,
+                        "language": memory.profile.language,
+                        "level": memory.profile.level})
+        elif memory is None:
+            # First-run / legacy spoken onboarding.
+            await _configure_active(None)
             await send({"type": "onboarding_start"})
             memory = await _onboard(mem_mgr)
             llm.set_memory(memory)
+            await _configure_active(memory)
+            await _send_settings()
         else:
+            await _configure_active(memory)
+            await _send_settings()
             await send({"type": "memory_loaded",
-                        "name": memory.profile.name,
-                        "age": memory.profile.age})
+                        "name": memory.profile.name, "age": memory.profile.age,
+                        "language": memory.profile.language,
+                        "level": memory.profile.level})
         await _load_transcript(new_slug)
         await _send_greeting(config, memory, tts, send, send_from_thread)
 
@@ -711,11 +830,50 @@ async def _session(
 
             # ── Level change ─────────────────────────────────────────────
             if mtype == "set_level":
-                new_level = msg.get("level", "A")
+                new_level = msg.get("level", "")
+                # Reject a level outside the active language's taxonomy (e.g. a
+                # CEFR level for a Japanese profile) — it would blank the prompt.
+                if new_level not in levels_for(active_language):
+                    continue
                 llm.set_level(new_level)
                 active_level = new_level
-                save_setting("level", new_level)
+                # Level lives on the profile now, not global settings.
+                if memory is not None:
+                    memory.profile.level = new_level
+                    mem_mgr.save(memory)
                 log.info("Level changed to: %s", new_level)
+                continue
+
+            # ── Language change ──────────────────────────────────────────
+            if mtype == "set_language":
+                new_lang = msg.get("language", "")
+                if new_lang not in LANGUAGES:
+                    continue
+                # A level is only valid within its language, so switching
+                # language resets level + voice to that language's defaults.
+                active_language = new_lang
+                active_level = default_level_for(new_lang)
+                active_voice = _default_voice_for(new_lang, config)
+                llm.set_language_level(active_language, active_level)
+                if memory is not None:
+                    memory.profile.language = active_language
+                    memory.profile.level = active_level
+                    memory.profile.voice = ""   # fall back to language default
+                    mem_mgr.save(memory)
+                # Switching backends (Piper↔Kokoro) may download a model.
+                await send({
+                    "type": "voice_status",
+                    "state": ("downloading"
+                              if _voice_download_pending(active_language, active_voice)
+                              else "loading"),
+                    "voice": active_voice,
+                })
+                ok = await asyncio.to_thread(tts.reload_voice, active_voice, active_language)
+                await send({"type": "voice_status",
+                            "state": "ready" if ok else "error",
+                            "voice": tts.current_voice or active_voice})
+                await _send_settings()
+                log.info("Language changed to: %s (level %s)", active_language, active_level)
                 continue
 
             # ── Avatar changed: refresh appearance description ───────────
@@ -733,22 +891,27 @@ async def _session(
             # ── Voice change ─────────────────────────────────────────────
             if mtype == "set_voice":
                 new_voice = msg.get("voice", "")
-                if new_voice not in _VOICE_IDS:
+                # Validate against the ACTIVE language's catalog only.
+                if not _is_valid_voice(active_language, new_voice):
                     continue
-                # First use of a voice pulls ~60 MB from HuggingFace — tell
-                # the UI it's downloading (not just loading) so it can show a
-                # clear one-time indicator.
-                downloading = not voice_is_cached(new_voice)
+                # First use pulls the model (Piper voice ~60 MB, or the Kokoro
+                # model) — tell the UI it's downloading, not just loading.
+                downloading = _voice_download_pending(active_language, new_voice)
                 await send({
                     "type": "voice_status",
                     "state": "downloading" if downloading else "loading",
                     "voice": new_voice,
                 })
                 # Reloading loads (and may download) the model — off the loop.
-                ok = await asyncio.to_thread(tts.reload_voice, new_voice)
+                ok = await asyncio.to_thread(tts.reload_voice, new_voice, active_language)
                 if ok:
-                    config.models.tts.voice = new_voice
-                    save_setting("voice", new_voice)
+                    active_voice = new_voice
+                    if active_language == "en":
+                        config.models.tts.voice = new_voice
+                    # Voice lives on the profile now (voices are language-scoped).
+                    if memory is not None:
+                        memory.profile.voice = new_voice
+                        mem_mgr.save(memory)
                     log.info("Voice changed to: %s", new_voice)
                 await send({"type": "voice_status",
                             "state": "ready" if ok else "error",
@@ -774,7 +937,18 @@ async def _session(
                         "message": "Please use letters or numbers in the name.",
                     })
                     continue
-                await _swap_profile(new_slug)
+                # When the modal is *creating* a child it also sends the chosen
+                # language + level; validated and used only if the slug is new
+                # (an existing profile keeps its own stored language/level).
+                raw_lang = msg.get("language")
+                create_language = raw_lang if raw_lang in LANGUAGES else None
+                create_level = msg.get("level") if isinstance(msg.get("level"), str) else None
+                await _swap_profile(
+                    new_slug,
+                    create_language=create_language,
+                    create_level=create_level,
+                    create_name=raw_slug.strip() or None,
+                )
                 continue
 
             # ── Profile delete ───────────────────────────────────────────
@@ -862,7 +1036,7 @@ async def _session(
             # ── THINKING ─────────────────────────────────────────────────
             await send({"type": "state", "state": "thinking"})
             _stt_t0 = _time.monotonic()
-            transcript = await asyncio.to_thread(stt.transcribe, audio)
+            transcript = await asyncio.to_thread(stt.transcribe, audio, active_language)
             stt_ms = int((_time.monotonic() - _stt_t0) * 1000)
             _ptt_stop_t = _stt_t0   # approximate ptt_stop time as stt start
 
@@ -1056,12 +1230,10 @@ async def _main(profile_slug: Optional[str] = None, port: int = PORT,
                 managed: bool = False) -> None:
     config = Config.load(str(default_config_path()))
 
-    # Apply persisted user settings (Settings panel) over config defaults.
-    _saved = load_settings()
-    if _saved.get("voice") in _VOICE_IDS:
-        config.models.tts.voice = _saved["voice"]
-    if _saved.get("level"):
-        config.child.level = _saved["level"]
+    # Language, level, and voice are now stored per-profile (on ChildProfile),
+    # not in global settings.json — a global voice/level would be wrong across
+    # children and languages. config.yaml still supplies the seed defaults for
+    # the first-run profile.
 
     # Persist the server's own log beside telemetry (the packaged app's stderr
     # is otherwise lost). After config load so log_dir is known.
