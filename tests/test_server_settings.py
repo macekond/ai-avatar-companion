@@ -264,6 +264,26 @@ class TestModalProfileCreation:
         # Parent typed the name + picked language/level → no spoken onboarding.
         assert ws.sent_of_type("onboarding_start") == []
 
+    async def test_new_kid_appears_in_final_profiles_message(
+            self, base_config, tmp_path):
+        # Regression pin (reported bug: "created a new kid, but it is not
+        # visible"): every 'profiles' broadcast sent DURING or AFTER the create
+        # flow must list the new slug — a stale list means the chip can't
+        # render and the child disappears from the picker.
+        _, mem_mgr = _profile(tmp_path, base_config, slug="lily")
+        ws = MockWebSocket([json.dumps({
+            "type": "switch_profile", "slug": "yuki",
+            "language": "ja", "level": "N5",
+        })])
+        await _session(ws, base_config, _mock_stt(), _mock_llm(), _mock_tts(), mem_mgr)
+
+        profiles_msgs = ws.sent_of_type("profiles")
+        assert profiles_msgs, "no profiles message sent"
+        # The last profiles message must include the newly-created child,
+        # otherwise the UI never renders their chip.
+        assert "yuki" in profiles_msgs[-1]["list"]
+        assert profiles_msgs[-1]["active"] == "yuki"
+
     async def test_switch_without_language_still_onboards(
             self, base_config, tmp_path):
         profiles_dir, mem_mgr = _profile(tmp_path, base_config, slug="lily")

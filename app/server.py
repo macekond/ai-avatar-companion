@@ -721,9 +721,6 @@ async def _session(
         llm.set_memory(memory)      # may be None; clears the previous child
         llm.clear_history()
         consecutive_short = 0
-        await send({"type": "profiles",
-                    "list": mem_mgr.list_profiles(),
-                    "active": new_slug})
         if memory is None and create_language:
             # Parent-created via the modal: build the profile from the chosen
             # name/language/level and skip spoken onboarding.
@@ -756,6 +753,13 @@ async def _session(
                         "name": memory.profile.name, "age": memory.profile.age,
                         "language": memory.profile.language,
                         "level": memory.profile.level})
+        # Send the profiles list AFTER any save/onboarding: on the create/onboard
+        # paths the new file didn't exist yet at the top of the function, so a
+        # profiles broadcast up there would ship a stale list and the UI would
+        # never render the new kid's chip (regression pin in test_server_settings).
+        await send({"type": "profiles",
+                    "list": mem_mgr.list_profiles(),
+                    "active": new_slug})
         await _load_transcript(new_slug)
         await _send_greeting(config, memory, tts, send, send_from_thread)
 
