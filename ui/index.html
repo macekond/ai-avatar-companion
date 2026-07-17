@@ -24,58 +24,74 @@
     </div>
   </div>
 
-  <!-- Settings panel (hidden until the gear is tapped) -->
+  <!-- Settings panel (hidden until the gear is tapped). Two views inside:
+       #kids-view — the default: kid picker + add + credits.
+       #kid-detail-view — opens when a kid chip is tapped: their name,
+                          language, voice, level, and delete. Back to kids. -->
   <div id="settings-panel" hidden role="dialog" aria-label="Settings">
     <div class="settings-header">
-      <span>Settings</span>
+      <span id="settings-title">Settings</span>
       <button id="settings-close" aria-label="Close settings">✕</button>
     </div>
 
-    <section class="settings-section">
-      <h3>Kid</h3>
-      <div id="profile-selector" role="group" aria-label="Child profile"></div>
-    </section>
+    <!-- Kids picker view -->
+    <div id="kids-view">
+      <section class="settings-section">
+        <h3>Kids</h3>
+        <div id="profile-selector" role="group" aria-label="Child profiles"></div>
+      </section>
 
-    <section class="settings-section">
-      <h3>Language</h3>
-      <div id="language-selector" role="group" aria-label="Language">
-        <button class="chip" data-language="en">English</button>
-        <button class="chip" data-language="ja" lang="ja">日本語</button>
-      </div>
-    </section>
+      <!-- Credits — CC-BY 4.0 §3(a) requires attribution to travel with the
+           distributed work. Shown in the default (kids) view of the settings
+           panel, so it's always one tap from the app's chrome. -->
+      <section class="settings-section credits-section">
+        <h3>Credits</h3>
+        <p class="credits">
+          Default avatar: <em>VIPE Hero #2707</em> from
+          <a href="https://vipe.io" target="_blank" rel="noopener">VIPE Heroes Genesis</a>,
+          via
+          <a href="https://www.opensourceavatars.com/en/finder?avatar=vipe-hero-2707"
+             target="_blank" rel="noopener">opensourceavatars.com</a>
+          (ToxSam) — licensed
+          <a href="https://creativecommons.org/licenses/by/4.0/"
+             target="_blank" rel="noopener">CC BY 4.0</a>.
+        </p>
+        <p class="credits">
+          Alternative avatar: <em>Olivia</em> (100 Avatars #056 by Polygonal Mind), CC0.
+        </p>
+      </section>
+    </div>
 
-    <section class="settings-section">
-      <h3>Voice</h3>
-      <div id="voice-selector" role="group" aria-label="Voice"></div>
-    </section>
+    <!-- Kid detail view -->
+    <div id="kid-detail-view" hidden>
+      <button id="kid-detail-back" class="chip" aria-label="Back to kids">← Back</button>
 
-    <section class="settings-section">
-      <!-- Heading + chips are filled in per the active profile's language
-           (CEFR for English, JLPT for Japanese) from the server's settings. -->
-      <h3 id="level-heading">Level</h3>
-      <div id="level-selector" role="group" aria-label="Level"></div>
-    </section>
+      <section class="settings-section">
+        <h3>Language</h3>
+        <div id="language-selector" role="group" aria-label="Language">
+          <button class="chip" data-language="en">English</button>
+          <button class="chip" data-language="ja" lang="ja">日本語</button>
+        </div>
+      </section>
 
-    <!-- Credits — satisfies CC-BY attribution for the default avatar in the
-         distributed app (the source README alone isn't enough; CC-BY 4.0 §3(a)
-         requires the credit to travel with the redistributed work). Kept as
-         the last section so it doesn't compete with the actionable controls. -->
-    <section class="settings-section credits-section">
-      <h3>Credits</h3>
-      <p class="credits">
-        Default avatar: <em>VIPE Hero #2707</em> from
-        <a href="https://vipe.io" target="_blank" rel="noopener">VIPE Heroes Genesis</a>,
-        via
-        <a href="https://www.opensourceavatars.com/en/finder?avatar=vipe-hero-2707"
-           target="_blank" rel="noopener">opensourceavatars.com</a>
-        (ToxSam) — licensed
-        <a href="https://creativecommons.org/licenses/by/4.0/"
-           target="_blank" rel="noopener">CC BY 4.0</a>.
-      </p>
-      <p class="credits">
-        Alternative avatar: <em>Olivia</em> (100 Avatars #056 by Polygonal Mind), CC0.
-      </p>
-    </section>
+      <section class="settings-section">
+        <h3>Voice</h3>
+        <div id="voice-selector" role="group" aria-label="Voice"></div>
+      </section>
+
+      <section class="settings-section">
+        <!-- Heading + chips are filled in per the active profile's language
+             (CEFR for English, JLPT for Japanese) from the server's settings. -->
+        <h3 id="level-heading">Level</h3>
+        <div id="level-selector" role="group" aria-label="Level"></div>
+      </section>
+
+      <section class="settings-section detail-danger">
+        <button id="kid-detail-remove" class="chip danger" type="button">
+          Remove this kid
+        </button>
+      </section>
+    </div>
   </div>
 
   <!-- Text overlay: sentence bubble + state label -->

@@ -189,6 +189,11 @@ body.transcript-docked #transcript-list { flex: 1 1 auto; }
   z-index: 39;
   width: 260px;
   max-width: calc(100vw - 32px);
+  /* Kid detail view can push total height past a short viewport (5 chips per
+     voice/level + language + delete). Cap + scroll internally so nothing gets
+     clipped off-screen on small windows. */
+  max-height: calc(100vh - 80px);
+  overflow-y: auto;
   padding: 16px;
   border-radius: 16px;
   background: rgba(255, 252, 248, 0.94);
@@ -291,29 +296,43 @@ body.transcript-docked #transcript-list { flex: 1 1 auto; }
 }
 .chip.danger:hover { background: rgba(180, 55, 42, 0.95); color: #fff; }
 
-/* ── Profile item (name chip + inline remove) ─────────────── */
-.profile-item {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
+/* Disabled chip (e.g. Remove-kid when this is the only kid). */
+.chip:disabled,
+.chip[disabled] {
+  opacity: 0.4;
+  cursor: not-allowed;
+  filter: grayscale(0.4);
 }
-.profile-remove {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 18px;
-  height: 18px;
-  padding: 0;
-  border: none;
-  border-radius: 50%;
+.chip:disabled:hover { background: inherit; color: inherit; }
+
+/* ── Kid detail view — back nav + danger zone ─────────────── */
+/* Back button: styled as a subtle-chip variant so it doesn't compete with
+   the actual settings controls. Aligned left in the panel. */
+#kid-detail-back {
+  align-self: flex-start;
+  margin-bottom: 8px;
   background: transparent;
-  color: #b09a86;
-  font-size: 0.66rem;
-  line-height: 1;
-  cursor: pointer;
-  transition: background 0.15s, color 0.15s;
+  border-color: transparent;
+  padding: 4px 8px;
+  font-weight: 500;
+  color: #8a7460;
 }
-.profile-remove:hover { background: rgba(200, 70, 55, 0.15); color: #c8463a; }
+#kid-detail-back:hover {
+  background: rgba(0, 0, 0, 0.04);
+  color: #4a3a2a;
+}
+/* Danger zone: separated from the other settings by a top border, so
+   "Remove this kid" feels like a distinct destructive action. */
+.detail-danger {
+  padding-top: 12px;
+  border-top: 1px solid rgba(160, 138, 118, 0.25);
+}
+.detail-danger .chip.danger { width: 100%; text-align: center; }
+/* :not([hidden]) so the flex rule doesn't beat the [hidden] attribute — an
+   ID selector has higher specificity than the UA's `[hidden] { display:none }`,
+   so `#kid-detail-view { display:flex }` would otherwise leak the detail view
+   below the kids view even when hidden. */
+#kid-detail-view:not([hidden]) { display: flex; flex-direction: column; }
 .chip.loading {
   opacity: 0.6;
   cursor: wait;

@@ -356,9 +356,19 @@ function connectWS() {
         break
       case 'profiles':
         renderProfileSelector(msg.list, msg.active)
+        // After '+' added a kid, open their detail once the server confirms
+        // the profile file exists (i.e. the slug is now in the list).
+        if (pendingOpenDetailForNewSlug && msg.list.includes(msg.active)) {
+          pendingOpenDetailForNewSlug = false
+          openKidDetail(msg.active)
+        }
         break
       case 'profile_error':
         showToast(msg.message)
+        // A refused delete lands us back on the still-existing kid — reopen
+        // their detail so the user isn't left staring at the kids picker
+        // thinking "did that work?".
+        if (currentDetailSlug === null && knownActive) openKidDetail(knownActive)
         break
       case 'memory_loaded':
         // Profile loaded — update active highlight (slug not sent, use active from profiles)
@@ -882,49 +892,37 @@ function displayName(slug) {
   return slug.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
 }
 
+// Latest server-known profile list + active slug — the detail view uses this
+// (a) to size the "Remove this kid" button (hidden when only one kid remains,
+// since the app always needs an active profile to fall back to) and (b) to
+// title the panel with the active kid's name.
+let knownProfiles = []
+let knownActive = null
+
 function renderProfileSelector(profiles, activeSlug) {
+  knownProfiles = profiles.slice()
+  knownActive = activeSlug
   profileSelectorEl.innerHTML = ''
-  // Only offer removal when more than one child exists — the app always needs
-  // an active profile to fall back to.
-  const canRemove = profiles.length > 1
 
   profiles.forEach(slug => {
-    const item = document.createElement('span')
-    item.className = 'profile-item'
-
     const btn = document.createElement('button')
     btn.className = 'chip' + (slug === activeSlug ? ' active' : '')
     btn.textContent = displayName(slug)
     btn.dataset.slug = slug
+    // A kid chip is now the entry point to that kid's DETAIL view: clicking
+    // switches to them (if they're not already active) AND opens the detail
+    // page with their language/voice/level + delete. Delete moved out of the
+    // per-chip ✕ (mis-tap risk) and into the detail's danger zone.
     btn.addEventListener('click', () => {
       if (slug !== activeSlug) wsSend({ type: 'switch_profile', slug })
+      openKidDetail(slug)
     })
-    item.appendChild(btn)
-
-    if (canRemove) {
-      const removeBtn = document.createElement('button')
-      removeBtn.className = 'profile-remove'
-      removeBtn.textContent = '✕'
-      removeBtn.setAttribute('aria-label', `Remove ${displayName(slug)}`)
-      removeBtn.title = `Remove ${displayName(slug)}`
-      removeBtn.addEventListener('click', async (e) => {
-        e.stopPropagation()
-        const ok = await openModal({
-          message: `Remove ${displayName(slug)}? This permanently deletes their saved progress.`,
-          confirmLabel: 'Remove',
-          danger: true,
-        })
-        if (ok) wsSend({ type: 'delete_profile', slug })
-      })
-      item.appendChild(removeBtn)
-    }
-
-    profileSelectorEl.appendChild(item)
+    profileSelectorEl.appendChild(btn)
   })
 
   // '+' button to add a new child: collect name + practice language, then the
   // server creates the profile (with that language's default level) and skips
-  // spoken onboarding. Language/level are fine-tuned afterwards in the panel.
+  // spoken onboarding. Language/level are fine-tuned afterwards in the detail.
   const addBtn = document.createElement('button')
   addBtn.className = 'chip'
   addBtn.textContent = '+'
@@ -948,17 +946,76 @@ function renderProfileSelector(profiles, activeSlug) {
     })
     if (!language) return
     // Send the raw name — the server runs it through name_to_slug (the single
-    // source of truth for slugs), so we don't duplicate that logic here.
+    // source of truth for slugs), so we don't duplicate that logic here. The
+    // detail view opens once the server confirms creation with a 'profiles'
+    // broadcast (see the profiles handler in ws.onmessage).
+    pendingOpenDetailForNewSlug = true
     wsSend({ type: 'switch_profile', slug: rawName, language })
   })
   profileSelectorEl.appendChild(addBtn)
 }
 
 function setActiveProfile(slug) {
+  knownActive = slug
   profileSelectorEl.querySelectorAll('.chip[data-slug]').forEach(btn => {
     btn.classList.toggle('active', btn.dataset.slug === slug)
   })
 }
+
+// ── Kids view ↔ Kid detail view ───────────────────────────────
+const kidsViewEl        = document.getElementById('kids-view')
+const kidDetailViewEl   = document.getElementById('kid-detail-view')
+const kidDetailBackEl   = document.getElementById('kid-detail-back')
+const kidDetailRemoveEl = document.getElementById('kid-detail-remove')
+const settingsTitleEl   = document.getElementById('settings-title')
+let currentDetailSlug = null
+// Set when '+' adds a kid: the server hasn't confirmed yet, but once the
+// profiles broadcast returns with the new slug active, we open its detail.
+let pendingOpenDetailForNewSlug = false
+
+function showKidsView() {
+  currentDetailSlug = null
+  kidDetailViewEl.hidden = true
+  kidsViewEl.hidden = false
+  settingsTitleEl.textContent = 'Settings'
+}
+
+function openKidDetail(slug) {
+  currentDetailSlug = slug
+  kidsViewEl.hidden = true
+  kidDetailViewEl.hidden = false
+  settingsTitleEl.textContent = displayName(slug)
+  // Delete disabled when this is the only kid — the app always needs an
+  // active profile to fall back to (server enforces this too, with a
+  // profile_error toast, but hiding the button avoids the dead-end tap).
+  const canRemove = knownProfiles.length > 1
+  kidDetailRemoveEl.disabled = !canRemove
+  kidDetailRemoveEl.title = canRemove
+    ? `Remove ${displayName(slug)} — deletes their saved progress`
+    : `Can't remove the only kid`
+}
+
+kidDetailBackEl.addEventListener('click', showKidsView)
+
+kidDetailRemoveEl.addEventListener('click', async () => {
+  const slug = currentDetailSlug
+  if (!slug) return
+  const ok = await openModal({
+    message: `Remove ${displayName(slug)}? This permanently deletes their saved progress.`,
+    confirmLabel: 'Remove',
+    danger: true,
+  })
+  if (!ok) return
+  wsSend({ type: 'delete_profile', slug })
+  // Server will respond with a fresh profiles list on success (with a
+  // different active kid) or a profile_error toast on refusal; either way,
+  // pop back to the kids view immediately for a snappy feel.
+  showKidsView()
+})
+
+// Opening the panel from the gear always lands on the kids view, not
+// whichever detail was last open. Predictable entry point.
+document.getElementById('settings-gear').addEventListener('click', showKidsView, true)
 
 // ── Bootstrap ────────────────────────────────────────────────
 initThree()
