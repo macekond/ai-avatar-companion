@@ -134,6 +134,11 @@ push to `main` if the tag doesn't already exist (plain `Nova v<version>` message
 before pushing when you want a themed message (`git tag -a v0.3.0 -m "Nova v0.3.0 — <theme>"`);
 either way the tag is what `packaging/build.sh` looks for to emit a clean-named release DMG.
 
+The version-bump PR (the *release PR*) uses the template at
+`.github/PULL_REQUEST_TEMPLATE/release.md` — open with `?template=release.md` in the compare URL,
+title `Nova v<version>: <theme>`, three sections (New features / Bug fixes / Other improvements).
+Feature PRs mid-cycle stay informal.
+
 ## Docs
 
 `ai-avatar-companion-design.md` is a **historical snapshot** — good for *why* a decision was made,
