@@ -228,11 +228,34 @@ body.transcript-docked #transcript-list { flex: 1 1 auto; }
   color: #a08a76;
 }
 
-#profile-selector, #voice-selector, #level-selector {
+#profile-selector, #voice-selector, #level-selector,
+#language-selector {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
 }
+
+/* Credits — legally-required attribution (CC-BY) plus a light second-avatar
+   nod. Kept quiet: small, muted, no chip styling, sits at the panel bottom. */
+.credits-section {
+  margin-top: 6px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(160, 138, 118, 0.25);
+}
+.credits {
+  margin: 0 0 6px;
+  font-size: 0.72rem;
+  line-height: 1.45;
+  color: #8a7460;
+}
+.credits:last-child { margin-bottom: 0; }
+.credits a {
+  color: inherit;
+  text-decoration: underline;
+  text-decoration-color: rgba(160, 138, 118, 0.5);
+}
+.credits a:hover { color: #4a3a2a; }
+.credits em { font-style: italic; }
 
 /* ── Chips (shared: profile, voice, level) ────────────────── */
 .chip {
