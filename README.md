@@ -2,6 +2,8 @@
 
 A local-first language-practice companion for children (English or Japanese). A child speaks to an animated 3D avatar that listens, thinks, and replies — all running on-device. No cloud, no accounts, no ads.
 
+**Download:** [latest release](https://github.com/macekond/ai-avatar-companion/releases/latest) (macOS, Apple Silicon `.dmg`) — or [build it yourself](#building-the-macos-app-dmg).
+
 > See [`ai-avatar-companion-design.md`](ai-avatar-companion-design.md) for the full design document.
 
 ---
