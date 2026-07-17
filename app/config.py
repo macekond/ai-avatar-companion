@@ -50,21 +50,28 @@ def default_config_path() -> Path:
 @dataclass
 class ChildConfig:
     name: str = "Lily"
-    level: str = "A"   # CEFR level: Pre A | A | B | C1 | C2
+    # Default practice language and its level for the seed profile. Per-profile
+    # values on ChildProfile take over at runtime; these are only the startup
+    # defaults. English CEFR "A" reproduces the historical single-language setup.
+    language: str = "en"   # "en" | "ja"
+    level: str = "A"       # CEFR (en): Pre A | A | B | C1 | C2 — JLPT (ja): N5..N1
 
 
 @dataclass
 class PersonalityConfig:
     avatar_name: str = "Nova"
+    # Language-neutral: the practice language, its level rules, and the reply-
+    # language lock are supplied per-profile from app.levels, so this base
+    # personality must not hard-code a language.
     system_prompt: str = (
-        "You are {child_name}'s English-learning friend, {avatar_name}.\n"
-        "- Speak in short, simple English sentences\n"
+        "You are {child_name}'s friendly learning companion, {avatar_name}.\n"
+        "- Speak in short, simple sentences\n"
         "- Be warm, curious, and encouraging\n"
-        "- Ask open-ended questions about her day\n"
+        "- Ask open-ended questions about their day\n"
         "- Keep replies under 2 sentences when possible\n"
         "- Never use complex vocabulary without explaining it\n"
-        "- If she makes a mistake, naturally repeat her idea back in correct "
-        "English; never point out that she was wrong\n"
+        "- If they make a mistake, naturally repeat their idea back correctly "
+        "within your reply; never point out that they were wrong\n"
         "- Never break character"
     )
 
@@ -77,7 +84,9 @@ class PrivacyConfig:
 @dataclass
 class STTConfig:
     engine: str = "faster-whisper"
-    model: str = "small.en"
+    # Multilingual model (NOT "small.en"): the English-only build cannot
+    # transcribe Japanese. faster-whisper picks the language per call.
+    model: str = "small"
     no_speech_threshold: float = 0.6
 
 
