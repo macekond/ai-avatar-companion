@@ -129,14 +129,19 @@ The app's version lives in three files that must move together — `src-tauri/Ca
 `src-tauri/tauri.conf.json`, `ui/package.json` — pinned by `tests/test_version_sync.py`, so a
 bump that touches only one fails `make test` before the drift ships.
 
-Tagging is a safety net: `.github/workflows/tag-release.yml` auto-creates `v<version>` on every
-push to `main` if the tag doesn't already exist (plain `Nova v<version>` message). Tag manually
-before pushing when you want a themed message (`git tag -a v0.3.0 -m "Nova v0.3.0 — <theme>"`);
-either way the tag is what `packaging/build.sh` looks for to emit a clean-named release DMG.
+On every push to `main`, `.github/workflows/tag-release.yml`:
+1. tags `v<version>` if the tag doesn't already exist (plain `Nova v<version>` message), and
+2. builds the DMG on a macOS Apple-Silicon runner and publishes a GitHub Release with the
+   merged PR's body as the notes, DMG attached.
+
+Both steps are idempotent — a repeat push at the same version no-ops both. Tag manually before
+pushing when you want a themed tag message (`git tag -a v0.3.0 -m "Nova v0.3.0 — <theme>"`);
+release notes always come from the PR body.
 
 The version-bump PR (the *release PR*) uses the template at
 `.github/PULL_REQUEST_TEMPLATE/release.md` — open with `?template=release.md` in the compare URL,
 title `Nova v<version>: <theme>`, three sections (New features / Bug fixes / Other improvements).
+That body becomes the GitHub Release notes verbatim, so write it for the release audience.
 Feature PRs mid-cycle stay informal.
 
 ## Docs

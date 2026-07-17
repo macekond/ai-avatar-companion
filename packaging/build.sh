@@ -46,13 +46,16 @@ BUNDLE_DIR="src-tauri/target/${TRIPLE}/release/bundle"
 VERSION=$(python3 -c "import json;print(json.load(open('src-tauri/tauri.conf.json'))['version'])")
 
 # Decide the DMG label. A release build is only ever produced from the exact
-# commit tagged v<version> on main, with a clean working tree — anything else
-# (feature branch, untagged main HEAD, uncommitted changes) is a dev build and
-# gets a UTC timestamp so it's traceable and doesn't collide with siblings.
+# commit tagged v<version> with a clean working tree — anything else (untagged
+# HEAD, uncommitted changes, or a tag that doesn't match this version) is a
+# dev build and gets a UTC timestamp so it's traceable and doesn't collide
+# with siblings. Branch name is intentionally not part of the check: CI runs
+# `actions/checkout` in detached HEAD, and the tag alone is the authoritative
+# release signal.
 BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
 TAG_AT_HEAD=$(git describe --exact-match --tags HEAD 2>/dev/null || true)
 WORKTREE_DIRTY=$(git status --porcelain 2>/dev/null | head -n1)
-if [[ "${BRANCH}" == "main" && "${TAG_AT_HEAD}" == "v${VERSION}" && -z "${WORKTREE_DIRTY}" ]]; then
+if [[ "${TAG_AT_HEAD}" == "v${VERSION}" && -z "${WORKTREE_DIRTY}" ]]; then
   LABEL="${VERSION}"
   echo "==> Release build: Nova_${LABEL}"
 else
