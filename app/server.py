@@ -29,6 +29,12 @@ Language + level are per-profile (stored on ChildProfile): "en" uses CEFR levels
 switch_profile to a NEW slug carrying "language"+"level" creates that profile from
 the modal and skips spoken onboarding; without them the spoken onboarding runs.
 
+For Japanese profiles, text-carrying messages (sentence, transcript,
+conversation_turn, conversation_correction) also carry a sibling `<field>_html`
+with furigana-annotated HTML (<ruby>漢字<rt>かんじ</rt></ruby>), e.g. `text_html`,
+`you_html`, `nova_html`, `wrong_html`, `right_html`. The UI renders the html
+variant when present, else falls back to the plain field.
+
 Server → browser:
   {"type": "init",          "level": "A", "language": "en"}
   {"type": "settings", "language": "en", "languages": ["en","ja"],
@@ -129,6 +135,7 @@ from app.pipeline.llm import LLMPipeline
 from app.pipeline.stt import STTPipeline, SAMPLE_RATE, whisper_is_cached
 from app.pipeline.tts import TTSPipeline, voice_is_cached, kokoro_is_cached
 from app.levels import LANGUAGES, levels_for, default_level_for
+from app.furigana import annotate_for
 from app.telemetry import TelemetrySession
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -578,6 +585,24 @@ async def _session(
             "voice": active_voice,
         })
 
+    def _with_furigana(msg: dict, *fields: str) -> dict:
+        """For Japanese profiles, annotate the given text *fields* on *msg*
+        with a ``<field>_html`` sibling carrying furigana-tagged HTML.
+
+        The UI checks the ``_html`` variant first and falls back to the plain
+        field when absent, so English profiles pass through unchanged. TTS
+        always reads the plain text — <ruby> markup is display-only.
+        """
+        if active_language != "ja":
+            return msg
+        for f in fields:
+            text = msg.get(f)
+            if isinstance(text, str) and text:
+                html = annotate_for(text, active_language)
+                if html:
+                    msg[f + "_html"] = html
+        return msg
+
     # The LLM pipeline is shared across WebSocket connections, so start each
     # session with a clean history — otherwise a fresh tab (or a second child
     # after a hot-swap) inherits whatever conversation was in progress.
@@ -621,12 +646,17 @@ async def _session(
             conv_turn_n = 0
             return
         for t in transcript_store.load():
-            await send({"type": "conversation_turn", "id": t["id"],
-                        "you": t["you"], "nova": t["nova"]})
+            await send(_with_furigana(
+                {"type": "conversation_turn", "id": t["id"],
+                 "you": t["you"], "nova": t["nova"]},
+                "you", "nova",
+            ))
             for c in t["corrections"]:
-                await send({"type": "conversation_correction", "id": t["id"],
-                            "kind": c["kind"], "wrong": c["wrong"],
-                            "right": c["right"]})
+                await send(_with_furigana(
+                    {"type": "conversation_correction", "id": t["id"],
+                     "kind": c["kind"], "wrong": c["wrong"], "right": c["right"]},
+                    "wrong", "right",
+                ))
         conv_turn_n = transcript_store.last_id()
 
     # ── Load / initialise memory ─────────────────────────────────────────
@@ -806,7 +836,7 @@ async def _session(
         Pure playback: no transcript entry, no memory extraction, no telemetry.
         """
         await send({"type": "state", "state": "speaking"})
-        await send({"type": "sentence", "text": text})
+        await send(_with_furigana({"type": "sentence", "text": text}, "text"))
 
         def _speak(stop_speaking) -> None:
             tts.speak_streaming(text, amplitude_cb, stop_speaking)
@@ -1058,7 +1088,8 @@ async def _session(
                 continue
 
             log.info("Heard: %s", transcript)
-            await send({"type": "transcript", "text": transcript})
+            await send(_with_furigana({"type": "transcript", "text": transcript},
+                                      "text"))
 
             word_count = len(transcript.split())
             if word_count <= config.memory.short_response_words:
@@ -1097,7 +1128,8 @@ async def _session(
                         if stop_speaking.is_set():
                             break
                         spoken_sentences.append(sentence)
-                        send_from_thread({"type": "sentence", "text": sentence})
+                        send_from_thread(_with_furigana(
+                            {"type": "sentence", "text": sentence}, "text"))
                         tts.speak_streaming(sentence, _tracked_amp, stop_speaking)
                         send_from_thread({"type": "amplitude", "value": 0.0})
                 except RuntimeError as exc:
@@ -1119,12 +1151,12 @@ async def _session(
             if spoken_sentences and transcript:
                 conv_turn_n += 1
                 nova_reply = " ".join(spoken_sentences)
-                await send({
+                await send(_with_furigana({
                     "type": "conversation_turn",
                     "id": conv_turn_n,
                     "you": transcript,
                     "nova": nova_reply,
-                })
+                }, "you", "nova"))
                 if transcript_store:
                     transcript_store.append_turn(conv_turn_n, transcript, nova_reply)
 
@@ -1156,13 +1188,13 @@ async def _session(
                             # Patch the transcript entry with the correction so
                             # the tab can highlight what was gently fixed.
                             ptype, wrong, right = parsed
-                            send_from_thread({
+                            send_from_thread(_with_furigana({
                                 "type": "conversation_correction",
                                 "id": _conv_id,
                                 "kind": ptype,
                                 "wrong": wrong,
                                 "right": right,
-                            })
+                            }, "wrong", "right"))
                             if _store_ref:
                                 _store_ref.append_correction(
                                     _conv_id, ptype, wrong, right)

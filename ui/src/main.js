@@ -237,17 +237,39 @@ function applyState(newState) {
 }
 
 // ── Text UI helpers ───────────────────────────────────────────────────────
-function showSentence(text) {
+// Render either plain text or server-generated furigana HTML (<ruby>…</ruby>).
+// The server only emits html for Japanese profiles and always emits it beside
+// the plain text — never a substitute — so this helper's fallback is safe.
+// The html string is server-produced and contains only <ruby>/<rt> tags
+// (see app/furigana.py); trusted, so innerHTML is safe here.
+function setInlineText(el, text, html) {
+  if (html) el.innerHTML = html
+  else el.textContent = text
+}
+
+// Build an inline node carrying either plain text (a Text node) or
+// server-generated furigana HTML (a <span> with innerHTML). Callers .append()
+// the result alongside other nodes when building richer rows.
+function inlineTextNode(text, html) {
+  if (!html) return document.createTextNode(text)
+  const span = document.createElement('span')
+  span.innerHTML = html
+  return span
+}
+
+function showSentence(text, html) {
   if (fadeTimer) clearTimeout(fadeTimer)
   bubbleEl.classList.remove('fade')
-  bubbleEl.textContent = text
+  setInlineText(bubbleEl, text, html)
   // Fade out after 6 s of silence
   fadeTimer = setTimeout(() => bubbleEl.classList.add('fade'), 6000)
 }
 
 let transcriptTimer = null
-function showTranscript(text) {
-  transcriptEl.textContent = `You: ${text}`
+function showTranscript(text, html) {
+  // "You: " prefix stays plain; the transcript itself may be html for JP.
+  transcriptEl.textContent = 'You: '
+  transcriptEl.appendChild(inlineTextNode(text, html))
   transcriptEl.classList.add('visible')
   if (transcriptTimer) clearTimeout(transcriptTimer)
   transcriptTimer = setTimeout(() => transcriptEl.classList.remove('visible'), 4000)
@@ -381,10 +403,10 @@ function connectWS() {
         applyState(msg.state)
         break
       case 'sentence':
-        showSentence(msg.text)
+        showSentence(msg.text, msg.text_html)
         break
       case 'transcript':
-        showTranscript(msg.text)
+        showTranscript(msg.text, msg.text_html)
         break
       case 'amplitude':
         targetAmp = msg.value
@@ -408,12 +430,13 @@ function connectWS() {
         resetConversation()
         break
       case 'conversation_turn':
-        addConversationTurn(msg.id, msg.you, msg.nova)
+        addConversationTurn(msg.id, msg.you, msg.nova, msg.you_html, msg.nova_html)
         lastReply = msg.nova
         updateReplayLast()
         break
       case 'conversation_correction':
-        addConversationCorrection(msg.id, msg.kind, msg.wrong, msg.right)
+        addConversationCorrection(msg.id, msg.kind, msg.wrong, msg.right,
+                                  msg.wrong_html, msg.right_html)
         break
     }
   }
@@ -568,7 +591,7 @@ function updateReplayLast() {
 }
 replayLastEl.addEventListener('click', () => requestReplay(lastReply))
 
-function addConversationTurn(id, you, nova) {
+function addConversationTurn(id, you, nova, youHtml, novaHtml) {
   const empty = transcriptListEl.querySelector('.transcript-empty')
   if (empty) empty.remove()
 
@@ -577,11 +600,13 @@ function addConversationTurn(id, you, nova) {
 
   const youEl = document.createElement('div')
   youEl.className = 'turn-you'
-  youEl.append(tag('You'), textNode(you))
+  youEl.append(tag('You'), inlineTextNode(you, youHtml))
 
   const novaEl = document.createElement('div')
   novaEl.className = 'turn-nova'
-  novaEl.append(tag('Nova'), textNode(nova), replayButton(nova))
+  // Replay always uses the PLAIN text — Kokoro/Piper have no idea what to
+  // do with <ruby> markup, and it would be spoken as literal characters.
+  novaEl.append(tag('Nova'), inlineTextNode(nova, novaHtml), replayButton(nova))
 
   turn.append(youEl, novaEl)
   transcriptListEl.appendChild(turn)
@@ -590,17 +615,21 @@ function addConversationTurn(id, you, nova) {
   conversation.set(id, { el: turn, youEl })
 }
 
-function addConversationCorrection(id, kind, wrong, right) {
+function addConversationCorrection(id, kind, wrong, right, wrongHtml, rightHtml) {
   const entry = conversation.get(id)
   if (!entry) return
   // Emphasise the fix inline on the child's line: strike the wrong word,
   // show the right one, and add a small note underneath.
   const note = document.createElement('div')
   note.className = 'turn-correction'
+  const wrongEl = span('correction-wrong', '')
+  wrongEl.append(inlineTextNode(wrong, wrongHtml))
+  const rightEl = span('correction-right', '')
+  rightEl.append(inlineTextNode(right, rightHtml))
   note.append(
-    span('correction-wrong', wrong),
+    wrongEl,
     span('correction-arrow', ' → '),
-    span('correction-right', right),
+    rightEl,
     kind ? span('correction-kind', ` (${kind.replace(/_/g, ' ')})`) : document.createComment(''),
   )
   entry.el.insertBefore(note, entry.el.querySelector('.turn-nova'))

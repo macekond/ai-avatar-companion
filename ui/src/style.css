@@ -169,6 +169,29 @@ body.transcript-docked #transcript-list { flex: 1 1 auto; }
 }
 .turn-nova { color: #6a5545; }
 
+/* ── Furigana (Japanese ruby annotations) ─────────────────
+   The server wraps kanji morphemes in <ruby>…<rt>…</rt></ruby> for Japanese
+   profiles. Native browser rendering already stacks the hiragana above the
+   kanji; these rules just tune the vertical rhythm so ruby-annotated lines
+   don't tower over plain-text ones. */
+ruby {
+  ruby-align: center;
+  /* Extra top space so <rt> doesn't crowd the line above in transcript rows. */
+  line-height: 1.9;
+}
+rt {
+  font-size: 0.55em;
+  color: #8a7460;         /* muted, so hiragana reads as a hint not competing */
+  font-weight: normal;
+  letter-spacing: 0.02em;
+  /* Prevent the reading from being highlighted when the user selects text —
+     they usually want to copy the kanji, not the annotation. */
+  user-select: none;
+  -webkit-user-select: none;
+}
+/* In the sentence bubble the reading should stay readable — a touch larger. */
+#sentence-bubble rt { font-size: 0.5em; color: rgba(90, 60, 40, 0.55); }
+
 .turn-correction {
   margin: 4px 0 4px 48px;
   padding: 3px 8px;

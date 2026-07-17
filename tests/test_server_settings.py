@@ -246,6 +246,57 @@ class TestJapaneseProfile:
         assert s["language"] == "ja"
         assert s["voice"] in {"jf_alpha", "jf_gongitsune", "jf_nezumi", "jm_kumo"}
 
+    async def test_transcript_replay_gets_furigana_html_for_ja(
+            self, base_config, tmp_path):
+        # A Japanese profile's stored conversation must be replayed with
+        # furigana HTML alongside the plain text — else the panel shows raw
+        # kanji at N5 where the child can't read it yet.
+        from app.transcript import TranscriptStore
+        _, mem_mgr = _profile(tmp_path, base_config, slug="yuki",
+                              language="ja", level="N5")
+        transcripts_dir = tmp_path / "transcripts"
+        transcripts_dir.mkdir(exist_ok=True)
+        store = TranscriptStore(transcripts_dir, "yuki")
+        store.append_turn(1, "ねこがすきです", "私もねこがすき！")
+
+        # Point base_config at the tmp profiles dir so _session finds our
+        # transcript store beside profiles/.
+        base_config.memory.profiles_dir = str(tmp_path / "profiles")
+        ws = MockWebSocket([])
+        await _session(ws, base_config, _mock_stt(), _mock_llm(), _mock_tts(), mem_mgr)
+
+        turns = ws.sent_of_type("conversation_turn")
+        assert turns, "no conversation_turn replayed"
+        t = turns[0]
+        assert t["you"] == "ねこがすきです"
+        assert t["nova"] == "私もねこがすき！"
+        # Furigana html sits alongside plain text. Because pyopenjtalk may not
+        # be installed in CI (imports lazily and falls back), the html field
+        # may equal the escaped plain text; the invariant we pin is only that
+        # the key is PRESENT for a JA profile — the UI's fallback code path
+        # then handles either richness.
+        assert "nova_html" in t, "nova_html missing on JA profile"
+        assert "you_html" in t, "you_html missing on JA profile"
+
+    async def test_english_profile_gets_no_furigana_fields(
+            self, base_config, tmp_path):
+        # English replay must NOT carry html fields — that would be dead
+        # weight over the wire and confuse the UI's html/text branch.
+        from app.transcript import TranscriptStore
+        _, mem_mgr = _profile(tmp_path, base_config, slug="lily", language="en")
+        transcripts_dir = tmp_path / "transcripts"
+        transcripts_dir.mkdir(exist_ok=True)
+        store = TranscriptStore(transcripts_dir, "lily")
+        store.append_turn(1, "I like cats", "Me too!")
+        base_config.memory.profiles_dir = str(tmp_path / "profiles")
+        ws = MockWebSocket([])
+        await _session(ws, base_config, _mock_stt(), _mock_llm(), _mock_tts(), mem_mgr)
+        turns = ws.sent_of_type("conversation_turn")
+        assert turns
+        t = turns[0]
+        assert "nova_html" not in t
+        assert "you_html" not in t
+
 
 class TestModalProfileCreation:
     async def test_switch_with_language_creates_and_skips_onboarding(
