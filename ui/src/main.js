@@ -350,7 +350,9 @@ function connectWS() {
     const msg = JSON.parse(e.data)
     switch (msg.type) {
       case 'init':
-        setActiveLevel(msg.level)
+        // Language first; the 'settings' message (sent right after) renders the
+        // level chips for that language and highlights the active one.
+        if (msg.language) setActiveLanguage(msg.language)
         break
       case 'profiles':
         renderProfileSelector(msg.list, msg.active)
@@ -385,8 +387,9 @@ function connectWS() {
         }
         break
       case 'settings':
+        if (msg.language) setActiveLanguage(msg.language)
         renderVoiceSelector(msg.voices, msg.voice)
-        if (msg.level) setActiveLevel(msg.level)
+        renderLevelSelector(msg.levels, msg.level, msg.language || activeLanguage)
         break
       case 'voice_status':
         updateVoiceStatus(msg.state, msg.voice)
@@ -609,22 +612,69 @@ function span(cls, text) {
   return s
 }
 
-// ── Level selector ────────────────────────────────────────────────
-const levelBtns = document.querySelectorAll('#level-selector .chip')
+// ── Language selector ─────────────────────────────────────────────
+const languageSelectorEl = document.getElementById('language-selector')
+const languageBtns = languageSelectorEl.querySelectorAll('.chip')
+let activeLanguage = 'en'
 
-function setActiveLevel(level) {
-  levelBtns.forEach(btn => {
-    btn.classList.toggle('active', btn.dataset.level === level)
+const LEVEL_HEADINGS = { en: 'English level (CEFR)', ja: 'Japanese level (JLPT)' }
+
+function applyContentLanguage(language) {
+  // Set lang on the conversation surfaces so CJK ideographs render with
+  // Japanese (not Chinese) glyph shapes and break lines correctly. The app
+  // chrome stays English.
+  ;['transcript-list', 'sentence-bubble', 'transcript'].forEach(id => {
+    const el = document.getElementById(id)
+    if (el) el.lang = language
   })
 }
 
-levelBtns.forEach(btn => {
+function setActiveLanguage(language) {
+  activeLanguage = language || 'en'
+  languageBtns.forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.language === activeLanguage)
+  })
+  applyContentLanguage(activeLanguage)
+}
+
+languageBtns.forEach(btn => {
   btn.addEventListener('click', () => {
-    const level = btn.dataset.level
-    setActiveLevel(level)
-    wsSend({ type: 'set_level', level })
+    const language = btn.dataset.language
+    if (language === activeLanguage) return
+    // Server resets level + voice to the new language's defaults and re-sends
+    // the 'settings' message, which re-renders these selectors.
+    wsSend({ type: 'set_language', language })
   })
 })
+
+// ── Level selector (server-driven; options depend on the language) ─
+const levelSelectorEl = document.getElementById('level-selector')
+const levelHeadingEl = document.getElementById('level-heading')
+let activeLevel = null
+
+function renderLevelSelector(levels, current, language) {
+  levelHeadingEl.textContent = LEVEL_HEADINGS[language] || 'Level'
+  levelSelectorEl.innerHTML = ''
+  ;(levels || []).forEach(level => {
+    const btn = document.createElement('button')
+    btn.className = 'chip' + (level === current ? ' active' : '')
+    btn.textContent = level
+    btn.dataset.level = level
+    btn.addEventListener('click', () => {
+      setActiveLevel(level)
+      wsSend({ type: 'set_level', level })
+    })
+    levelSelectorEl.appendChild(btn)
+  })
+  activeLevel = current
+}
+
+function setActiveLevel(level) {
+  activeLevel = level
+  levelSelectorEl.querySelectorAll('.chip').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.level === level)
+  })
+}
 
 // ── Voice selector ────────────────────────────────────────────────
 const voiceSelectorEl = document.getElementById('voice-selector')
@@ -704,15 +754,26 @@ function hideToast() {
 const modalOverlayEl = document.getElementById('modal-overlay')
 const modalMessageEl = document.getElementById('modal-message')
 const modalInputEl   = document.getElementById('modal-input')
+const modalChoicesEl = document.getElementById('modal-choices')
 const modalCancelEl  = document.getElementById('modal-cancel')
 const modalConfirmEl = document.getElementById('modal-confirm')
 let modalResolve = null
 let modalHasInput = false
+let modalMode = 'confirm'   // 'confirm' | 'input' | 'choices'
 let modalReturnFocus = null
 
-// Tab order inside the dialog: the input (when shown) then the two buttons.
+// Cancel/dismiss result by mode: confirm → false, input/choices → null.
+function modalCancelValue() {
+  return modalMode === 'confirm' ? false : null
+}
+
+// Tab order inside the dialog: input (when shown), then any choice chips, then
+// the two buttons.
 function modalFocusables() {
-  return [modalInputEl, modalCancelEl, modalConfirmEl].filter(el => !el.hidden)
+  const choiceBtns = modalChoicesEl.hidden
+    ? [] : Array.from(modalChoicesEl.querySelectorAll('button'))
+  return [modalInputEl, ...choiceBtns, modalCancelEl, modalConfirmEl]
+    .filter(el => !el.hidden)
 }
 
 function closeModal(result) {
@@ -728,25 +789,47 @@ function closeModal(result) {
   resolve(result)
 }
 
-// Returns a Promise: a trimmed string (or null if cancelled) when `input`,
-// otherwise a boolean confirm result.
+// Returns a Promise resolving to:
+//   input mode   → trimmed string, or null if cancelled
+//   choices mode → the chosen choice's `value`, or null if cancelled
+//   confirm mode → boolean
 function openModal({ message, input = false, placeholder = '',
-                    confirmLabel = 'OK', danger = false } = {}) {
+                    confirmLabel = 'OK', danger = false, choices = null } = {}) {
   // A dialog already open resolves as cancelled before opening the new one.
-  if (modalResolve) closeModal(modalHasInput ? null : false)
+  if (modalResolve) closeModal(modalCancelValue())
   const opener = document.activeElement
   return new Promise(resolve => {
     modalResolve = resolve
     modalReturnFocus = opener instanceof HTMLElement ? opener : null
     modalHasInput = input
+    modalMode = choices ? 'choices' : (input ? 'input' : 'confirm')
     modalMessageEl.textContent = message
     modalInputEl.hidden = !input
     modalInputEl.value = ''
     modalInputEl.placeholder = placeholder
+    // Choices mode: render chips and hide the default OK (Cancel stays).
+    modalChoicesEl.innerHTML = ''
+    modalChoicesEl.hidden = !choices
+    modalConfirmEl.hidden = !!choices
+    if (choices) {
+      choices.forEach(c => {
+        const b = document.createElement('button')
+        b.type = 'button'
+        b.className = 'chip'
+        b.textContent = c.label
+        if (c.lang) b.lang = c.lang
+        b.addEventListener('click', () => closeModal(c.value))
+        modalChoicesEl.appendChild(b)
+      })
+    }
     modalConfirmEl.textContent = confirmLabel
     modalConfirmEl.classList.toggle('danger', danger)
     modalOverlayEl.hidden = false
-    setTimeout(() => (input ? modalInputEl : modalConfirmEl).focus(), 0)
+    setTimeout(() => {
+      if (input) modalInputEl.focus()
+      else if (choices) modalChoicesEl.querySelector('button')?.focus()
+      else modalConfirmEl.focus()
+    }, 0)
   })
 }
 
@@ -754,9 +837,9 @@ function confirmModal() {
   closeModal(modalHasInput ? modalInputEl.value.trim() || null : true)
 }
 modalConfirmEl.addEventListener('click', confirmModal)
-modalCancelEl.addEventListener('click', () => closeModal(modalHasInput ? null : false))
+modalCancelEl.addEventListener('click', () => closeModal(modalCancelValue()))
 modalOverlayEl.addEventListener('click', (e) => {
-  if (e.target === modalOverlayEl) closeModal(modalHasInput ? null : false)
+  if (e.target === modalOverlayEl) closeModal(modalCancelValue())
 })
 modalInputEl.addEventListener('keydown', (e) => {
   // NumpadEnter is a distinct code from Enter — both submit the name.
@@ -769,7 +852,7 @@ window.addEventListener('keydown', (e) => {
   if (modalOverlayEl.hidden) return
   if (e.code === 'Escape') {
     e.stopPropagation()
-    closeModal(modalHasInput ? null : false)
+    closeModal(modalCancelValue())
     return
   }
   // aria-modal="true" promises focus stays in the dialog — implement it, or
@@ -839,7 +922,9 @@ function renderProfileSelector(profiles, activeSlug) {
     profileSelectorEl.appendChild(item)
   })
 
-  // '+' button to add a new child (triggers onboarding for a fresh slug)
+  // '+' button to add a new child: collect name + practice language, then the
+  // server creates the profile (with that language's default level) and skips
+  // spoken onboarding. Language/level are fine-tuned afterwards in the panel.
   const addBtn = document.createElement('button')
   addBtn.className = 'chip'
   addBtn.textContent = '+'
@@ -848,13 +933,23 @@ function renderProfileSelector(profiles, activeSlug) {
     const rawName = await openModal({
       message: "What's the new child's name?",
       input: true,
-      placeholder: 'Name',
-      confirmLabel: 'Add',
+      // Name must contain letters/numbers — it becomes the profile slug, and a
+      // name with no ASCII (e.g. a purely kanji name) is rejected by the server.
+      placeholder: 'Name (letters or numbers)',
+      confirmLabel: 'Next',
     })
     if (!rawName) return
+    const language = await openModal({
+      message: `What language will ${rawName} practise?`,
+      choices: [
+        { label: 'English', value: 'en' },
+        { label: '日本語', value: 'ja', lang: 'ja' },
+      ],
+    })
+    if (!language) return
     // Send the raw name — the server runs it through name_to_slug (the single
     // source of truth for slugs), so we don't duplicate that logic here.
-    wsSend({ type: 'switch_profile', slug: rawName })
+    wsSend({ type: 'switch_profile', slug: rawName, language })
   })
   profileSelectorEl.appendChild(addBtn)
 }

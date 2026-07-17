@@ -5,7 +5,12 @@ html, body {
   height: 100%;
   overflow: hidden;
   background: radial-gradient(ellipse at 50% 30%, #fff8ef 0%, #fdefd8 60%, #f5ddb0 100%);
-  font-family: 'Segoe UI', 'Helvetica Neue', system-ui, sans-serif;
+  /* CJK fallbacks so Japanese transcript/replies render with a proper Japanese
+     sans (Hiragino on macOS, Yu Gothic on Windows, Noto Sans JP elsewhere)
+     instead of relying on undefined system fallback. */
+  font-family: 'Segoe UI', 'Helvetica Neue', system-ui,
+               'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Yu Gothic',
+               'Noto Sans JP', 'Noto Sans CJK JP', sans-serif;
   user-select: none;
   -webkit-user-select: none;
 }
@@ -380,6 +385,15 @@ body.transcript-docked #transcript-list { flex: 1 1 auto; }
   justify-content: flex-end;
   gap: 8px;
 }
+
+/* Choice chips (e.g. language pick when adding a child) */
+#modal-choices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+#modal-choices[hidden] { display: none; }
 
 /* ── State-driven body classes ────────────────────────────────────── */
 body.listening  { background: radial-gradient(ellipse at 50% 30%, #eef8ff 0%, #d8eeff 60%, #b0d5f5 100%); }
