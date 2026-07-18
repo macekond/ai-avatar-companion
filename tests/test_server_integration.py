@@ -351,6 +351,17 @@ class TestMemoryOnConnect:
         sentences = ws.sent_sentences()
         assert any("Mia" in s for s in sentences)
 
+    async def test_greeting_uses_japanese_for_japanese_profile(self, base_config, tmp_path):
+        from app.memory import ChildMemory, ChildProfile
+        memory = ChildMemory(profile=ChildProfile(
+            name="Yuki", age=7, language="ja", level="N5"))
+        mem_mgr = _make_mem_mgr(tmp_path, memory=memory)
+        ws = MockWebSocket(just_start())
+        await _session(ws, base_config, mock_stt(), mock_llm(), mock_tts(), mem_mgr)
+        sentences = ws.sent_sentences()
+        assert any(any("぀" <= ch <= "ヿ" for ch in s) for s in sentences)
+        assert not any("practice friend" in s for s in sentences)
+
 
 # ── Memory — profile switching ──────────────────────────────────────
 

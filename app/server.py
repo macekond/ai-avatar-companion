@@ -81,6 +81,7 @@ load_dotenv()
 
 from app.appearance import AppearanceStore, DEFAULT_AVATAR_KEY
 from app.config import Config, default_config_path
+from app.greetings import system_text, age_suffix
 from app.memory import ChildMemory, ChildProfile, MemoryManager, name_to_slug
 from app.setup import check_ollama
 from app.logging_setup import configure_logging, logfmt_str
@@ -387,8 +388,7 @@ async def _run_onboarding(
         send_from_thread({"type": "amplitude", "value": round(v, 3)})
 
     # --- Ask for name ---
-    q1 = (f"Hi! I'm {avatar}, your English practice friend! "
-          f"I'm so happy to meet you! What's your name?")
+    q1 = system_text("onboarding_ask_name", config.child.language, avatar=avatar)
     await send({"type": "state", "state": "speaking"})
     await send({"type": "sentence", "text": q1})
     await asyncio.to_thread(tts.speak_streaming, q1, amp)
@@ -403,7 +403,7 @@ async def _run_onboarding(
         name = "Friend"
 
     # --- Ask for age ---
-    q2 = f"What a lovely name, {name}! How old are you?"
+    q2 = system_text("onboarding_ask_age", config.child.language, name=name)
     await send({"type": "state", "state": "speaking"})
     await send({"type": "sentence", "text": q2})
     await asyncio.to_thread(tts.speak_streaming, q2, amp)
@@ -430,26 +430,25 @@ async def _send_greeting(
     tts: TTSPipeline,
     send,
     send_from_thread,
+    language: str,
 ) -> None:
     avatar = config.personality.avatar_name
 
     if memory:
         name = memory.profile.name
-        age_note = f" (age {memory.profile.age})" if memory.profile.age else ""
+        age_note = age_suffix(memory.profile.age, language)
         if memory.topics:
             recent_topic = sorted(
                 memory.topics, key=lambda t: t.last_mentioned, reverse=True
             )[0].keyword
-            text = (f"Welcome back, {name}{age_note}! "
-                    f"Last time we talked about {recent_topic}. "
-                    f"What's new today?")
+            text = system_text("greeting_returning_topic", language,
+                                name=name, age_suffix=age_note, topic=recent_topic)
         else:
-            text = (f"Welcome back, {name}{age_note}! "
-                    f"I missed you! What did you get up to?")
+            text = system_text("greeting_returning", language,
+                                name=name, age_suffix=age_note)
     else:
         name = config.child.name
-        text = (f"Hi {name}! I'm {avatar}, your English practice friend. "
-                f"What did you do today?")
+        text = system_text("greeting_new", language, name=name, avatar=avatar)
 
     def amp(v: float) -> None:
         send_from_thread({"type": "amplitude", "value": round(v, 3)})
@@ -799,7 +798,7 @@ async def _session(
                     "list": mem_mgr.list_profiles(),
                     "active": new_slug})
         await _load_transcript(new_slug)
-        await _send_greeting(config, memory, tts, send, send_from_thread)
+        await _send_greeting(config, memory, tts, send, send_from_thread, active_language)
 
     async def _run_speaking(speech_fn) -> None:
         """Run speech_fn(stop_event) in a worker thread while watching the socket
@@ -876,7 +875,7 @@ async def _session(
             if mtype == "start" and not has_greeted:
                 has_greeted = True
                 await send({"type": "state", "state": "idle"})
-                await _send_greeting(config, memory, tts, send, send_from_thread)
+                await _send_greeting(config, memory, tts, send, send_from_thread, active_language)
                 continue
 
             # ── Level change ─────────────────────────────────────────────
@@ -1101,7 +1100,7 @@ async def _session(
                 if telemetry:
                     telemetry.log_didnt_catch()
                 await send({"type": "state", "state": "didnt_catch"})
-                sorry = "I didn't hear you — try again!"
+                sorry = system_text("sorry", active_language)
                 await send({"type": "sentence", "text": sorry})
                 await asyncio.to_thread(tts.speak_streaming, sorry, amplitude_cb)
                 await send({"type": "amplitude", "value": 0.0})
@@ -1157,7 +1156,7 @@ async def _session(
                 except RuntimeError as exc:
                     log.error("Pipeline error: %s", exc)
                     send_from_thread({"type": "sentence",
-                                      "text": "My brain is napping — try again!"})
+                                      "text": system_text("napping", active_language)})
 
             # Barge-in while the reply streams: a `stop_speak` sets the shared
             # stop event (TTS aborts, loop breaks after the current sentence);
