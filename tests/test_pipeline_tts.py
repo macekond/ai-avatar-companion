@@ -106,3 +106,52 @@ class TestReloadVoice:
             tts = TTSPipeline(_config())
             tts.reload_voice("en_US-norman-medium")
         assert tts.current_voice == ""
+
+
+class TestKokoroBackend:
+    """The regression pins: all 4 Japanese voices ended up sounding identical
+    because a misaki API change (0.9+ returns a plain phonemes string, not the
+    old (phonemes, tokens) tuple) made every JP utterance raise before Kokoro
+    saw anything — the exception silently dropped speech back to macOS 'say
+    -v Kyoko' for every voice pick. Both scenarios are pinned here.
+    """
+
+    def _make_backend(self, g2p_return, voice_name="jf_alpha"):
+        from app.pipeline.tts import _KokoroBackend
+        backend = _KokoroBackend.__new__(_KokoroBackend)
+        backend._kokoro = MagicMock()
+        backend._kokoro.create.return_value = (
+            [0.0] * 8, 24_000,   # (samples, sample_rate)
+        )
+        backend._g2p = MagicMock(return_value=g2p_return)
+        backend.voice_name = voice_name
+        backend._sample_rate = 24_000
+        backend._speed = 1.0
+        return backend
+
+    def test_new_misaki_string_return_is_accepted(self):
+        # 0.9.x: JAG2P() returns a plain string. Must NOT raise a
+        # too-many-values-to-unpack ValueError.
+        backend = self._make_backend(g2p_return="koɲɲiʨiβa")
+        with patch("app.pipeline.tts._play_float_audio"):
+            backend.speak_streaming("こんにちは")
+        # Whatever the g2p shape, the raw phoneme string must reach Kokoro.
+        assert backend._kokoro.create.call_args.args[0] == "koɲɲiʨiβa"
+
+    def test_legacy_misaki_tuple_return_still_works(self):
+        # <0.9: returned (phonemes, tokens). Kept working defensively so a
+        # downgrade doesn't break the app.
+        backend = self._make_backend(g2p_return=("koɲɲiʨiβa", ["mock-tokens"]))
+        with patch("app.pipeline.tts._play_float_audio"):
+            backend.speak_streaming("こんにちは")
+        assert backend._kokoro.create.call_args.args[0] == "koɲɲiʨiβa"
+
+    def test_voice_name_is_forwarded_to_kokoro_create(self):
+        # If the voice id isn't actually threaded through, chip picks look
+        # like they change something but every voice sounds identical — the
+        # original user-visible bug behind this test class.
+        backend = self._make_backend(g2p_return="koɲɲiʨiβa",
+                                     voice_name="jf_nezumi")
+        with patch("app.pipeline.tts._play_float_audio"):
+            backend.speak_streaming("こんにちは")
+        assert backend._kokoro.create.call_args.kwargs["voice"] == "jf_nezumi"

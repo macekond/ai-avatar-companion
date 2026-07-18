@@ -323,7 +323,14 @@ class _KokoroBackend:
     ) -> None:
         if stop and stop.is_set():
             return
-        phonemes, _ = self._g2p(text)
+        # misaki[ja]'s JAG2P callable returns a plain phonemes string in 0.9+;
+        # older releases returned (phonemes, tokens). Handle both, otherwise the
+        # unpack raises before Kokoro sees anything — which crashes speech and
+        # silently falls back to macOS 'say', making every voice sound the same
+        # (all four Kokoro chips end up voiced by Kyoko). Regression pin in
+        # tests/test_pipeline_tts.py.
+        result = self._g2p(text)
+        phonemes = result if isinstance(result, str) else result[0]
         samples, sample_rate = self._kokoro.create(
             phonemes, voice=self.voice_name, speed=self._speed, is_phonemes=True,
         )
