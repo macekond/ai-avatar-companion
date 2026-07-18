@@ -383,6 +383,7 @@ function connectWS() {
         break
       case 'profiles':
         renderProfileSelector(msg.list, msg.active)
+        noteActiveKid(msg.active)
         // After '+' added a kid, open their detail once the server confirms
         // the profile file exists (i.e. the slug is now in the list).
         if (pendingOpenDetailForNewSlug && msg.list.includes(msg.active)) {
@@ -398,7 +399,10 @@ function connectWS() {
         if (currentDetailSlug === null && knownActive) openKidDetail(knownActive)
         break
       case 'memory_loaded':
-        // Profile loaded — update active highlight (slug not sent, use active from profiles)
+        // Real display name for the active kid — nicer than a Title-cased slug.
+        lastMemoryName = msg.name
+        activeKidEl.textContent = msg.name
+        activeKidEl.hidden = false
         break
       case 'onboarding_start':
         applyState('idle')
@@ -938,6 +942,32 @@ function displayName(slug) {
   return slug.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
 }
 
+// ── Active-kid pill (top chrome) ───────────────────────────────────
+const activeKidEl = document.getElementById('active-kid')
+let previousActiveSlug = null   // for detecting a real switch vs. first load
+let lastMemoryName = null       // most recent real name from 'memory_loaded'
+
+// Called whenever a 'profiles' broadcast reveals the active slug. Fills in
+// the pill if 'memory_loaded' hasn't beaten us to it yet, and toasts on an
+// actual switch (never on the first-ever profile load).
+function noteActiveKid(slug) {
+  if (!slug) return
+  if (activeKidEl.hidden) {
+    activeKidEl.textContent = displayName(slug)
+    activeKidEl.hidden = false
+  }
+  if (previousActiveSlug !== null && previousActiveSlug !== slug) {
+    showToast(`👋 Switched to ${lastMemoryName || displayName(slug)}`, { duration: 1800 })
+  }
+  previousActiveSlug = slug
+}
+
+activeKidEl.addEventListener('click', () => {
+  if (!knownActive) return
+  toggleSettings(true)
+  openKidDetail(knownActive)
+})
+
 // Latest server-known profile list + active slug — the detail view uses this
 // (a) to size the "Remove this kid" button (hidden when only one kid remains,
 // since the app always needs an active profile to fall back to) and (b) to
@@ -1026,8 +1056,20 @@ function showKidsView() {
   settingsTitleEl.textContent = 'Settings'
 }
 
+// Voice/Level chips (and the language highlight) reflect whatever kid was
+// last loaded — stale until the server's 'settings' message for the new kid
+// arrives. Blank them out so a mid-switch peek never shows the wrong kid's
+// state.
+function resetKidDetailToLoading() {
+  voiceSelectorEl.innerHTML = '<div class="loading-note">Loading…</div>'
+  levelSelectorEl.innerHTML = '<div class="loading-note">Loading…</div>'
+  languageBtns.forEach(b => b.classList.remove('active'))
+  levelHeadingEl.textContent = 'Level'
+}
+
 function openKidDetail(slug) {
   currentDetailSlug = slug
+  resetKidDetailToLoading()
   kidsViewEl.hidden = true
   kidDetailViewEl.hidden = false
   settingsTitleEl.textContent = displayName(slug)

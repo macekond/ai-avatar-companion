@@ -116,6 +116,34 @@ html, body {
 #settings-gear.active  { transform: rotate(60deg); background: rgba(90, 70, 50, 0.82); color: #fff; }
 #transcript-btn.active { background: rgba(90, 70, 50, 0.82); color: #fff; }
 
+/* Active-kid pill: a text chip tucked next to the icon buttons, subtle so it
+   doesn't compete with them. */
+#active-kid {
+  position: fixed;
+  top: 16px;
+  right: 112px;
+  z-index: 40;
+  height: 40px;
+  padding: 0 14px;
+  border: 1.5px solid rgba(150, 120, 90, 0.35);
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.60);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  color: #7a6a5a;
+  font-size: 0.8rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+  max-width: 160px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#active-kid[hidden] { display: none; }
+#active-kid:hover { background: rgba(255, 255, 255, 0.9); color: #4a3a2a; }
+
 /* ── Transcript panel ─────────────────────────────────────── */
 #transcript-panel {
   position: fixed;
@@ -153,6 +181,8 @@ body.transcript-docked #transcript-panel {
 /* Let the list grow to fill the docked column so the panel spans full height. */
 body.transcript-docked #transcript-list { flex: 1 1 auto; }
 .transcript-empty { color: #a08a76; font-style: italic; }
+
+.loading-note { color: #a08a76; font-style: italic; font-size: 0.8rem; }
 
 .turn { padding: 8px 0; border-bottom: 1px solid rgba(150, 120, 90, 0.14); }
 .turn:last-child { border-bottom: none; }
