@@ -5,6 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 ```bash
+make deps                 # .venv/bin/pip install -r requirements-dev.txt — one-off after `python3 -m venv .venv`
 make test                 # .venv/bin/python -m pytest -q — the whole suite, offline
 make dev                  # .venv/bin/python run.py — server + Vite + browser
 make bundle               # packaging/build.sh → Nova.app + DMG (macOS, Apple Silicon)
