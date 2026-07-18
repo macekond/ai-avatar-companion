@@ -51,6 +51,11 @@ let stageReservePx = 0     // px reserved on the right for the transcript panel
 let pttActive = false      // true while Space is held
 let fadeTimer = null       // for bubble fade-out
 
+// Unified startup overlay stays up until BOTH the server and the avatar are
+// ready, so the user sees one continuous loading experience instead of the
+// overlay popping in/out mid-flight (see showSetupOverlay/maybeHideOverlay).
+const readiness = { server: false, avatar: false }
+
 // Target pose (radians) the tick loop eases the head/spine towards —
 // applyState just sets targets, so transitions are always smooth.
 const pose = { headPitch: 0, headRoll: 0, headYaw: 0, spinePitch: 0 }
@@ -179,6 +184,7 @@ async function loadModel() {
   }
 
   applyState('idle')
+  markAvatarReady()
 }
 
 // ── State machine ─────────────────────────────────────────────────────────
@@ -292,7 +298,12 @@ function showError(html) {
 const SETUP_MESSAGES = {
   starting: {
     title: 'Waking Nova up…',
-    body: 'Just a moment!',
+    body: 'Just a moment.',
+    spinner: true,
+  },
+  loading_avatar: {
+    title: "Loading Nova's avatar…",
+    body: 'Almost there.',
     spinner: true,
   },
   ollama_missing: {
@@ -351,21 +362,34 @@ function showSetupOverlay(phase, detail) {
   }
 }
 
-function hideSetupOverlay() {
-  if (setupOverlayEl) {
-    setupOverlayEl.remove()
-    setupOverlayEl = null
-  }
+// Only actually removes the overlay once BOTH the server and the avatar are
+// ready, so the setup_status:ready phase (server-only) doesn't drop the user
+// onto an empty canvas while the VRM is still loading.
+function maybeHideOverlay() {
+  if (!(readiness.server && readiness.avatar) || !setupOverlayEl) return
+  setupOverlayEl.classList.add('fade')
+  const el = setupOverlayEl
+  setupOverlayEl = null
+  setTimeout(() => el.remove(), 400)
+}
+
+function markServerReady() {
+  readiness.server = true
+  if (!readiness.avatar) showSetupOverlay('loading_avatar')
+  maybeHideOverlay()
+}
+
+function markAvatarReady() {
+  readiness.avatar = true
+  maybeHideOverlay()
 }
 
 // ── WebSocket ─────────────────────────────────────────────────────────────
 function connectWS() {
-  labelEl.textContent = 'Connecting to Nova…'
   ws = new WebSocket(WS_URL)
 
   ws.onopen = () => {
     console.log('[ws] connected')
-    labelEl.textContent = 'Connected! Loading avatar…'
     // Tell the server which avatar is on screen so it can load the matching
     // appearance description ("what colour is your hair?"). The key is the VRM
     // basename, derived from the static MODEL_PATH — no model load needed.
@@ -380,6 +404,9 @@ function connectWS() {
         // Language first; the 'settings' message (sent right after) renders the
         // level chips for that language and highlights the active one.
         if (msg.language) setActiveLanguage(msg.language)
+        // Sent right after WS open on a warm server — covers the fast path
+        // where no setup_status ever arrives.
+        markServerReady()
         break
       case 'profiles':
         renderProfileSelector(msg.list, msg.active)
@@ -422,7 +449,7 @@ function connectWS() {
         break
       case 'setup_status':
         if (msg.phase === 'ready') {
-          hideSetupOverlay()
+          markServerReady()
         } else {
           showSetupOverlay(msg.phase, msg.detail)
         }
@@ -1106,6 +1133,9 @@ kidDetailRemoveEl.addEventListener('click', async () => {
 document.getElementById('settings-gear').addEventListener('click', showKidsView, true)
 
 // ── Bootstrap ────────────────────────────────────────────────
+// Show the overlay before anything else so the very first frame is "Waking
+// Nova up…", not an empty canvas — see maybeHideOverlay for when it clears.
+showSetupOverlay('starting')
 initThree()
 connectWS()
 loadModel()   // async; non-blocking

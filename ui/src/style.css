@@ -69,6 +69,16 @@ html, body {
   transition: opacity 0.3s;
 }
 
+/* ── Setup overlay (unified startup loading screen) ───────────────────── */
+#setup-overlay {
+  transition: opacity 0.35s ease;
+}
+
+#setup-overlay.fade {
+  opacity: 0;
+  pointer-events: none;
+}
+
 /* ── Transcript flash ─────────────────────────────────────────────────── */
 #transcript {
   position: fixed;
