@@ -235,8 +235,8 @@ One-time prerequisites:
 ```bash
 xcode-select --install                                   # Apple CLT
 curl --proto '=https' -sSf https://sh.rustup.rs | sh     # Rust toolchain
-python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
-npm --prefix ui install
+python3 -m venv .venv && make deps                       # Python + JP TTS chain
+npm --prefix ui install                                  # frontend deps
 ```
 
 Build:
