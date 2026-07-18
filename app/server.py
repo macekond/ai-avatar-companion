@@ -21,6 +21,7 @@ Browser → server:
   {"type": "set_level",      "level": "B"}    # valid for the active language only
   {"type": "set_language",   "language": "ja"}  # resets level+voice to lang defaults
   {"type": "set_voice",      "voice": "en_US-kristin-medium"}
+  {"type": "preview_voice",  "voice": "en_US-kristin-medium"}  # sample line, doesn't change active voice
   {"type": "switch_profile", "slug": "mia"}   # + optional "language"/"level" to CREATE
   {"type": "delete_profile", "slug": "mia"}
   {"type": "avatar_loaded", "key": "VIPEHero_2707"}   # avatar changed → refresh appearance
@@ -41,6 +42,8 @@ Server → browser:
   {"type": "settings", "language": "en", "languages": ["en","ja"],
                        "levels": ["Pre A","A","B","C1","C2"], "level": "A",
                        "voices": [{"id","label"}, …], "voice": "en_US-kristin-medium"}
+  {"type": "voice_status",   "state": "downloading|loading|ready|error", "voice": …}  # set_voice progress
+  {"type": "preview_status", "state": "downloading|loading|ready|error", "voice": …}  # preview_voice progress
   {"type": "profiles",      "list": ["lily","mia"], "active": "lily"}
   {"type": "profile_error", "message": "Can't remove the only child."}
   {"type": "onboarding_start"}
@@ -116,6 +119,18 @@ def _voices_for(language: str) -> list[dict]:
 
 def _is_valid_voice(language: str, voice_id: str) -> bool:
     return voice_id in _VOICE_IDS.get(language, set())
+
+
+def _language_of_voice(voice_id: str) -> str:
+    """Practice language a catalog voice id belongs to, or "" if unknown.
+
+    Used by preview_voice, which (unlike set_voice) previews a voice outside
+    the active language, so validation can't rely on active_language alone.
+    """
+    for lang, ids in _VOICE_IDS.items():
+        if voice_id in ids:
+            return lang
+    return ""
 
 
 def _default_voice_for(language: str, config: "Config") -> str:
@@ -994,6 +1009,34 @@ async def _session(
                 await send({"type": "voice_status",
                             "state": "ready" if ok else "error",
                             "voice": tts.current_voice or new_voice})
+                continue
+
+            # ── Voice preview: sample line in ANY voice, active voice untouched ──
+            if mtype == "preview_voice":
+                preview_voice_id = msg.get("voice", "")
+                preview_lang = _language_of_voice(preview_voice_id)
+                if not preview_lang:
+                    continue  # unknown voice id — ignore silently, like set_voice
+                sample = system_text("preview_sample", preview_lang)
+                downloading = _voice_download_pending(preview_lang, preview_voice_id)
+                await send({
+                    "type": "preview_status",
+                    "state": "downloading" if downloading else "loading",
+                    "voice": preview_voice_id,
+                })
+                # A preview_voice sent while Nova is mid-reply is naturally
+                # queued, not raced: while _run_speaking() owns the socket the
+                # message lands in its watcher and is buffered for the main
+                # loop, so this handler only ever runs once speaking is done —
+                # it can't interrupt or overlap the active playback.
+                try:
+                    await asyncio.to_thread(tts.preview, sample, preview_voice_id, preview_lang)
+                    await send({"type": "preview_status", "state": "ready",
+                                "voice": preview_voice_id})
+                except Exception as exc:
+                    log.error("Voice preview failed (%s): %s", preview_voice_id, exc)
+                    await send({"type": "preview_status", "state": "error",
+                                "voice": preview_voice_id})
                 continue
 
             # ── Profile switch ───────────────────────────────────────────

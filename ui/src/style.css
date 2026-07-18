@@ -352,6 +352,38 @@ rt {
   transform: scale(1.05);
 }
 .voice-chip { width: 100%; text-align: left; }
+
+/* Row holding a voice chip + its ▶ preview button (see .voice-preview below). */
+.voice-item { display: flex; align-items: center; gap: 6px; width: 100%; }
+.voice-item .voice-chip { flex: 1; width: auto; }
+
+.voice-preview {
+  flex: none;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 1.5px solid rgba(150, 120, 90, 0.35);
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.60);
+  color: #9a8a7a;
+  font-size: 0.65rem;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+.voice-preview:hover {
+  background: rgba(255, 255, 255, 0.85);
+  border-color: rgba(150, 120, 90, 0.6);
+  color: #4a3a2a;
+}
+.voice-preview.loading {
+  opacity: 0.6;
+  cursor: wait;
+  animation: chip-pulse 0.9s ease-in-out infinite;
+}
 .chip.danger {
   background: rgba(200, 70, 55, 0.90);
   border-color: transparent;

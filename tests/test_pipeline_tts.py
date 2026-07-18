@@ -108,6 +108,66 @@ class TestReloadVoice:
         assert tts.current_voice == ""
 
 
+class TestPreview:
+    """TTSPipeline.preview(): the ▶ button behind a voice chip — must never
+    touch the active backend/voice, regardless of which path it takes."""
+
+    def test_same_language_kokoro_reuses_live_backend(self):
+        # Kokoro takes a voice per synthesis call, so previewing another JP
+        # voice while JP is already active should reuse the built backend
+        # rather than constructing a temporary one. Built via __new__ (a real
+        # _KokoroBackend, not a MagicMock) so TTSPipeline.preview's isinstance
+        # check succeeds without needing the real kokoro_onnx/misaki deps.
+        from app.pipeline.tts import _KokoroBackend
+        backend = _KokoroBackend.__new__(_KokoroBackend)
+        backend.speak_streaming = MagicMock()
+        with patch("app.pipeline.tts._create_backend", return_value=backend) as create:
+            tts = TTSPipeline(_config(language="ja", voice="jf_alpha"))
+            tts._language = "ja"
+            tts.preview("hello", "jm_kumo", "ja")
+        create.assert_called_once()   # only the initial _ensure_backend() build
+        backend.speak_streaming.assert_called_once_with(
+            "hello", None, None, voice="jm_kumo")
+
+    def test_different_language_builds_temporary_backend(self):
+        # English preview while the session is Japanese-active: must not
+        # disturb the live (Kokoro) backend.
+        live_backend = MagicMock(voice_name="jf_alpha")
+        temp_backend = MagicMock()
+        calls = [live_backend, temp_backend]
+        with patch("app.pipeline.tts._create_backend",
+                   side_effect=lambda *a, **kw: calls.pop(0)) as create:
+            tts = TTSPipeline(_config(language="ja", voice="jf_alpha"))
+            tts.speak("konnichiwa")   # builds+uses live_backend
+            tts.preview("hello", "en_US-joe-medium", "en")
+        assert create.call_count == 2
+        assert create.call_args.kwargs == {"voice_override": "en_US-joe-medium"}
+        assert create.call_args.args[1] == "en"
+        temp_backend.speak_streaming.assert_called_once_with("hello", None, None)
+        # The live backend is untouched — reused for the next real utterance.
+        assert tts._backend is live_backend
+
+    def test_piper_same_language_still_builds_temporary_backend(self):
+        # Piper is per-voice even within English, so a same-language English
+        # preview must still use a throwaway backend, not the live one.
+        live_backend = MagicMock(voice_name="en_US-kristin-medium")
+        temp_backend = MagicMock()
+        calls = [live_backend, temp_backend]
+        with patch("app.pipeline.tts._create_backend",
+                   side_effect=lambda *a, **kw: calls.pop(0)):
+            tts = TTSPipeline(_config(language="en", voice="en_US-kristin-medium"))
+            tts.speak("hi")
+            tts.preview("hello", "en_US-joe-medium", "en")
+        temp_backend.speak_streaming.assert_called_once_with("hello", None, None)
+        assert tts._backend is live_backend
+
+    def test_empty_text_is_skipped(self):
+        with patch("app.pipeline.tts._create_backend") as create:
+            tts = TTSPipeline(_config())
+            tts.preview("   ", "en_US-joe-medium", "en")
+        create.assert_not_called()
+
+
 class TestKokoroBackend:
     """The regression pins: all 4 Japanese voices ended up sounding identical
     because a misaki API change (0.9+ returns a plain phonemes string, not the

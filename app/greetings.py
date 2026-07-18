@@ -12,6 +12,7 @@ _TEMPLATES: dict[str, dict[str, str]] = {
         "onboarding_ask_age": "What a lovely name, {name}! How old are you?",
         "sorry": "I didn't hear you — try again!",
         "napping": "My brain is napping — try again!",
+        "preview_sample": "Hello! I'm your practice friend. Let's have fun learning!",
     },
     "ja": {
         "greeting_new": "はじめまして、{name}さん！わたしは{avatar}だよ。今日はなにをしたの？",
@@ -21,6 +22,7 @@ _TEMPLATES: dict[str, dict[str, str]] = {
         "onboarding_ask_age": "すてきな名前だね、{name}さん！なんさい？",
         "sorry": "うまくきこえなかったよ、もう一度おしえて！",
         "napping": "あたまがちょっと休みたいって、もう一度おねがい！",
+        "preview_sample": "こんにちは！わたしはあなたの練習の友だちです。楽しく勉強しよう！",
     },
 }
 

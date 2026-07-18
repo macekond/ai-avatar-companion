@@ -161,6 +161,84 @@ class TestSetVoice:
         assert ws.sent_of_type("voice_status")[-1]["state"] == "error"
 
 
+# ── preview_voice: sample line in a voice, active voice untouched ──────────
+
+class TestPreviewVoice:
+    async def test_valid_voice_calls_preview(self, base_config):
+        ws = MockWebSocket([json.dumps({"type": "preview_voice",
+                                        "voice": "en_US-joe-medium"})])
+        tts = _mock_tts()
+        with patch("app.server.voice_is_cached", return_value=True):
+            await _session(ws, base_config, _mock_stt(), _mock_llm(), tts)
+        tts.preview.assert_called_once()
+        args = tts.preview.call_args.args
+        assert args[1:] == ("en_US-joe-medium", "en")
+        statuses = ws.sent_of_type("preview_status")
+        assert statuses[0]["state"] == "loading"
+        assert statuses[-1] == {"type": "preview_status", "state": "ready",
+                                "voice": "en_US-joe-medium"}
+
+    async def test_valid_voice_does_not_change_active_voice(self, base_config):
+        ws = MockWebSocket([json.dumps({"type": "preview_voice",
+                                        "voice": "en_US-joe-medium"})])
+        tts = _mock_tts(current="en_US-kristin-medium")
+        with patch("app.server.voice_is_cached", return_value=True):
+            await _session(ws, base_config, _mock_stt(), _mock_llm(), tts)
+        tts.reload_voice.assert_not_called()
+        assert ws.sent_of_type("voice_status") == []
+        s = ws.sent_of_type("settings")
+        assert s[0]["voice"] == "en_US-kristin-medium"
+
+    async def test_valid_voice_does_not_persist_to_profile(self, base_config, tmp_path):
+        profiles_dir = tmp_path / "profiles"
+        profiles_dir.mkdir()
+        base_config.memory.profiles_dir = str(profiles_dir)
+        mem_mgr = MemoryManager(profiles_dir, "lily")
+        mem_mgr.save(ChildMemory(profile=ChildProfile(name="Lily", language="en")))
+        ws = MockWebSocket([json.dumps({"type": "preview_voice",
+                                        "voice": "en_US-norman-medium"})])
+        tts = _mock_tts()
+        with patch("app.server.voice_is_cached", return_value=True):
+            await _session(ws, base_config, _mock_stt(), _mock_llm(), tts, mem_mgr)
+        assert MemoryManager(profiles_dir, "lily").load().profile.voice == ""
+
+    async def test_uncached_voice_reports_downloading(self, base_config):
+        ws = MockWebSocket([json.dumps({"type": "preview_voice",
+                                        "voice": "en_US-norman-medium"})])
+        tts = _mock_tts()
+        with patch("app.server.voice_is_cached", return_value=False):
+            await _session(ws, base_config, _mock_stt(), _mock_llm(), tts)
+        statuses = ws.sent_of_type("preview_status")
+        assert statuses[0]["state"] == "downloading"
+        assert statuses[-1]["state"] == "ready"
+
+    async def test_japanese_voice_infers_language(self, base_config):
+        ws = MockWebSocket([json.dumps({"type": "preview_voice", "voice": "jm_kumo"})])
+        tts = _mock_tts()
+        with patch("app.server.kokoro_is_cached", return_value=True):
+            await _session(ws, base_config, _mock_stt(), _mock_llm(), tts)
+        tts.preview.assert_called_once()
+        args = tts.preview.call_args.args
+        assert args[1:] == ("jm_kumo", "ja")
+
+    async def test_unknown_voice_ignored(self, base_config):
+        ws = MockWebSocket([json.dumps({"type": "preview_voice", "voice": "../evil"})])
+        tts = _mock_tts()
+        await _session(ws, base_config, _mock_stt(), _mock_llm(), tts)
+        tts.preview.assert_not_called()
+        assert ws.sent_of_type("preview_status") == []
+
+    async def test_preview_failure_reports_error(self, base_config):
+        ws = MockWebSocket([json.dumps({"type": "preview_voice",
+                                        "voice": "en_US-joe-medium"})])
+        tts = _mock_tts()
+        tts.preview.side_effect = RuntimeError("boom")
+        with patch("app.server.voice_is_cached", return_value=True):
+            await _session(ws, base_config, _mock_stt(), _mock_llm(), tts)
+        assert ws.sent_of_type("preview_status")[-1] == {
+            "type": "preview_status", "state": "error", "voice": "en_US-joe-medium"}
+
+
 # ── set_level now persists ─────────────────────────────────────────────────
 
 class TestLevelPersistence:

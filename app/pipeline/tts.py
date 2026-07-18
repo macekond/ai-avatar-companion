@@ -155,6 +155,35 @@ class TTSPipeline:
             return
         self._ensure_backend().speak_streaming(text, amplitude_cb, stop)
 
+    def preview(
+        self,
+        text: str,
+        voice: str,
+        language: str,
+        stop: threading.Event | None = None,
+    ) -> None:
+        """Speak *text* in *voice* (from *language*'s catalog) WITHOUT touching
+        the active voice/backend — used by the Settings panel's per-chip ▶.
+
+        Kokoro takes a voice id per synthesis call, so previewing another
+        Japanese voice while Japanese is already active reuses the live
+        backend (building it first via _ensure_backend() if it hasn't been
+        built yet). Everything else (a different language, or Piper, which is
+        per-voice) builds a throwaway backend for (language, voice) and
+        discards it — never assigned to self._backend, so the currently
+        loaded voice is undisturbed.
+        """
+        text = text.strip()
+        if not text:
+            return
+        if language == self._language:
+            backend = self._ensure_backend()
+            if isinstance(backend, _KokoroBackend):
+                backend.speak_streaming(text, None, stop, voice=voice)
+                return
+        temp = _create_backend(self._config, language, voice_override=voice)
+        temp.speak_streaming(text, None, stop)
+
 
 # ---------------------------------------------------------------------------
 # Backend selection
@@ -320,6 +349,7 @@ class _KokoroBackend:
         text: str,
         amplitude_cb=None,
         stop: threading.Event | None = None,
+        voice: str | None = None,
     ) -> None:
         if stop and stop.is_set():
             return
@@ -331,8 +361,10 @@ class _KokoroBackend:
         # tests/test_pipeline_tts.py.
         result = self._g2p(text)
         phonemes = result if isinstance(result, str) else result[0]
+        # *voice* lets TTSPipeline.preview() synthesise a DIFFERENT Japanese
+        # voice through the already-built backend without swapping it.
         samples, sample_rate = self._kokoro.create(
-            phonemes, voice=self.voice_name, speed=self._speed, is_phonemes=True,
+            phonemes, voice=voice or self.voice_name, speed=self._speed, is_phonemes=True,
         )
         if stop and stop.is_set():
             return

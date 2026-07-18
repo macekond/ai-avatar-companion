@@ -510,6 +510,9 @@ function connectWS() {
       case 'voice_status':
         updateVoiceStatus(msg.state, msg.voice)
         break
+      case 'preview_status':
+        updatePreviewStatus(msg.state, msg.voice)
+        break
       case 'conversation_reset':
         resetConversation()
         break
@@ -822,6 +825,10 @@ function renderVoiceSelector(voices, current) {
   voiceLabels.clear()
   ;(voices || []).forEach(v => {
     voiceLabels.set(v.id, v.label)
+
+    const item = document.createElement('div')
+    item.className = 'voice-item'
+
     const btn = document.createElement('button')
     btn.className = 'chip voice-chip' + (v.id === current ? ' active' : '')
     btn.textContent = v.label
@@ -832,8 +839,35 @@ function renderVoiceSelector(voices, current) {
       btn.classList.add('active', 'loading')
       wsSend({ type: 'set_voice', voice: v.id })
     })
-    voiceSelectorEl.appendChild(btn)
+
+    // ▶ preview: plays a sample line in this voice without selecting it.
+    // stopPropagation isn't needed (it's a sibling, not a child, of btn) but
+    // the click must not bubble into anything that toggles selection.
+    const preview = document.createElement('button')
+    preview.className = 'voice-preview'
+    preview.textContent = '▶'
+    preview.title = `Preview ${v.label}`
+    preview.setAttribute('aria-label', `Preview ${v.label}`)
+    preview.dataset.voice = v.id
+    preview.addEventListener('click', (e) => {
+      e.stopPropagation()
+      preview.classList.add('loading')
+      wsSend({ type: 'preview_voice', voice: v.id })
+    })
+
+    item.append(btn, preview)
+    voiceSelectorEl.appendChild(item)
   })
+}
+
+// preview_status targets a specific voice's ▶ button by id — independent of
+// (and never confused with) set_voice's own voice_status stream, since the
+// server sends a distinct message type for each.
+function updatePreviewStatus(state, voice) {
+  const btn = voiceSelectorEl.querySelector(
+    `.voice-preview[data-voice="${CSS.escape(voice)}"]`)
+  if (!btn) return
+  btn.classList.toggle('loading', state === 'loading' || state === 'downloading')
 }
 
 function updateVoiceStatus(state, voice) {
