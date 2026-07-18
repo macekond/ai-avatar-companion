@@ -556,12 +556,13 @@ async def _session(
     active_level = config.child.level
     active_voice = config.models.tts.voice
 
-    async def _configure_active(mem: Optional[ChildMemory]) -> None:
-        """Point LLM + TTS at *mem*'s profile language/level/voice.
+    def _sync_active_state(mem: Optional[ChildMemory]) -> None:
+        """Point LLM at *mem*'s profile language/level (fast, synchronous).
 
         A level is only valid inside its language's taxonomy, so both move
-        together. TTS reload can load or download a model, so it runs off the
-        event loop and only when the voice/language actually changed.
+        together. This updates active_language/active_level/active_voice and
+        the LLM prompt immediately, so callers can ship settings/memory_loaded
+        messages without waiting on a TTS reload.
         """
         nonlocal active_language, active_level, active_voice
         prof = mem.profile if mem is not None else None
@@ -570,8 +571,26 @@ async def _session(
             active_level = getattr(prof, "level", "") or default_level_for(active_language)
             active_voice = getattr(prof, "voice", "") or _default_voice_for(active_language, config)
         llm.set_language_level(active_language, active_level)
+
+    async def _reload_tts_if_changed() -> None:
+        """Reload the TTS voice off the event loop, only if it actually changed.
+
+        TTS reload can load or download a model (~100-500ms), so this is kept
+        separate from _sync_active_state and awaited only where the delay is
+        acceptable (initial connect, after a swap's fast state update already
+        shipped).
+        """
         if (active_voice, active_language) != (tts.current_voice, tts.language):
             await asyncio.to_thread(tts.reload_voice, active_voice, active_language)
+
+    async def _configure_active(mem: Optional[ChildMemory]) -> None:
+        """Point LLM + TTS at *mem*'s profile language/level/voice (slow path).
+
+        Retained for call sites that need the old synchronous-looking combo of
+        state update + TTS reload in one step.
+        """
+        _sync_active_state(mem)
+        await _reload_tts_if_changed()
 
     async def _send_settings() -> None:
         """Send the Settings-panel state for the ACTIVE profile's language."""
@@ -664,7 +683,10 @@ async def _session(
 
     # Point the pipeline at the loaded profile's language/level/voice before
     # announcing state, so init/settings/telemetry reflect the real profile.
-    await _configure_active(memory)
+    # Awaiting the TTS reload here is fine — the user isn't looking at the UI
+    # yet, so there's no perceived delay to avoid (unlike a profile swap).
+    _sync_active_state(memory)
+    await _reload_tts_if_changed()
 
     # ── On-connect messages ──────────────────────────────────────────────
     log.info("Client connected")
@@ -711,9 +733,9 @@ async def _session(
     # Don't fire the greeting on connect — the app used to start speaking the
     # moment the browser attached, which is startling. Instead, park in an
     # awaiting_start state until the user either taps the on-screen prompt
-    # ({type:"start"}) or holds Space to talk. Profile swaps *within* this
-    # session auto-greet as before, since flipping this flag on first user
-    # gesture means "yes, please talk to me".
+    # ({type:"start"}) or holds Space to talk. A profile swap within this
+    # session parks back in awaiting_start the same way, so switching kids
+    # never talks at the parent unprompted.
     has_greeted = False
     await send({"type": "state", "state": "awaiting_start"})
 
@@ -729,9 +751,13 @@ async def _session(
 
         Drains in-flight extraction tasks first (a slow task from the previous
         child would otherwise call llm.set_memory with the old memory *after*
-        the swap, leaking one child's context into another's). Then rebuilds the
-        pipeline (LLM prompt language/level, STT language, TTS voice) for the new
-        profile via _configure_active().
+        the swap, leaking one child's context into another's). Then syncs the
+        fast LLM state (prompt language/level) via _sync_active_state() and
+        ships settings/memory_loaded/profiles messages immediately — the slower
+        TTS reload (_reload_tts_if_changed()) only happens after, so the UI
+        never sits on "Loading..." waiting for a voice model swap. The session
+        parks back in awaiting_start rather than auto-greeting, consistent
+        with the initial connect.
 
         When the target profile has no file yet:
           - if *create_language* is given (parent chose name+language+level in
@@ -742,7 +768,7 @@ async def _session(
         ``save_current=False`` skips persisting the outgoing memory — used when
         the outgoing profile was just deleted and must not be resurrected.
         """
-        nonlocal mem_mgr, memory, consecutive_short
+        nonlocal mem_mgr, memory, consecutive_short, has_greeted
         await _drain_pending()
         if save_current and memory is not None:
             mem_mgr.prune(memory)
@@ -769,7 +795,7 @@ async def _session(
             ))
             mem_mgr.save(memory)
             llm.set_memory(memory)
-            await _configure_active(memory)
+            _sync_active_state(memory)
             await _send_settings()
             await send({"type": "memory_loaded",
                         "name": memory.profile.name, "age": memory.profile.age,
@@ -777,14 +803,14 @@ async def _session(
                         "level": memory.profile.level})
         elif memory is None:
             # First-run / legacy spoken onboarding.
-            await _configure_active(None)
+            _sync_active_state(None)
             await send({"type": "onboarding_start"})
             memory = await _onboard(mem_mgr)
             llm.set_memory(memory)
-            await _configure_active(memory)
+            _sync_active_state(memory)
             await _send_settings()
         else:
-            await _configure_active(memory)
+            _sync_active_state(memory)
             await _send_settings()
             await send({"type": "memory_loaded",
                         "name": memory.profile.name, "age": memory.profile.age,
@@ -798,7 +824,9 @@ async def _session(
                     "list": mem_mgr.list_profiles(),
                     "active": new_slug})
         await _load_transcript(new_slug)
-        await _send_greeting(config, memory, tts, send, send_from_thread, active_language)
+        await _reload_tts_if_changed()
+        has_greeted = False
+        await send({"type": "state", "state": "awaiting_start"})
 
     async def _run_speaking(speech_fn) -> None:
         """Run speech_fn(stop_event) in a worker thread while watching the socket

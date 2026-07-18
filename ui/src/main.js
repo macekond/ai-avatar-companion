@@ -332,7 +332,33 @@ const SETUP_MESSAGES = {
   },
 }
 
+const SETUP_TIPS = [
+  'こんにちは (konnichiwa) means ‘hello’ in Japanese',
+  'Kanji started as pictures — 山 looks like a mountain!',
+  'English has ~170,000 words; Japanese has ~500,000',
+  "Kids' brains soak up languages faster than adults'",
+  'Japan uses THREE writing systems: hiragana, katakana, and kanji',
+  "The word 'okay' is used in almost every language",
+  'Learning a language rewires how your brain sees the world',
+  'Mistakes are how every fluent speaker got fluent',
+]
+
 let setupOverlayEl = null
+let setupTitleEl = null
+let setupBodyEl = null
+let setupDetailEl = null
+let setupTipEl = null
+let setupTipTimer = null
+let lastSetupTip = null
+
+function pickSetupTip() {
+  if (SETUP_TIPS.length < 2) return SETUP_TIPS[0]
+  let tip
+  do { tip = SETUP_TIPS[Math.floor(Math.random() * SETUP_TIPS.length)] }
+  while (tip === lastSetupTip)
+  lastSetupTip = tip
+  return tip
+}
 
 function showSetupOverlay(phase, detail) {
   const info = SETUP_MESSAGES[phase] || {
@@ -345,15 +371,32 @@ function showSetupOverlay(phase, detail) {
       'position:fixed;inset:0;z-index:1000;display:flex;align-items:center;'
       + 'justify-content:center;background:rgba(255,250,244,0.96);'
       + 'font-family:system-ui;color:#5a3a2a;text-align:center;padding:40px'
+    setupOverlayEl.innerHTML =
+      `<div style="max-width:420px">
+        <div class="setup-spinner" style="margin:0 auto 24px;width:44px;height:44px;border:4px solid #f0d9c8;border-top-color:#d98a5f;border-radius:50%;animation:setup-spin 1s linear infinite"></div>
+        <h2 style="margin:0 0 12px;font-size:1.4rem"></h2>
+        <p style="margin:0;line-height:1.5"></p>
+        <p class="setup-detail" style="margin-top:16px;font-size:0.85rem;opacity:0.7"></p>
+        <div class="setup-tip" style="font-size:0.85rem;color:rgba(90,60,40,0.6);margin-top:20px;min-height:1.4em"></div>
+      </div>`
     document.body.appendChild(setupOverlayEl)
+    setupTitleEl = setupOverlayEl.querySelector('h2')
+    setupBodyEl = setupOverlayEl.querySelector('p')
+    setupDetailEl = setupOverlayEl.querySelector('.setup-detail')
+    setupTipEl = setupOverlayEl.querySelector('.setup-tip')
+    lastSetupTip = null
+    setupTipEl.textContent = pickSetupTip()
+    if (setupTipTimer) clearInterval(setupTipTimer)
+    setupTipTimer = setInterval(() => {
+      if (setupTipEl) setupTipEl.textContent = pickSetupTip()
+    }, 4000)
   }
-  setupOverlayEl.innerHTML =
-    `<div style="max-width:420px">
-      ${info.spinner ? '<div class="setup-spinner" style="margin:0 auto 24px;width:44px;height:44px;border:4px solid #f0d9c8;border-top-color:#d98a5f;border-radius:50%;animation:setup-spin 1s linear infinite"></div>' : ''}
-      <h2 style="margin:0 0 12px;font-size:1.4rem">${info.title}</h2>
-      <p style="margin:0;line-height:1.5">${info.body}</p>
-      ${detail && phase === 'ollama_missing' ? `<p style="margin-top:16px;font-size:0.85rem;opacity:0.7">${detail}</p>` : ''}
-    </div>`
+  setupOverlayEl.querySelector('.setup-spinner').style.display = info.spinner ? '' : 'none'
+  setupTitleEl.innerHTML = info.title
+  setupBodyEl.innerHTML = info.body
+  const showDetail = Boolean(detail && phase === 'ollama_missing')
+  setupDetailEl.textContent = showDetail ? detail : ''
+  setupDetailEl.style.display = showDetail ? '' : 'none'
   if (!document.getElementById('setup-spin-style')) {
     const style = document.createElement('style')
     style.id = 'setup-spin-style'
@@ -370,7 +413,12 @@ function maybeHideOverlay() {
   setupOverlayEl.classList.add('fade')
   const el = setupOverlayEl
   setupOverlayEl = null
-  setTimeout(() => el.remove(), 400)
+  const tipTimer = setupTipTimer
+  setupTipTimer = null
+  setTimeout(() => {
+    el.remove()
+    if (tipTimer) clearInterval(tipTimer)
+  }, 400)
 }
 
 function markServerReady() {
@@ -780,6 +828,8 @@ function renderVoiceSelector(voices, current) {
     btn.dataset.voice = v.id
     btn.addEventListener('click', () => {
       if (v.id === activeVoice) return
+      voiceSelectorEl.querySelectorAll('.voice-chip').forEach(c => c.classList.remove('active'))
+      btn.classList.add('active', 'loading')
       wsSend({ type: 'set_voice', voice: v.id })
     })
     voiceSelectorEl.appendChild(btn)
@@ -805,6 +855,7 @@ function updateVoiceStatus(state, voice) {
     chips.forEach(c => c.classList.toggle('active', c.dataset.voice === voice))
     showToast(`✓ ${name}'s voice ready`, { duration: 1800 })
   } else if (state === 'error') {
+    chips.forEach(c => c.classList.toggle('active', c.dataset.voice === activeVoice))
     showToast(`Couldn't load ${name}'s voice — kept the previous one`, { duration: 3000 })
   }
 }
