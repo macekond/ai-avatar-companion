@@ -102,10 +102,11 @@ html, body {
   opacity: 1;
 }
 
-/* ── Top-right round buttons (transcript + gear) ──────────── */
-#settings-gear, #transcript-btn {
+/* ── Top-right round button (transcript) ────────────────── */
+#transcript-btn {
   position: fixed;
   top: 16px;
+  right: 16px;
   z-index: 40;
   width: 40px;
   height: 40px;
@@ -120,18 +121,17 @@ html, body {
   cursor: pointer;
   transition: background 0.15s, transform 0.2s, color 0.15s;
 }
-#settings-gear  { right: 16px; font-size: 1.15rem; }
-#transcript-btn { right: 64px; }
-#settings-gear:hover, #transcript-btn:hover { background: rgba(255, 255, 255, 0.9); color: #4a3a2a; }
-#settings-gear.active  { transform: rotate(60deg); background: rgba(90, 70, 50, 0.82); color: #fff; }
+#transcript-btn:hover { background: rgba(255, 255, 255, 0.9); color: #4a3a2a; }
 #transcript-btn.active { background: rgba(90, 70, 50, 0.82); color: #fff; }
 
-/* Active-kid pill: a text chip tucked next to the icon buttons, subtle so it
-   doesn't compete with them. */
+/* Active-kid pill — sole entry to Settings (all app settings are per-kid
+   now). Sits just left of the transcript button; opens the current kid's
+   detail view on click, from which "Back" reveals the picker for
+   switching / adding / removing kids. */
 #active-kid {
   position: fixed;
   top: 16px;
-  right: 112px;
+  right: 64px;
   z-index: 40;
   height: 40px;
   padding: 0 14px;
@@ -303,27 +303,7 @@ rt {
   gap: 6px;
 }
 
-/* Credits — legally-required attribution (CC-BY) plus a light second-avatar
-   nod. Kept quiet: small, muted, no chip styling, sits at the panel bottom. */
-.credits-section {
-  margin-top: 6px;
-  padding-top: 12px;
-  border-top: 1px solid rgba(160, 138, 118, 0.25);
-}
-.credits {
-  margin: 0 0 6px;
-  font-size: 0.72rem;
-  line-height: 1.45;
-  color: #8a7460;
-}
-.credits:last-child { margin-bottom: 0; }
-.credits a {
-  color: inherit;
-  text-decoration: underline;
-  text-decoration-color: rgba(160, 138, 118, 0.5);
-}
-.credits a:hover { color: #4a3a2a; }
-.credits em { font-style: italic; }
+/* Credits moved to the setup overlay (ui/src/main.js — .setup-credits). */
 
 /* ── Chips (shared: profile, voice, level) ────────────────── */
 .chip {

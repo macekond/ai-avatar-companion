@@ -371,13 +371,23 @@ function showSetupOverlay(phase, detail) {
       'position:fixed;inset:0;z-index:1000;display:flex;align-items:center;'
       + 'justify-content:center;background:rgba(255,250,244,0.96);'
       + 'font-family:system-ui;color:#5a3a2a;text-align:center;padding:40px'
+    // The credits block satisfies the CC-BY 4.0 §3(a) attribution requirement
+     // for the bundled VIPE Hero avatar every launch (previously in the
+     // Settings panel; moved here when that panel became purely per-kid).
     setupOverlayEl.innerHTML =
-      `<div style="max-width:420px">
+      `<div style="max-width:460px">
         <div class="setup-spinner" style="margin:0 auto 24px;width:44px;height:44px;border:4px solid #f0d9c8;border-top-color:#d98a5f;border-radius:50%;animation:setup-spin 1s linear infinite"></div>
         <h2 style="margin:0 0 12px;font-size:1.4rem"></h2>
         <p style="margin:0;line-height:1.5"></p>
         <p class="setup-detail" style="margin-top:16px;font-size:0.85rem;opacity:0.7"></p>
         <div class="setup-tip" style="font-size:0.85rem;color:rgba(90,60,40,0.6);margin-top:20px;min-height:1.4em"></div>
+        <div class="setup-credits" style="margin-top:36px;font-size:0.72rem;line-height:1.5;color:rgba(90,60,40,0.55)">
+          Avatar: <em>VIPE Hero #2707</em> by
+          <a href="https://vipe.io" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;text-decoration-color:rgba(160,138,118,0.5)">VIPE Heroes Genesis</a>,
+          via <a href="https://www.opensourceavatars.com/en/finder?avatar=vipe-hero-2707" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;text-decoration-color:rgba(160,138,118,0.5)">opensourceavatars.com</a>
+          (ToxSam) — <a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;text-decoration-color:rgba(160,138,118,0.5)">CC BY 4.0</a>.<br>
+          Alt avatar: <em>Olivia</em> by Polygonal Mind, CC0.
+        </div>
       </div>`
     document.body.appendChild(setupOverlayEl)
     setupTitleEl = setupOverlayEl.querySelector('h2')
@@ -583,17 +593,14 @@ window.addEventListener('keyup', (e) => {
   }
 })
 
-// ── Settings panel (gear → Kid / Voice / Level) ───────────────────
-const gearEl        = document.getElementById('settings-gear')
-const panelEl       = document.getElementById('settings-panel')
-const closeEl       = document.getElementById('settings-close')
+// ── Settings panel (opened via the active-kid pill) ───────────────
+const panelEl = document.getElementById('settings-panel')
+const closeEl = document.getElementById('settings-close')
 
 function toggleSettings(open) {
   panelEl.hidden = open === undefined ? !panelEl.hidden : !open
-  gearEl.classList.toggle('active', !panelEl.hidden)
   if (!panelEl.hidden) toggleTranscript(false)   // one panel at a time
 }
-gearEl.addEventListener('click', () => toggleSettings())
 closeEl.addEventListener('click', () => toggleSettings(false))
 window.addEventListener('keydown', (e) => {
   if (e.code === 'Escape' && !panelEl.hidden) toggleSettings(false)
@@ -1212,10 +1219,6 @@ kidDetailRemoveEl.addEventListener('click', async () => {
   // pop back to the kids view immediately for a snappy feel.
   showKidsView()
 })
-
-// Opening the panel from the gear always lands on the kids view, not
-// whichever detail was last open. Predictable entry point.
-document.getElementById('settings-gear').addEventListener('click', showKidsView, true)
 
 // ── Bootstrap ────────────────────────────────────────────────
 // Show the overlay before anything else so the very first frame is "Waking

@@ -9,10 +9,12 @@
   <!-- three.js renders into this canvas -->
   <canvas id="canvas"></canvas>
 
-  <!-- Top-right controls -->
+  <!-- Top-right controls. All app settings live per-kid on the ChildProfile,
+       so the active-kid pill IS the entry point to Settings: click it →
+       that kid's detail view. "Back" from there reveals the kids picker for
+       switching / adding / removing. No separate settings gear. -->
   <button id="active-kid" hidden aria-label="Open kid settings" title="Open kid settings"></button>
   <button id="transcript-btn" aria-label="Conversation" title="Conversation">📝</button>
-  <button id="settings-gear" aria-label="Settings" title="Settings">⚙</button>
 
   <!-- Transcript panel (conversation review) -->
   <div id="transcript-panel" hidden role="dialog" aria-label="Conversation">
@@ -25,41 +27,22 @@
     </div>
   </div>
 
-  <!-- Settings panel (hidden until the gear is tapped). Two views inside:
-       #kids-view — the default: kid picker + add + credits.
-       #kid-detail-view — opens when a kid chip is tapped: their name,
-                          language, voice, level, and delete. Back to kids. -->
+  <!-- Settings panel (hidden until the active-kid pill is tapped). Two views:
+       #kids-view — kid picker + add; reached via "← Back" in the detail view.
+       #kid-detail-view — the default when the panel opens: the active kid's
+                          language, voice, level, and delete. -->
   <div id="settings-panel" hidden role="dialog" aria-label="Settings">
     <div class="settings-header">
       <span id="settings-title">Settings</span>
       <button id="settings-close" aria-label="Close settings">✕</button>
     </div>
 
-    <!-- Kids picker view -->
+    <!-- Kids picker view. Credits moved to the startup loading overlay
+         (CC-BY 4.0 §3(a) attribution is still shown every launch). -->
     <div id="kids-view">
       <section class="settings-section">
         <h3>Kids</h3>
         <div id="profile-selector" role="group" aria-label="Child profiles"></div>
-      </section>
-
-      <!-- Credits — CC-BY 4.0 §3(a) requires attribution to travel with the
-           distributed work. Shown in the default (kids) view of the settings
-           panel, so it's always one tap from the app's chrome. -->
-      <section class="settings-section credits-section">
-        <h3>Credits</h3>
-        <p class="credits">
-          Default avatar: <em>VIPE Hero #2707</em> from
-          <a href="https://vipe.io" target="_blank" rel="noopener">VIPE Heroes Genesis</a>,
-          via
-          <a href="https://www.opensourceavatars.com/en/finder?avatar=vipe-hero-2707"
-             target="_blank" rel="noopener">opensourceavatars.com</a>
-          (ToxSam) — licensed
-          <a href="https://creativecommons.org/licenses/by/4.0/"
-             target="_blank" rel="noopener">CC BY 4.0</a>.
-        </p>
-        <p class="credits">
-          Alternative avatar: <em>Olivia</em> (100 Avatars #056 by Polygonal Mind), CC0.
-        </p>
       </section>
     </div>
 
