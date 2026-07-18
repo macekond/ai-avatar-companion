@@ -9,6 +9,8 @@ make deps                 # .venv/bin/pip install -r requirements-dev.txt — on
 make test                 # .venv/bin/python -m pytest -q — the whole suite, offline
 make dev                  # .venv/bin/python run.py — server + Vite + browser
 make bundle               # packaging/build.sh → Nova.app + DMG (macOS, Apple Silicon)
+make clean                # remove build artefacts + old DMGs (~1.5 GB); keeps Rust cache
+make distclean            # also nuke Rust target/ (~2 GB, forces multi-min rebuild)
 
 .venv/bin/python -m pytest tests/test_memory.py::TestDeleteProfile -q          # one class
 .venv/bin/python -m pytest tests/test_memory.py::TestDeleteProfile::test_x -q  # one test
