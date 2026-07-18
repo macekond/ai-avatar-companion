@@ -483,6 +483,37 @@ body.didnt_catch { background: radial-gradient(ellipse at 50% 30%, #fff4ee 0%, #
 }
 #replay-last:hover { background: #fff; }
 
+/* "Say hi to Nova!" — big, warm call-to-action shown only while the server
+   is parked in awaiting_start. Bigger than the replay pill because it's THE
+   invitation to engage — hard to miss for a child. */
+#start-btn {
+  pointer-events: auto;
+  margin-top: 12px;
+  padding: 14px 28px;
+  border: none;
+  border-radius: 999px;
+  background: linear-gradient(180deg, #ffb3a0 0%, #ff8a72 100%);
+  color: #fff;
+  font: inherit;
+  font-size: 1.25rem;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  cursor: pointer;
+  box-shadow: 0 6px 20px rgba(200, 90, 60, 0.35);
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+  /* Gentle attention pulse so the child knows to tap it. */
+  animation: start-pulse 1.8s ease-in-out infinite;
+}
+#start-btn:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 10px 26px rgba(200, 90, 60, 0.45);
+}
+#start-btn:active { transform: translateY(0); }
+@keyframes start-pulse {
+  0%, 100% { transform: scale(1); }
+  50%      { transform: scale(1.04); }
+}
+
 .replay-btn {
   margin-left: 8px;
   border: none;

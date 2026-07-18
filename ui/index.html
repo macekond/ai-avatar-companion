@@ -98,6 +98,13 @@
   <div id="overlay">
     <div id="sentence-bubble"></div>
     <div id="state-label">Connecting…</div>
+    <!-- Big friendly call-to-action shown while the server is parked in
+         'awaiting_start'. Clicking sends {type:"start"} which triggers the
+         opening greeting. Pressing Space also proceeds (as a normal PTT
+         turn — the child is initiating without wanting a preamble). -->
+    <button id="start-btn" hidden type="button" aria-label="Say hi to Nova">
+      👋 Say hi to Nova!
+    </button>
     <button id="replay-last" hidden aria-label="Hear what Nova said again">🔊 Say it again</button>
   </div>
 

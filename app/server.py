@@ -13,6 +13,7 @@ Memory layer (optional, controlled by config.memory.enabled):
 Message protocol
 ----------------
 Browser → server:
+  {"type": "start"}                          # user tapped "Say hi to Nova!"
   {"type": "ptt_start"}
   {"type": "ptt_stop"}
   {"type": "stop_speak"}                     # barge-in while speaking/thinking
@@ -44,7 +45,7 @@ Server → browser:
   {"type": "profile_error", "message": "Can't remove the only child."}
   {"type": "onboarding_start"}
   {"type": "memory_loaded",  "name": "Lily", "age": 8, "language": "en", "level": "A"}
-  {"type": "state",         "state": "idle|listening|thinking|speaking|didnt_catch"}
+  {"type": "state",         "state": "awaiting_start|idle|listening|thinking|speaking|didnt_catch"}
   {"type": "transcript",    "text": "…"}
   {"type": "sentence",      "text": "…"}
   {"type": "amplitude",     "value": 0–1}
@@ -707,8 +708,15 @@ async def _session(
     if mem_mgr:
         await _load_transcript(mem_mgr.slug)
 
-    # ── Opening greeting ─────────────────────────────────────────────────
-    await _send_greeting(config, memory, tts, send, send_from_thread)
+    # ── Wait for the user to initiate ─────────────────────────────────────
+    # Don't fire the greeting on connect — the app used to start speaking the
+    # moment the browser attached, which is startling. Instead, park in an
+    # awaiting_start state until the user either taps the on-screen prompt
+    # ({type:"start"}) or holds Space to talk. Profile swaps *within* this
+    # session auto-greet as before, since flipping this flag on first user
+    # gesture means "yes, please talk to me".
+    has_greeted = False
+    await send({"type": "state", "state": "awaiting_start"})
 
     # ── Main loop ────────────────────────────────────────────────────────
     async def _swap_profile(
@@ -861,6 +869,15 @@ async def _session(
                 break
             msg = json.loads(raw)
             mtype = msg.get("type")
+
+            # ── User-initiated first greeting ───────────────────────────
+            # The child (or a parent tapping for them) has signalled they're
+            # ready to hear from Nova. Fire the greeting once per session.
+            if mtype == "start" and not has_greeted:
+                has_greeted = True
+                await send({"type": "state", "state": "idle"})
+                await _send_greeting(config, memory, tts, send, send_from_thread)
+                continue
 
             # ── Level change ─────────────────────────────────────────────
             if mtype == "set_level":
@@ -1032,6 +1049,11 @@ async def _session(
 
             if mtype != "ptt_start":
                 continue
+
+            # Child pressed Space before tapping the start prompt — that's a
+            # valid start signal too. Skip the greeting (they're initiating
+            # already) and just proceed to LISTENING.
+            has_greeted = True
 
             # ── LISTENING ────────────────────────────────────────────────
             await send({"type": "state", "state": "listening"})

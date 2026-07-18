@@ -20,11 +20,12 @@ const MODEL_PATH   = '/avatar/VIPEHero_2707.vrm'
 const RECONNECT_MS = 2000
 
 const STATE_LABELS = {
-  idle:        'Hold SPACE to talk!',
-  listening:   '🎤 Listening…',
-  thinking:    '💭 Hmm…',
-  speaking:    '',          // sentence bubble takes over
-  didnt_catch: "I didn't hear you — try again?",
+  awaiting_start: '',       // the #start-btn call-to-action takes over
+  idle:           'Hold SPACE to talk!',
+  listening:      '🎤 Listening…',
+  thinking:       '💭 Hmm…',
+  speaking:       '',       // sentence bubble takes over
+  didnt_catch:    "I didn't hear you — try again?",
 }
 
 // ── DOM refs ──────────────────────────────────────────────────────────────
@@ -33,6 +34,7 @@ const bubbleEl   = document.getElementById('sentence-bubble')
 const labelEl    = document.getElementById('state-label')
 const transcriptEl = document.getElementById('transcript')
 const replayLastEl = document.getElementById('replay-last')
+const startBtnEl   = document.getElementById('start-btn')
 let lastReply = null       // most recent Nova reply text, for "Say it again"
 
 // ── App state ─────────────────────────────────────────────────────────────
@@ -200,6 +202,9 @@ function applyState(newState) {
 
   // State label
   labelEl.textContent = STATE_LABELS[newState] ?? ''
+
+  // Start-button: visible only while parked in awaiting_start.
+  startBtnEl.hidden = newState !== 'awaiting_start'
 
   if (!vrm) return
   if (didntCatchTimer) { clearTimeout(didntCatchTimer); didntCatchTimer = null }
@@ -471,7 +476,12 @@ window.addEventListener('keydown', (e) => {
   if (e.code !== 'Space' || e.repeat) return
   if (pttBlocked()) return
   e.preventDefault()
-  if (state === 'idle' && !pttActive) {
+  if (state === 'awaiting_start') {
+    // First interaction: server accepts a plain ptt_start too (it flips its
+    // has_greeted flag and skips the greeting since the child is initiating).
+    pttActive = true
+    wsSend({ type: 'ptt_start' })
+  } else if (state === 'idle' && !pttActive) {
     pttActive = true
     wsSend({ type: 'ptt_start' })
   } else if (state === 'speaking' || state === 'thinking') {
@@ -590,6 +600,13 @@ function updateReplayLast() {
   replayLastEl.hidden = !(state === 'idle' && lastReply)
 }
 replayLastEl.addEventListener('click', () => requestReplay(lastReply))
+
+// "Say hi to Nova!" — sends {type:"start"} and lets the server fire the
+// opening greeting. Hidden as soon as state leaves awaiting_start.
+startBtnEl.addEventListener('click', () => {
+  if (state !== 'awaiting_start') return
+  wsSend({ type: 'start' })
+})
 
 function addConversationTurn(id, you, nova, youHtml, novaHtml) {
   const empty = transcriptListEl.querySelector('.transcript-empty')
