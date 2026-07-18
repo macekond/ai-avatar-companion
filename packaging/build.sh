@@ -71,8 +71,18 @@ ln -s /Applications "${STAGING}/Applications"
 hdiutil create -volname "Nova" -srcfolder "${STAGING}" -ov -format UDZO "${DMG}"
 rm -rf "${STAGING}"
 
+APP="${BUNDLE_DIR}/macos/Nova.app"
+
 echo
 echo "Done: ${DMG}"
 echo
-echo "Note: the app is ad-hoc signed. Recipients must right-click → Open"
-echo "the first time (or run: xattr -dr com.apple.quarantine Nova.app)."
+echo "Run the fresh build directly (no install needed):"
+echo "    open ${APP}"
+echo
+echo "Or install: open the DMG, drag Nova to Applications:"
+echo "    open ${DMG}"
+echo
+echo "Note: the app is ad-hoc signed. Recipients installing from a DOWNLOADED"
+echo "DMG must right-click → Open the first time (or run:"
+echo "xattr -dr com.apple.quarantine Nova.app). A locally-built .app has no"
+echo "quarantine attribute — the 'open' command above launches it directly."
