@@ -619,13 +619,11 @@ async def _session(
             "voice": active_voice,
         })
 
-    def _with_furigana(msg: dict, *fields: str) -> dict:
-        """For Japanese profiles, annotate the given text *fields* on *msg*
-        with a ``<field>_html`` sibling carrying furigana-tagged HTML.
+    def _with_furigana_sync(msg: dict, *fields: str) -> dict:
+        """Synchronous furigana annotator — safe for thread contexts.
 
-        The UI checks the ``_html`` variant first and falls back to the plain
-        field when absent, so English profiles pass through unchanged. TTS
-        always reads the plain text — <ruby> markup is display-only.
+        For Japanese profiles, annotate the given text *fields* on *msg*
+        with a ``<field>_html`` sibling carrying furigana-tagged HTML.
         """
         if active_language != "ja":
             return msg
@@ -636,6 +634,28 @@ async def _session(
                 if html:
                     msg[f + "_html"] = html
         return msg
+
+    async def _with_furigana(msg: dict, *fields: str) -> dict:
+        """Async furigana annotator — offloads pyopenjtalk to a thread.
+
+        The UI checks the ``_html`` variant first and falls back to the plain
+        field when absent, so English profiles pass through unchanged. TTS
+        always reads the plain text — <ruby> markup is display-only.
+        """
+        if active_language != "ja":
+            return msg
+        for f in fields:
+            text = msg.get(f)
+            if isinstance(text, str) and text:
+                html = await asyncio.to_thread(annotate_for, text, active_language)
+                if html:
+                    msg[f + "_html"] = html
+        return msg
+
+    def _memory_loaded_msg(mem: "ChildMemory") -> dict:
+        return {"type": "memory_loaded",
+                "name": mem.profile.name, "age": mem.profile.age,
+                "language": mem.profile.language, "level": mem.profile.level}
 
     # The LLM pipeline is shared across WebSocket connections, so start each
     # session with a clean history — otherwise a fresh tab (or a second child
@@ -680,13 +700,13 @@ async def _session(
             conv_turn_n = 0
             return
         for t in transcript_store.load():
-            await send(_with_furigana(
+            await send(await _with_furigana(
                 {"type": "conversation_turn", "id": t["id"],
                  "you": t["you"], "nova": t["nova"]},
                 "you", "nova",
             ))
             for c in t["corrections"]:
-                await send(_with_furigana(
+                await send(await _with_furigana(
                     {"type": "conversation_correction", "id": t["id"],
                      "kind": c["kind"], "wrong": c["wrong"], "right": c["right"]},
                     "wrong", "right",
@@ -732,11 +752,7 @@ async def _session(
         llm.set_memory(memory)
     elif memory is not None:
         llm.set_memory(memory)
-        await send({"type": "memory_loaded",
-                    "name": memory.profile.name,
-                    "age": memory.profile.age,
-                    "language": memory.profile.language,
-                    "level": memory.profile.level})
+        await send(_memory_loaded_msg(memory))
     else:
         llm.set_memory(None)
 
@@ -812,10 +828,7 @@ async def _session(
             llm.set_memory(memory)
             _sync_active_state(memory)
             await _send_settings()
-            await send({"type": "memory_loaded",
-                        "name": memory.profile.name, "age": memory.profile.age,
-                        "language": memory.profile.language,
-                        "level": memory.profile.level})
+            await send(_memory_loaded_msg(memory))
         elif memory is None:
             # First-run / legacy spoken onboarding.
             _sync_active_state(None)
@@ -827,10 +840,7 @@ async def _session(
         else:
             _sync_active_state(memory)
             await _send_settings()
-            await send({"type": "memory_loaded",
-                        "name": memory.profile.name, "age": memory.profile.age,
-                        "language": memory.profile.language,
-                        "level": memory.profile.level})
+            await send(_memory_loaded_msg(memory))
         # Send the profiles list AFTER any save/onboarding: on the create/onboard
         # paths the new file didn't exist yet at the top of the function, so a
         # profiles broadcast up there would ship a stale list and the UI would
@@ -886,7 +896,7 @@ async def _session(
         Pure playback: no transcript entry, no memory extraction, no telemetry.
         """
         await send({"type": "state", "state": "speaking"})
-        await send(_with_furigana({"type": "sentence", "text": text}, "text"))
+        await send(await _with_furigana({"type": "sentence", "text": text}, "text"))
 
         def _speak(stop_speaking) -> None:
             tts.speak_streaming(text, amplitude_cb, stop_speaking)
@@ -1172,7 +1182,7 @@ async def _session(
                     telemetry.log_didnt_catch()
                 await send({"type": "state", "state": "didnt_catch"})
                 sorry = system_text("sorry", active_language)
-                await send({"type": "sentence", "text": sorry})
+                await send(await _with_furigana({"type": "sentence", "text": sorry}, "text"))
                 await asyncio.to_thread(tts.speak_streaming, sorry, amplitude_cb)
                 await send({"type": "amplitude", "value": 0.0})
                 await asyncio.sleep(0.4)
@@ -1180,8 +1190,8 @@ async def _session(
                 continue
 
             log.info("Heard: %s", transcript)
-            await send(_with_furigana({"type": "transcript", "text": transcript},
-                                      "text"))
+            await send(await _with_furigana({"type": "transcript", "text": transcript},
+                                            "text"))
 
             word_count = len(transcript.split())
             if word_count <= config.memory.short_response_words:
@@ -1220,14 +1230,15 @@ async def _session(
                         if stop_speaking.is_set():
                             break
                         spoken_sentences.append(sentence)
-                        send_from_thread(_with_furigana(
+                        send_from_thread(_with_furigana_sync(
                             {"type": "sentence", "text": sentence}, "text"))
                         tts.speak_streaming(sentence, _tracked_amp, stop_speaking)
                         send_from_thread({"type": "amplitude", "value": 0.0})
                 except RuntimeError as exc:
                     log.error("Pipeline error: %s", exc)
-                    send_from_thread({"type": "sentence",
-                                      "text": system_text("napping", active_language)})
+                    send_from_thread(_with_furigana_sync(
+                        {"type": "sentence",
+                         "text": system_text("napping", active_language)}, "text"))
 
             # Barge-in while the reply streams: a `stop_speak` sets the shared
             # stop event (TTS aborts, loop breaks after the current sentence);
@@ -1243,7 +1254,7 @@ async def _session(
             if spoken_sentences and transcript:
                 conv_turn_n += 1
                 nova_reply = " ".join(spoken_sentences)
-                await send(_with_furigana({
+                await send(await _with_furigana({
                     "type": "conversation_turn",
                     "id": conv_turn_n,
                     "you": transcript,
@@ -1280,7 +1291,7 @@ async def _session(
                             # Patch the transcript entry with the correction so
                             # the tab can highlight what was gently fixed.
                             ptype, wrong, right = parsed
-                            send_from_thread(_with_furigana({
+                            send_from_thread(_with_furigana_sync({
                                 "type": "conversation_correction",
                                 "id": _conv_id,
                                 "kind": ptype,

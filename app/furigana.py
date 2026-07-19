@@ -17,6 +17,7 @@ importable — Japanese still works, it just displays without furigana.
 """
 from __future__ import annotations
 
+import functools
 import re
 
 # Kanji covers CJK Unified Ideographs (main block) + a few extended blocks that
@@ -58,6 +59,7 @@ def _escape(s: str) -> str:
              .replace(">", "&gt;"))
 
 
+@functools.lru_cache(maxsize=512)
 def annotate(text: str) -> str:
     """Return *text* with kanji morphemes wrapped in ``<ruby>…<rt>…</rt></ruby>``.
 

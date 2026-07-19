@@ -76,6 +76,7 @@ class TTSPipeline:
         # backend up-front for that profile; otherwise the first greeting
         # triggers the build.
         self._backend = None
+        self._preview_cache: dict[tuple[str, str], object] = {}
 
     @property
     def current_voice(self) -> str:
@@ -125,6 +126,8 @@ class TTSPipeline:
         # Report whatever the backend actually loaded ("" for a SystemTTS
         # fallback), so current_voice tells the truth.
         self._voice_name = getattr(new_backend, "voice_name", "")
+        if voice_name and isinstance(new_backend, _SystemTTSBackend):
+            return False
         return True
 
     def speak(self, text: str, stop: threading.Event | None = None) -> None:
@@ -181,8 +184,14 @@ class TTSPipeline:
             if isinstance(backend, _KokoroBackend):
                 backend.speak_streaming(text, None, stop, voice=voice)
                 return
-        temp = _create_backend(self._config, language, voice_override=voice)
-        temp.speak_streaming(text, None, stop)
+        key = (language, voice)
+        backend = self._preview_cache.get(key)
+        if backend is None:
+            backend = _create_backend(self._config, language, voice_override=voice)
+            if len(self._preview_cache) >= 4:
+                self._preview_cache.pop(next(iter(self._preview_cache)))
+            self._preview_cache[key] = backend
+        backend.speak_streaming(text, None, stop)
 
 
 # ---------------------------------------------------------------------------
