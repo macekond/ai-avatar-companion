@@ -89,7 +89,24 @@ echo "STAGING=${STAGING} on volume: $(df -h "${STAGING}" | tail -n1)"
 cp -R "${BUNDLE_DIR}/macos/Nova.app" "${STAGING}/"
 ln -s /Applications "${STAGING}/Applications"
 _report_disk "staged, before hdiutil"
-hdiutil create -volname "Nova" -srcfolder "${STAGING}" -ov -format UDZO "${DMG}"
+
+# hdiutil's auto-sizing pass (no explicit -size) has been observed to fail
+# with a spurious "No space left on device" on GitHub's macOS runners even
+# with tens of GB genuinely free — a known interaction between the DMG's
+# temporary read-write image and Spotlight indexing the freshly-mounted
+# volume mid-build. Pre-computing an explicit -size sidesteps the flaky
+# auto-sizing path entirely; -nospotlight stops mdworker from touching the
+# temp volume; the retry loop is a defensive net in case it's transient.
+SIZE_MB=$(( $(du -sm "${STAGING}" | cut -f1) + 200 ))
+for attempt in 1 2 3; do
+  if hdiutil create -volname "Nova" -srcfolder "${STAGING}" -ov -format UDZO \
+       -size "${SIZE_MB}m" -nospotlight "${DMG}"; then
+    break
+  fi
+  echo "hdiutil attempt ${attempt} failed" >&2
+  [[ "${attempt}" == 3 ]] && exit 1
+  sleep 5
+done
 rm -rf "${STAGING}"
 
 APP="${BUNDLE_DIR}/macos/Nova.app"
