@@ -1,15 +1,20 @@
 name: Tag & Release
 
 # On every push to main:
-#   1. Tag job (Linux): create v<version> from tauri.conf.json if it's not
-#      already on this commit — safety net so a version bump landing on main
-#      can never ship untagged.
+#   1. Tag job (Linux): create v<version> from tauri.conf.json, or move it to
+#      this commit — safety net so a version bump landing on main can never
+#      ship untagged. The tag is provisional (movable) until a GitHub Release
+#      actually exists under it; only then does it become immutable. Without
+#      this, a CI-only fix commit (build script, workflow) landing on main
+#      before the release job ever succeeds would leave v<version> pinned to
+#      the earlier, broken-build commit forever.
 #   2. Release job (macOS): if no GitHub Release exists for this tag yet, build
 #      the DMG via packaging/build.sh and publish a Release with the merged
 #      PR's body (the release-PR template) as the notes, DMG attached.
 #
-# Idempotent. A repeat push at the same version no-ops both jobs. A manual tag
-# pushed before the merge just short-circuits the tag job.
+# Idempotent once released. A repeat push at the same version no-ops both jobs
+# after the Release exists; before that, the tag job keeps re-pointing the tag
+# and the release job keeps retrying the build.
 #
 # Public repo → macOS runner minutes are free.
 on:
@@ -42,18 +47,23 @@ jobs:
           [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::Bad version: $VERSION"; exit 1; }
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-      - name: Create v<version> tag if missing
+      - name: Create or move v<version> tag (immutable once released)
         env:
           VERSION: ${{ steps.v.outputs.version }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          if git rev-parse --verify --quiet "refs/tags/v${VERSION}" >/dev/null; then
-            echo "Tag v${VERSION} already exists — nothing to do."
+          if gh release view "v${VERSION}" -R "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "Release v${VERSION} already published — tag is immutable, nothing to do."
             exit 0
           fi
+          # No Release exists under this tag yet, so it's still provisional —
+          # (re)point it at this commit. Covers both "tag doesn't exist yet"
+          # and "tag exists but points at an earlier, unreleased commit"
+          # (e.g. a CI-fix commit landed after a failed release attempt).
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -a "v${VERSION}" -m "Nova v${VERSION}"
-          git push origin "v${VERSION}"
+          git tag -f -a "v${VERSION}" -m "Nova v${VERSION}"
+          git push origin "v${VERSION}" --force
 
   release:
     name: build DMG & publish release
