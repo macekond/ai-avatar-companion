@@ -7,7 +7,21 @@ python-dotenv>=1.0.0
 faster-whisper>=1.0.0
 numpy>=1.24.0
 sounddevice>=0.4.6
-piper-tts>=1.2.0
+piper-tts>=1.2.0          # English TTS voices (Piper has no usable Japanese voice)
+
+# Japanese TTS — Kokoro-82M (Apache-2.0), offline neural, on onnxruntime.
+# The Japanese g2p chain is misaki[ja] → pyopenjtalk → unidic-lite (BSD-family).
+# pyopenjtalk is listed explicitly because misaki[ja]'s extras don't reliably
+# pull it — without it in the venv, the frozen .app has no Japanese g2p and
+# Kokoro silently falls back to macOS 'say -v Kyoko' (this once made all four
+# Japanese voice chips sound identical; see 52a1f88 and tests/test_pipeline_tts.py).
+# Both Kokoro model files download on first Japanese use; see app/pipeline/tts.py.
+kokoro-onnx>=0.4.0
+misaki[ja]>=0.7.0
+pyopenjtalk>=0.4.0
 
 # Phase 3 — WebSocket server
 websockets>=12.0
+
+# Multilingual practice (English + Japanese): see app/levels.py + config.yaml.
+# STT uses the multilingual faster-whisper "small" model (not small.en).

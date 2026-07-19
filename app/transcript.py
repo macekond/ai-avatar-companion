@@ -66,7 +66,10 @@ class TranscriptStore:
         try:
             self._dir.mkdir(parents=True, exist_ok=True)
             with open(self._path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(record) + "\n")
+                # ensure_ascii=False keeps Japanese (and other non-ASCII) text
+                # readable on disk instead of \uXXXX escapes, matching
+                # MemoryManager.save(). Round-trips identically either way.
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
         except Exception as exc:
             # History is a nicety, never worth crashing a turn over.
             log.debug("Transcript append failed (non-fatal): %s", exc)

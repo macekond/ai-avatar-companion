@@ -9,9 +9,12 @@
   <!-- three.js renders into this canvas -->
   <canvas id="canvas"></canvas>
 
-  <!-- Top-right controls -->
+  <!-- Top-right controls. All app settings live per-kid on the ChildProfile,
+       so the active-kid pill IS the entry point to Settings: click it →
+       that kid's detail view. "Back" from there reveals the kids picker for
+       switching / adding / removing. No separate settings gear. -->
+  <button id="active-kid" hidden aria-label="Open kid settings" title="Open kid settings"></button>
   <button id="transcript-btn" aria-label="Conversation" title="Conversation">📝</button>
-  <button id="settings-gear" aria-label="Settings" title="Settings">⚙</button>
 
   <!-- Transcript panel (conversation review) -->
   <div id="transcript-panel" hidden role="dialog" aria-label="Conversation">
@@ -24,39 +27,68 @@
     </div>
   </div>
 
-  <!-- Settings panel (hidden until the gear is tapped) -->
+  <!-- Settings panel (hidden until the active-kid pill is tapped). Two views:
+       #kids-view — kid picker + add; reached via "← Back" in the detail view.
+       #kid-detail-view — the default when the panel opens: the active kid's
+                          language, voice, level, and delete. -->
   <div id="settings-panel" hidden role="dialog" aria-label="Settings">
     <div class="settings-header">
-      <span>Settings</span>
+      <span id="settings-title">Settings</span>
       <button id="settings-close" aria-label="Close settings">✕</button>
     </div>
 
-    <section class="settings-section">
-      <h3>Kid</h3>
-      <div id="profile-selector" role="group" aria-label="Child profile"></div>
-    </section>
+    <!-- Kids picker view. Credits moved to the startup loading overlay
+         (CC-BY 4.0 §3(a) attribution is still shown every launch). -->
+    <div id="kids-view">
+      <section class="settings-section">
+        <h3>Kids</h3>
+        <div id="profile-selector" role="group" aria-label="Child profiles"></div>
+      </section>
+    </div>
 
-    <section class="settings-section">
-      <h3>Voice</h3>
-      <div id="voice-selector" role="group" aria-label="Voice"></div>
-    </section>
+    <!-- Kid detail view -->
+    <div id="kid-detail-view" hidden>
+      <button id="kid-detail-back" class="chip" aria-label="Back to kids">← Back</button>
 
-    <section class="settings-section">
-      <h3>English level</h3>
-      <div id="level-selector" role="group" aria-label="English level">
-        <button class="chip" data-level="Pre A">Pre A</button>
-        <button class="chip" data-level="A">A</button>
-        <button class="chip" data-level="B">B</button>
-        <button class="chip" data-level="C1">C1</button>
-        <button class="chip" data-level="C2">C2</button>
-      </div>
-    </section>
+      <section class="settings-section">
+        <h3>Language</h3>
+        <div id="language-selector" role="group" aria-label="Language">
+          <button class="chip" data-language="en">English</button>
+          <button class="chip" data-language="ja" lang="ja">日本語</button>
+        </div>
+      </section>
+
+      <section class="settings-section">
+        <h3>Voice</h3>
+        <div id="voice-selector" role="group" aria-label="Voice"></div>
+      </section>
+
+      <section class="settings-section">
+        <!-- Heading + chips are filled in per the active profile's language
+             (CEFR for English, JLPT for Japanese) from the server's settings. -->
+        <h3 id="level-heading">Level</h3>
+        <div id="level-selector" role="group" aria-label="Level"></div>
+      </section>
+
+      <section class="settings-section detail-danger">
+        <button id="kid-detail-remove" class="chip danger" type="button">
+          Remove this kid
+        </button>
+      </section>
+    </div>
   </div>
 
   <!-- Text overlay: sentence bubble + state label -->
   <div id="overlay">
     <div id="sentence-bubble"></div>
     <div id="state-label">Connecting…</div>
+    <!-- Big friendly call-to-action shown while the server is parked in
+         'awaiting_start'. Clicking sends {type:"start"} which triggers the
+         opening greeting. Pressing Space also proceeds (as a normal PTT
+         turn — the child is initiating without wanting a preamble). -->
+    <button id="start-btn" hidden type="button" aria-label="Say hi to Nova">
+      👋 Say hi to Nova!
+    </button>
     <button id="replay-last" hidden aria-label="Hear what Nova said again">🔊 Say it again</button>
   </div>
 
@@ -69,6 +101,9 @@
     <div id="modal" role="dialog" aria-modal="true" aria-labelledby="modal-message">
       <p id="modal-message"></p>
       <input id="modal-input" type="text" autocomplete="off" hidden />
+      <!-- Choice chips (e.g. pick a language when adding a child). Populated by
+           openModal({choices:[…]}); hidden for plain prompt/confirm dialogs. -->
+      <div id="modal-choices" role="group" hidden></div>
       <div id="modal-actions">
         <button id="modal-cancel" class="chip" type="button">Cancel</button>
         <button id="modal-confirm" class="chip active" type="button">OK</button>

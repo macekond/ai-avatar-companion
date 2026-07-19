@@ -1,0 +1,144 @@
+name: Tag & Release
+
+# On every push to main:
+#   1. Tag job (Linux): create v<version> from tauri.conf.json if it's not
+#      already on this commit — safety net so a version bump landing on main
+#      can never ship untagged.
+#   2. Release job (macOS): if no GitHub Release exists for this tag yet, build
+#      the DMG via packaging/build.sh and publish a Release with the merged
+#      PR's body (the release-PR template) as the notes, DMG attached.
+#
+# Idempotent. A repeat push at the same version no-ops both jobs. A manual tag
+# pushed before the merge just short-circuits the tag job.
+#
+# Public repo → macOS runner minutes are free.
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  # Serialise: prevents two rapid merges from racing over the release upload.
+  group: tag-release
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    name: tag v<version> if missing
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # required to push tags
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full tag history so `git rev-parse` sees existing tags.
+          fetch-depth: 0
+
+      - name: Read version from tauri.conf.json
+        id: v
+        run: |
+          VERSION=$(python3 -c "import json;print(json.load(open('src-tauri/tauri.conf.json'))['version'])")
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::Bad version: $VERSION"; exit 1; }
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Create v<version> tag if missing
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          if git rev-parse --verify --quiet "refs/tags/v${VERSION}" >/dev/null; then
+            echo "Tag v${VERSION} already exists — nothing to do."
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "v${VERSION}" -m "Nova v${VERSION}"
+          git push origin "v${VERSION}"
+
+  release:
+    name: build DMG & publish release
+    needs: tag
+    # macos-14 = Apple Silicon runner (matches packaging/build.sh's arm64 target).
+    runs-on: macos-14
+    permissions:
+      contents: write   # required to create the GitHub Release
+    env:
+      VERSION: ${{ needs.tag.outputs.version }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Skip if release for v<version> already exists
+        id: check
+        run: |
+          if gh release view "v${VERSION}" -R "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "Release v${VERSION} already published — no-op."
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.check.outputs.exists == 'false'
+        with:
+          # Pin to the exact commit that triggered this run (the tag's target),
+          # not `main` — someone could push again before this job starts.
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: Compose release notes from merged PR body
+        if: steps.check.outputs.exists == 'false'
+        run: |
+          # Ask GitHub which PR (if any) contributed this commit — works for
+          # merge commits and squash merges. Falls back to the tag message on
+          # direct pushes to main (unusual but shouldn't break the release).
+          BODY=$(gh api "repos/${{ github.repository }}/commits/${{ github.sha }}/pulls" \
+                  --jq '.[0].body // empty' || true)
+          if [[ -z "$BODY" ]]; then
+            BODY=$(git tag -l --format='%(contents)' "v${VERSION}")
+          fi
+          # --notes-file handles multi-line bodies safely (env vars would need
+          # extra quoting).
+          printf '%s\n' "$BODY" > release-notes.md
+
+      - name: Set up Python
+        if: steps.check.outputs.exists == 'false'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Set up Node
+        if: steps.check.outputs.exists == 'false'
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: Install Python deps (venv the build script expects)
+        if: steps.check.outputs.exists == 'false'
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install --upgrade pip
+          .venv/bin/pip install -r requirements-dev.txt
+
+      - name: Install UI deps
+        if: steps.check.outputs.exists == 'false'
+        run: npm --prefix ui install
+
+      - name: Build DMG
+        if: steps.check.outputs.exists == 'false'
+        # build.sh detects the v<version> tag on HEAD + clean tree and emits
+        # Nova_<version>_aarch64.dmg (release name, no timestamp).
+        run: bash packaging/build.sh
+
+      - name: Publish GitHub Release with DMG
+        if: steps.check.outputs.exists == 'false'
+        run: |
+          DMG="src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/Nova_${VERSION}_aarch64.dmg"
+          [[ -f "$DMG" ]] || { echo "::error::DMG not found at $DMG"; ls -R src-tauri/target/aarch64-apple-darwin/release/bundle || true; exit 1; }
+          gh release create "v${VERSION}" \
+            --title "Nova v${VERSION}" \
+            --notes-file release-notes.md \
+            -R "${{ github.repository }}" \
+            "$DMG"

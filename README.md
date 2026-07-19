@@ -1,6 +1,10 @@
 # AI Avatar Companion
 
-A local-first English-practice companion for children. A child speaks to an animated 3D avatar that listens, thinks, and replies — all running on-device. No cloud, no accounts, no ads.
+[![Latest release](https://img.shields.io/github/v/release/macekond/ai-avatar-companion?label=release&sort=semver)](https://github.com/macekond/ai-avatar-companion/releases/latest)
+
+A local-first language-practice companion for children (English or Japanese). A child speaks to an animated 3D avatar that listens, thinks, and replies — all running on-device. No cloud, no accounts, no ads.
+
+**Download:** [latest release](https://github.com/macekond/ai-avatar-companion/releases/latest) (macOS, Apple Silicon `.dmg`) — or [build it yourself](#building-the-macos-app-dmg).
 
 > See [`ai-avatar-companion-design.md`](ai-avatar-companion-design.md) for the full design document.
 
@@ -9,18 +13,19 @@ A local-first English-practice companion for children. A child speaks to an anim
 ## How it works
 
 ```
-Space held → mic records → Whisper STT → Llama 3.2 (Ollama) → Piper TTS → avatar speaks
+Space held → mic records → Whisper STT → Llama 3.2 (Ollama) → TTS → avatar speaks
 ```
 
-The LLM streams sentences to TTS as they generate, so the first word is heard in ~1–1.5 s. A WebSocket bridge connects the Python pipeline to the browser-rendered VRM avatar.
+The LLM streams sentences to TTS as they generate, so the first word is heard in ~1–1.5 s. A WebSocket bridge connects the Python pipeline to the browser-rendered VRM avatar. Each child profile picks its own practice language; the TTS backend follows it (Piper for English, Kokoro for Japanese).
 
 ```
 Browser (Vite + three.js + @pixiv/three-vrm)
   └── WebSocket ws://localhost:8765
         └── Python server (asyncio + websockets)
-              ├── faster-whisper  (STT, local)
+              ├── faster-whisper  (STT, local, multilingual)
               ├── Ollama          (LLM, local)
-              └── Piper TTS       (TTS, local)
+              ├── Piper TTS       (English voices, local)
+              └── Kokoro TTS      (Japanese voices, local, on-demand)
 ```
 
 ---
@@ -72,10 +77,11 @@ cd ui && npm install && cd ..
 
 | Model | Size | When |
 |---|---|---|
-| Whisper `small.en` | ~500 MB | First `--voice` or `run.py` run |
-| Piper `en_US-kristin-medium` | ~63 MB | First TTS use |
+| Whisper `small` (multilingual) | ~500 MB | First `--voice` or `run.py` run |
+| Piper `en_US-kristin-medium` | ~63 MB | First TTS use on an English profile |
+| Kokoro-82M + JP voices | ~330 MB | First TTS use on a Japanese profile |
 
-Both are cached to `~/.cache/` / `~/.local/share/piper/` after the initial download.
+Cached under `~/.cache/` (Whisper), `~/.local/share/piper/` (English voices), and `~/.local/share/kokoro/` (Japanese model + voices). Only English *or* Japanese needs its TTS pack — an English-only setup never pulls Kokoro, and vice versa.
 
 ---
 
@@ -116,22 +122,25 @@ All settings live in `config.yaml`:
 
 ```yaml
 child:
-  name: "Lily"          # used in the system prompt
+  name: "Lily"          # seed name for the first-run profile
+  language: "en"        # seed language: "en" (English) or "ja" (Japanese)
+  level: "A"            # seed level: CEFR (en) or JLPT (ja) — per-profile at runtime
 
 personality:
   avatar_name: "Nova"
-  system_prompt: |      # edit to tune personality and rules
-
+  system_prompt: |      # language-neutral — the practice language + lock are
+                        # added per profile from app/levels.py; edit to tune tone
 models:
   stt:
-    model: small.en     # try base.en (faster) or medium.en (more accurate)
+    model: small        # multilingual; small.en (English-only) can't do Japanese
     no_speech_threshold: 0.6
   llm:
     model: llama3.2:3b  # any Ollama model
     temperature: 0.7
     max_response_tokens: 120
   tts:
-    voice: en_US-kristin-medium   # changeable in the Settings panel
+    voice: en_US-kristin-medium   # English seed voice (per-profile at runtime;
+                                  # Japanese profiles use a Kokoro voice)
     length_scale: 1.1   # > 1 = slower speech
 
 audio:
@@ -155,11 +164,12 @@ Then set `privacy.allow_cloud_fallback: true` in `config.yaml`. Audio never leav
 
 Tap the ⚙ gear (top-right) to open the settings panel:
 
-- **Kid** — switch between child profiles, add a new one, or remove one (tap the ✕ next to a name). Each child has its own memory; the last remaining profile can't be removed.
-- **Voice** — change the Piper voice; it reloads live (no restart) and is remembered.
-- **English level** — Pre A / A / B / C1 / C2, adjusts vocabulary and correction intensity.
+- **Kid** — switch between child profiles, add a new one, or remove one (tap the ✕ next to a name). Adding a new child asks for name + practice language (English or Japanese). Each child has its own memory, language, level, and voice; the last remaining profile can't be removed.
+- **Language** — English or Japanese. Switching resets the level and voice chips to that language's defaults; the STT model, LLM prompt, and TTS backend all follow.
+- **Voice** — change the voice; it reloads live (no restart) and is remembered on the profile. Voice catalogs are language-scoped: English profiles pick a Piper voice, Japanese profiles pick a Kokoro voice.
+- **Level** — five bands adjusting vocabulary and correction intensity: `Pre A / A / B / C1 / C2` (CEFR) for English or `N5 / N4 / N3 / N2 / N1` (JLPT) for Japanese.
 
-Voice and level are persisted to `~/.ai-avatar/settings.json` and applied on the next launch, so they survive restarts without editing `config.yaml`.
+Language, level, and voice are per-profile — they live on `~/.ai-avatar/profiles/<slug>.json` and survive restarts without editing `config.yaml`.
 
 Tap the 📝 button (top-right) to open the **Conversation** panel — a running transcript of the session where each grammar fix is shown inline (e.g. ~~goed~~ → **went** *(past tense)*), so a parent or child can review what was gently corrected.
 
@@ -179,7 +189,7 @@ Only permissively-licensed voices (public domain / CC0) are offered — see [Lic
 │   └── pipeline/
 │       ├── llm.py         # Ollama streaming → sentence iterator
 │       ├── stt.py         # faster-whisper + push-to-talk recording
-│       └── tts.py         # Piper synthesis + amplitude streaming
+│       └── tts.py         # Piper (en) / Kokoro (ja) + amplitude streaming
 ├── ui/
 │   ├── index.html
 │   ├── src/
@@ -214,7 +224,7 @@ Background colour shifts with each state.
 - ✅ **Phase 1** — Text chat, sentence-streaming LLM pipeline
 - ✅ **Phase 2** — Voice loop: faster-whisper STT + Piper TTS
 - ✅ **Phase 3** — VRM avatar (three-vrm) + WebSocket bridge
-- 🔶 **Phase 4** — Polish: ✅ Tauri shell / macOS bundle · ✅ settings panel (kid / voice / level) · ⬜ content filter, session limits, custom Nova model
+- 🔶 **Phase 4** — Polish: ✅ Tauri shell / macOS bundle · ✅ settings panel (kid / language / voice / level) · ✅ multilingual (English + Japanese, per profile) · ⬜ content filter, session limits, custom Nova model
 
 ---
 
@@ -225,8 +235,8 @@ One-time prerequisites:
 ```bash
 xcode-select --install                                   # Apple CLT
 curl --proto '=https' -sSf https://sh.rustup.rs | sh     # Rust toolchain
-python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
-npm --prefix ui install
+python3 -m venv .venv && make deps                       # Python + JP TTS chain
+npm --prefix ui install                                  # frontend deps
 ```
 
 Build:
@@ -259,9 +269,14 @@ Notes for recipients (Apple Silicon Macs only):
 - **Default model — VIPE Hero #2707** ([Open Source Avatars](https://www.opensourceavatars.com/en/finder?avatar=vipe-hero-2707)) — **CC-BY**: free to use, modify, and redistribute *with attribution*. Attribution: *VIPE Heroes Genesis by VIPE ([vipe.io](https://vipe.io)), via opensourceavatars.com (ToxSam).*
 - **Alternative — `Olivia.vrm`** (100 Avatars #056 by Polygonal Mind, via [Open Source Avatars](https://www.opensourceavatars.com/)) — **CC0** (verified in the file's own VRM metadata): public domain, free to use, modify, and redistribute, no attribution required.
 
-**Voice (Piper):**
+**Voice — English (Piper):**
 - **Piper engine** (`piper-tts`) — **GPL-3.0-or-later**. Bundling it in the distributed app makes the app carry GPL obligations; fine for this open-source project.
 - **Shipped voices** are all permissively licensed: `kristin`, `ljspeech`, `norman` (public domain, LibriVox / LJ-Speech) and `joe` (CC0). The Blizzard-licensed `en_US-lessac` (research-use-only) is deliberately **not** offered.
+
+**Voice — Japanese (Kokoro):**
+- **Kokoro-82M** (`kokoro-onnx`) — **Apache-2.0**, free for commercial use and redistribution; runs offline on onnxruntime. Piper has no usable Japanese voice, so Japanese profiles use Kokoro. Shipped voices: `jf_alpha`, `jf_gongitsune`, `jf_nezumi`, `jm_kumo`.
+- **Japanese g2p** — `misaki[ja]` → `pyopenjtalk` / OpenJTalk / hts_engine / `unidic` — all **BSD-family** (redistribution-for-a-fee OK).
+- *Verify the pinned Kokoro model/voice revision's licence at bundle time (as done for Piper), and bundle the OpenJTalk/unidic dictionary so the packaged app needs no network for Japanese.*
 
 **Everything else** — faster-whisper, Ollama client, websockets, etc. — is MIT / Apache 2.0 / BSD.
 

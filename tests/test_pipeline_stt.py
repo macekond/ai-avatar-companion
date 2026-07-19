@@ -77,6 +77,27 @@ class TestLengthGuard:
         stt._model.transcribe.assert_called_once()
 
 
+class TestTranscribeLanguage:
+    def test_explicit_language_is_passed_to_model(self):
+        stt = make_stt()
+        stt._model.transcribe.return_value = ([], MagicMock())
+        stt.transcribe(audio(), language="ja")
+        assert stt._model.transcribe.call_args.kwargs["language"] == "ja"
+
+    def test_defaults_to_config_child_language(self):
+        stt = make_stt()
+        stt._config.child = ChildConfig(language="ja")
+        stt._model.transcribe.return_value = ([], MagicMock())
+        stt.transcribe(audio())
+        assert stt._model.transcribe.call_args.kwargs["language"] == "ja"
+
+    def test_defaults_to_english_when_unset(self):
+        stt = make_stt()
+        stt._model.transcribe.return_value = ([], MagicMock())
+        stt.transcribe(audio())
+        assert stt._model.transcribe.call_args.kwargs["language"] == "en"
+
+
 # ── Cache detection (used by the setup screen) ──────────────────────────────
 
 class TestWhisperIsCached:

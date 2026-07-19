@@ -100,6 +100,15 @@ class ChildProfile:
     name: str
     age: Optional[int] = None
     first_session_date: str = field(default_factory=_today)
+    # Practice language ("en" | "ja") and its proficiency level. Per-profile so
+    # each child gets their own language and level. Defaults reproduce the old
+    # single-language behaviour (English at CEFR "A"), and — being defaults —
+    # let profiles written before these fields existed load unchanged.
+    language: str = "en"
+    level: str = "A"
+    # Chosen TTS voice id. Per-profile (voices are language-specific, so a global
+    # voice would be invalid across languages). Empty = use the language default.
+    voice: str = ""
 
 
 @dataclass

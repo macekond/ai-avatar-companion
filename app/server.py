@@ -13,23 +13,42 @@ Memory layer (optional, controlled by config.memory.enabled):
 Message protocol
 ----------------
 Browser → server:
+  {"type": "start"}                          # user tapped "Say hi to Nova!"
   {"type": "ptt_start"}
   {"type": "ptt_stop"}
   {"type": "stop_speak"}                     # barge-in while speaking/thinking
   {"type": "replay",         "text": "…"}    # re-speak a stored line
-  {"type": "set_level",      "level": "B"}
+  {"type": "set_level",      "level": "B"}    # valid for the active language only
+  {"type": "set_language",   "language": "ja"}  # resets level+voice to lang defaults
   {"type": "set_voice",      "voice": "en_US-kristin-medium"}
-  {"type": "switch_profile", "slug": "mia"}
+  {"type": "preview_voice",  "voice": "en_US-kristin-medium"}  # sample line, doesn't change active voice
+  {"type": "switch_profile", "slug": "mia"}   # + optional "language"/"level" to CREATE
   {"type": "delete_profile", "slug": "mia"}
   {"type": "avatar_loaded", "key": "VIPEHero_2707"}   # avatar changed → refresh appearance
 
+Language + level are per-profile (stored on ChildProfile): "en" uses CEFR levels
+(Pre A/A/B/C1/C2) with Piper voices; "ja" uses JLPT (N5..N1) with Kokoro voices.
+switch_profile to a NEW slug carrying "language"+"level" creates that profile from
+the modal and skips spoken onboarding; without them the spoken onboarding runs.
+
+For Japanese profiles, text-carrying messages (sentence, transcript,
+conversation_turn, conversation_correction) also carry a sibling `<field>_html`
+with furigana-annotated HTML (<ruby>漢字<rt>かんじ</rt></ruby>), e.g. `text_html`,
+`you_html`, `nova_html`, `wrong_html`, `right_html`. The UI renders the html
+variant when present, else falls back to the plain field.
+
 Server → browser:
-  {"type": "init",          "level": "A"}
+  {"type": "init",          "level": "A", "language": "en"}
+  {"type": "settings", "language": "en", "languages": ["en","ja"],
+                       "levels": ["Pre A","A","B","C1","C2"], "level": "A",
+                       "voices": [{"id","label"}, …], "voice": "en_US-kristin-medium"}
+  {"type": "voice_status",   "state": "downloading|loading|ready|error", "voice": …}  # set_voice progress
+  {"type": "preview_status", "state": "downloading|loading|ready|error", "voice": …}  # preview_voice progress
   {"type": "profiles",      "list": ["lily","mia"], "active": "lily"}
   {"type": "profile_error", "message": "Can't remove the only child."}
   {"type": "onboarding_start"}
-  {"type": "memory_loaded",  "name": "Lily", "age": 8}
-  {"type": "state",         "state": "idle|listening|thinking|speaking|didnt_catch"}
+  {"type": "memory_loaded",  "name": "Lily", "age": 8, "language": "en", "level": "A"}
+  {"type": "state",         "state": "awaiting_start|idle|listening|thinking|speaking|didnt_catch"}
   {"type": "transcript",    "text": "…"}
   {"type": "sentence",      "text": "…"}
   {"type": "amplitude",     "value": 0–1}
@@ -65,26 +84,75 @@ load_dotenv()
 
 from app.appearance import AppearanceStore, DEFAULT_AVATAR_KEY
 from app.config import Config, default_config_path
+from app.greetings import system_text, age_suffix
 from app.memory import ChildMemory, ChildProfile, MemoryManager, name_to_slug
-from app.settings import load_settings, save_setting
 from app.setup import check_ollama
 from app.logging_setup import configure_logging, logfmt_str
 from app.transcript import TranscriptStore
 
-# Curated voice list for the Settings panel. Deliberately limited to voices
-# with permissive licenses (public domain / CC0) — the previous default
-# en_US-lessac was Blizzard-licensed (research only) and is excluded.
-AVAILABLE_VOICES = [
-    {"id": "en_US-kristin-medium", "label": "Kristin — bright, younger (US)"},
-    {"id": "en_US-ljspeech-medium", "label": "LJ — calm, clear (US)"},
-    {"id": "en_US-joe-medium",      "label": "Joe — friendly male (US)"},
-    {"id": "en_US-norman-medium",   "label": "Norman — deeper male (US)"},
-]
-_VOICE_IDS = {v["id"] for v in AVAILABLE_VOICES}
+# Curated voice list for the Settings panel, keyed by practice language.
+# English voices are Piper (permissive licenses only — the previous default
+# en_US-lessac was Blizzard-licensed/research-only and is excluded). Japanese
+# voices are Kokoro (Apache-2.0). Voices are language-specific, so the picker
+# and set_voice validation are both scoped to the active profile's language.
+AVAILABLE_VOICES = {
+    "en": [
+        {"id": "en_US-kristin-medium", "label": "Kristin — bright, younger (US)"},
+        {"id": "en_US-ljspeech-medium", "label": "LJ — calm, clear (US)"},
+        {"id": "en_US-joe-medium",      "label": "Joe — friendly male (US)"},
+        {"id": "en_US-norman-medium",   "label": "Norman — deeper male (US)"},
+    ],
+    "ja": [
+        {"id": "jf_alpha",      "label": "Alpha — warm female (JP)"},
+        {"id": "jf_gongitsune", "label": "Gongitsune — gentle female (JP)"},
+        {"id": "jf_nezumi",     "label": "Nezumi — bright female (JP)"},
+        {"id": "jm_kumo",       "label": "Kumo — friendly male (JP)"},
+    ],
+}
+_VOICE_IDS = {lang: {v["id"] for v in vs} for lang, vs in AVAILABLE_VOICES.items()}
+
+
+def _voices_for(language: str) -> list[dict]:
+    """Voice catalog for *language* (English list if language is unknown)."""
+    return AVAILABLE_VOICES.get(language, AVAILABLE_VOICES["en"])
+
+
+def _is_valid_voice(language: str, voice_id: str) -> bool:
+    return voice_id in _VOICE_IDS.get(language, set())
+
+
+def _language_of_voice(voice_id: str) -> str:
+    """Practice language a catalog voice id belongs to, or "" if unknown.
+
+    Used by preview_voice, which (unlike set_voice) previews a voice outside
+    the active language, so validation can't rely on active_language alone.
+    """
+    for lang, ids in _VOICE_IDS.items():
+        if voice_id in ids:
+            return lang
+    return ""
+
+
+def _default_voice_for(language: str, config: "Config") -> str:
+    """Default voice id for *language*: config's voice for English, else the
+    first catalog entry (Kokoro default for Japanese)."""
+    if language == "en":
+        return config.models.tts.voice
+    vs = AVAILABLE_VOICES.get(language, [])
+    return vs[0]["id"] if vs else ""
+
+
+def _voice_download_pending(language: str, voice_id: str) -> bool:
+    """True if selecting this voice will trigger a first-use model download."""
+    if language == "ja":
+        return not kokoro_is_cached()
+    return not voice_is_cached(voice_id)
 from app.memory_extractor import MemoryExtractor
 from app.pipeline.llm import LLMPipeline
 from app.pipeline.stt import STTPipeline, SAMPLE_RATE, whisper_is_cached
-from app.pipeline.tts import TTSPipeline, voice_is_cached
+from app.pipeline.tts import TTSPipeline, voice_is_cached, kokoro_is_cached
+from app.levels import LANGUAGES, levels_for, default_level_for
+from app.furigana import annotate_for
 from app.telemetry import TelemetrySession
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -335,8 +403,7 @@ async def _run_onboarding(
         send_from_thread({"type": "amplitude", "value": round(v, 3)})
 
     # --- Ask for name ---
-    q1 = (f"Hi! I'm {avatar}, your English practice friend! "
-          f"I'm so happy to meet you! What's your name?")
+    q1 = system_text("onboarding_ask_name", config.child.language, avatar=avatar)
     await send({"type": "state", "state": "speaking"})
     await send({"type": "sentence", "text": q1})
     await asyncio.to_thread(tts.speak_streaming, q1, amp)
@@ -351,7 +418,7 @@ async def _run_onboarding(
         name = "Friend"
 
     # --- Ask for age ---
-    q2 = f"What a lovely name, {name}! How old are you?"
+    q2 = system_text("onboarding_ask_age", config.child.language, name=name)
     await send({"type": "state", "state": "speaking"})
     await send({"type": "sentence", "text": q2})
     await asyncio.to_thread(tts.speak_streaming, q2, amp)
@@ -378,26 +445,25 @@ async def _send_greeting(
     tts: TTSPipeline,
     send,
     send_from_thread,
+    language: str,
 ) -> None:
     avatar = config.personality.avatar_name
 
     if memory:
         name = memory.profile.name
-        age_note = f" (age {memory.profile.age})" if memory.profile.age else ""
+        age_note = age_suffix(memory.profile.age, language)
         if memory.topics:
             recent_topic = sorted(
                 memory.topics, key=lambda t: t.last_mentioned, reverse=True
             )[0].keyword
-            text = (f"Welcome back, {name}{age_note}! "
-                    f"Last time we talked about {recent_topic}. "
-                    f"What's new today?")
+            text = system_text("greeting_returning_topic", language,
+                                name=name, age_suffix=age_note, topic=recent_topic)
         else:
-            text = (f"Welcome back, {name}{age_note}! "
-                    f"I missed you! What did you get up to?")
+            text = system_text("greeting_returning", language,
+                                name=name, age_suffix=age_note)
     else:
         name = config.child.name
-        text = (f"Hi {name}! I'm {avatar}, your English practice friend. "
-                f"What did you do today?")
+        text = system_text("greeting_new", language, name=name, avatar=avatar)
 
     def amp(v: float) -> None:
         send_from_thread({"type": "amplitude", "value": round(v, 3)})
@@ -496,9 +562,100 @@ async def _session(
     # fresh CoreAudio stream per turn wedges the device after a few minutes.
     recorder = _MicRecorder()
 
-    # Level for this session — starts from config, updated by UI 'set_level'
-    # so telemetry reflects what the child is actually practising.
+    # Active practice language / level / voice for THIS session. Seeded from
+    # config, then set from the loaded profile (or a profile swap). STT reads
+    # active_language per turn; the LLM prompt and TTS backend are rebuilt via
+    # _configure_active(). Telemetry and the Settings panel reflect what the
+    # child is actually practising.
+    active_language = getattr(config.child, "language", "en")
     active_level = config.child.level
+    active_voice = config.models.tts.voice
+
+    def _sync_active_state(mem: Optional[ChildMemory]) -> None:
+        """Point LLM at *mem*'s profile language/level (fast, synchronous).
+
+        A level is only valid inside its language's taxonomy, so both move
+        together. This updates active_language/active_level/active_voice and
+        the LLM prompt immediately, so callers can ship settings/memory_loaded
+        messages without waiting on a TTS reload.
+        """
+        nonlocal active_language, active_level, active_voice
+        prof = mem.profile if mem is not None else None
+        if prof is not None:
+            active_language = getattr(prof, "language", "") or config.child.language
+            active_level = getattr(prof, "level", "") or default_level_for(active_language)
+            active_voice = getattr(prof, "voice", "") or _default_voice_for(active_language, config)
+        llm.set_language_level(active_language, active_level)
+
+    async def _reload_tts_if_changed() -> None:
+        """Reload the TTS voice off the event loop, only if it actually changed.
+
+        TTS reload can load or download a model (~100-500ms), so this is kept
+        separate from _sync_active_state and awaited only where the delay is
+        acceptable (initial connect, after a swap's fast state update already
+        shipped).
+        """
+        if (active_voice, active_language) != (tts.current_voice, tts.language):
+            await asyncio.to_thread(tts.reload_voice, active_voice, active_language)
+
+    async def _configure_active(mem: Optional[ChildMemory]) -> None:
+        """Point LLM + TTS at *mem*'s profile language/level/voice (slow path).
+
+        Retained for call sites that need the old synchronous-looking combo of
+        state update + TTS reload in one step.
+        """
+        _sync_active_state(mem)
+        await _reload_tts_if_changed()
+
+    async def _send_settings() -> None:
+        """Send the Settings-panel state for the ACTIVE profile's language."""
+        await send({
+            "type": "settings",
+            "language": active_language,
+            "languages": LANGUAGES,
+            "levels": levels_for(active_language),
+            "level": active_level,
+            "voices": _voices_for(active_language),
+            "voice": active_voice,
+        })
+
+    def _with_furigana_sync(msg: dict, *fields: str) -> dict:
+        """Synchronous furigana annotator — safe for thread contexts.
+
+        For Japanese profiles, annotate the given text *fields* on *msg*
+        with a ``<field>_html`` sibling carrying furigana-tagged HTML.
+        """
+        if active_language != "ja":
+            return msg
+        for f in fields:
+            text = msg.get(f)
+            if isinstance(text, str) and text:
+                html = annotate_for(text, active_language)
+                if html:
+                    msg[f + "_html"] = html
+        return msg
+
+    async def _with_furigana(msg: dict, *fields: str) -> dict:
+        """Async furigana annotator — offloads pyopenjtalk to a thread.
+
+        The UI checks the ``_html`` variant first and falls back to the plain
+        field when absent, so English profiles pass through unchanged. TTS
+        always reads the plain text — <ruby> markup is display-only.
+        """
+        if active_language != "ja":
+            return msg
+        for f in fields:
+            text = msg.get(f)
+            if isinstance(text, str) and text:
+                html = await asyncio.to_thread(annotate_for, text, active_language)
+                if html:
+                    msg[f + "_html"] = html
+        return msg
+
+    def _memory_loaded_msg(mem: "ChildMemory") -> dict:
+        return {"type": "memory_loaded",
+                "name": mem.profile.name, "age": mem.profile.age,
+                "language": mem.profile.language, "level": mem.profile.level}
 
     # The LLM pipeline is shared across WebSocket connections, so start each
     # session with a clean history — otherwise a fresh tab (or a second child
@@ -543,28 +700,36 @@ async def _session(
             conv_turn_n = 0
             return
         for t in transcript_store.load():
-            await send({"type": "conversation_turn", "id": t["id"],
-                        "you": t["you"], "nova": t["nova"]})
+            await send(await _with_furigana(
+                {"type": "conversation_turn", "id": t["id"],
+                 "you": t["you"], "nova": t["nova"]},
+                "you", "nova",
+            ))
             for c in t["corrections"]:
-                await send({"type": "conversation_correction", "id": t["id"],
-                            "kind": c["kind"], "wrong": c["wrong"],
-                            "right": c["right"]})
+                await send(await _with_furigana(
+                    {"type": "conversation_correction", "id": t["id"],
+                     "kind": c["kind"], "wrong": c["wrong"], "right": c["right"]},
+                    "wrong", "right",
+                ))
         conv_turn_n = transcript_store.last_id()
 
     # ── Load / initialise memory ─────────────────────────────────────────
     memory: Optional[ChildMemory] = mem_mgr.load() if mem_mgr else None
 
+    # Point the pipeline at the loaded profile's language/level/voice before
+    # announcing state, so init/settings/telemetry reflect the real profile.
+    # Awaiting the TTS reload here is fine — the user isn't looking at the UI
+    # yet, so there's no perceived delay to avoid (unlike a profile swap).
+    _sync_active_state(memory)
+    await _reload_tts_if_changed()
+
     # ── On-connect messages ──────────────────────────────────────────────
     log.info("Client connected")
-    await send({"type": "init", "level": active_level})
+    await send({"type": "init", "level": active_level, "language": active_language})
 
-    # Settings panel state: available voices + current selection + level.
-    await send({
-        "type": "settings",
-        "voices": AVAILABLE_VOICES,
-        "voice": config.models.tts.voice,
-        "level": active_level,
-    })
+    # Settings panel state: language, levels + voices for that language, current
+    # selections.
+    await _send_settings()
 
     if mem_mgr:
         await send({
@@ -582,12 +747,12 @@ async def _session(
     if mem_mgr and memory is None:
         await send({"type": "onboarding_start"})
         memory = await _onboard(mem_mgr)
+        await _configure_active(memory)
+        await _send_settings()
         llm.set_memory(memory)
     elif memory is not None:
         llm.set_memory(memory)
-        await send({"type": "memory_loaded",
-                    "name": memory.profile.name,
-                    "age": memory.profile.age})
+        await send(_memory_loaded_msg(memory))
     else:
         llm.set_memory(None)
 
@@ -595,22 +760,46 @@ async def _session(
     if mem_mgr:
         await _load_transcript(mem_mgr.slug)
 
-    # ── Opening greeting ─────────────────────────────────────────────────
-    await _send_greeting(config, memory, tts, send, send_from_thread)
+    # ── Wait for the user to initiate ─────────────────────────────────────
+    # Don't fire the greeting on connect — the app used to start speaking the
+    # moment the browser attached, which is startling. Instead, park in an
+    # awaiting_start state until the user either taps the on-screen prompt
+    # ({type:"start"}) or holds Space to talk. A profile swap within this
+    # session parks back in awaiting_start the same way, so switching kids
+    # never talks at the parent unprompted.
+    has_greeted = False
+    await send({"type": "state", "state": "awaiting_start"})
 
     # ── Main loop ────────────────────────────────────────────────────────
-    async def _swap_profile(new_slug: str, save_current: bool = True) -> None:
+    async def _swap_profile(
+        new_slug: str,
+        save_current: bool = True,
+        create_language: Optional[str] = None,
+        create_level: Optional[str] = None,
+        create_name: Optional[str] = None,
+    ) -> None:
         """Hot-swap the active child profile to ``new_slug``.
 
         Drains in-flight extraction tasks first (a slow task from the previous
         child would otherwise call llm.set_memory with the old memory *after*
-        the swap, leaking one child's context into another's). When the target
-        profile has no file yet, runs onboarding; otherwise greets normally.
+        the swap, leaking one child's context into another's). Then syncs the
+        fast LLM state (prompt language/level) via _sync_active_state() and
+        ships settings/memory_loaded/profiles messages immediately — the slower
+        TTS reload (_reload_tts_if_changed()) only happens after, so the UI
+        never sits on "Loading..." waiting for a voice model swap. The session
+        parks back in awaiting_start rather than auto-greeting, consistent
+        with the initial connect.
+
+        When the target profile has no file yet:
+          - if *create_language* is given (parent chose name+language+level in
+            the Settings modal), the profile is created directly from those and
+            the spoken name/age onboarding is skipped;
+          - otherwise the spoken onboarding runs (first-run / legacy path).
 
         ``save_current=False`` skips persisting the outgoing memory — used when
         the outgoing profile was just deleted and must not be resurrected.
         """
-        nonlocal mem_mgr, memory, consecutive_short
+        nonlocal mem_mgr, memory, consecutive_short, has_greeted
         await _drain_pending()
         if save_current and memory is not None:
             mem_mgr.prune(memory)
@@ -623,22 +812,46 @@ async def _session(
             problem_ttl_days=config.memory.problem_ttl_days,
         )
         memory = mem_mgr.load()
-        llm.set_memory(memory)
+        llm.set_memory(memory)      # may be None; clears the previous child
         llm.clear_history()
         consecutive_short = 0
-        await send({"type": "profiles",
-                    "list": mem_mgr.list_profiles(),
-                    "active": new_slug})
-        if memory is None:
+        if memory is None and create_language:
+            # Parent-created via the modal: build the profile from the chosen
+            # name/language/level and skip spoken onboarding.
+            lang = create_language if create_language in LANGUAGES else config.child.language
+            lvl = create_level if create_level in levels_for(lang) else default_level_for(lang)
+            memory = ChildMemory(profile=ChildProfile(
+                name=(create_name or new_slug).strip() or new_slug,
+                language=lang, level=lvl,
+            ))
+            mem_mgr.save(memory)
+            llm.set_memory(memory)
+            _sync_active_state(memory)
+            await _send_settings()
+            await send(_memory_loaded_msg(memory))
+        elif memory is None:
+            # First-run / legacy spoken onboarding.
+            _sync_active_state(None)
             await send({"type": "onboarding_start"})
             memory = await _onboard(mem_mgr)
             llm.set_memory(memory)
+            _sync_active_state(memory)
+            await _send_settings()
         else:
-            await send({"type": "memory_loaded",
-                        "name": memory.profile.name,
-                        "age": memory.profile.age})
+            _sync_active_state(memory)
+            await _send_settings()
+            await send(_memory_loaded_msg(memory))
+        # Send the profiles list AFTER any save/onboarding: on the create/onboard
+        # paths the new file didn't exist yet at the top of the function, so a
+        # profiles broadcast up there would ship a stale list and the UI would
+        # never render the new kid's chip (regression pin in test_server_settings).
+        await send({"type": "profiles",
+                    "list": mem_mgr.list_profiles(),
+                    "active": new_slug})
         await _load_transcript(new_slug)
-        await _send_greeting(config, memory, tts, send, send_from_thread)
+        await _reload_tts_if_changed()
+        has_greeted = False
+        await send({"type": "state", "state": "awaiting_start"})
 
     async def _run_speaking(speech_fn) -> None:
         """Run speech_fn(stop_event) in a worker thread while watching the socket
@@ -683,7 +896,7 @@ async def _session(
         Pure playback: no transcript entry, no memory extraction, no telemetry.
         """
         await send({"type": "state", "state": "speaking"})
-        await send({"type": "sentence", "text": text})
+        await send(await _with_furigana({"type": "sentence", "text": text}, "text"))
 
         def _speak(stop_speaking) -> None:
             tts.speak_streaming(text, amplitude_cb, stop_speaking)
@@ -709,13 +922,61 @@ async def _session(
             msg = json.loads(raw)
             mtype = msg.get("type")
 
+            # ── User-initiated first greeting ───────────────────────────
+            # The child (or a parent tapping for them) has signalled they're
+            # ready to hear from Nova. Fire the greeting once per session.
+            if mtype == "start" and not has_greeted:
+                has_greeted = True
+                await send({"type": "state", "state": "idle"})
+                await _send_greeting(config, memory, tts, send, send_from_thread, active_language)
+                continue
+
             # ── Level change ─────────────────────────────────────────────
             if mtype == "set_level":
-                new_level = msg.get("level", "A")
+                new_level = msg.get("level", "")
+                # Reject a level outside the active language's taxonomy (e.g. a
+                # CEFR level for a Japanese profile) — it would blank the prompt.
+                if new_level not in levels_for(active_language):
+                    continue
                 llm.set_level(new_level)
                 active_level = new_level
-                save_setting("level", new_level)
+                # Level lives on the profile now, not global settings.
+                if memory is not None:
+                    memory.profile.level = new_level
+                    mem_mgr.save(memory)
                 log.info("Level changed to: %s", new_level)
+                continue
+
+            # ── Language change ──────────────────────────────────────────
+            if mtype == "set_language":
+                new_lang = msg.get("language", "")
+                if new_lang not in LANGUAGES:
+                    continue
+                # A level is only valid within its language, so switching
+                # language resets level + voice to that language's defaults.
+                active_language = new_lang
+                active_level = default_level_for(new_lang)
+                active_voice = _default_voice_for(new_lang, config)
+                llm.set_language_level(active_language, active_level)
+                if memory is not None:
+                    memory.profile.language = active_language
+                    memory.profile.level = active_level
+                    memory.profile.voice = ""   # fall back to language default
+                    mem_mgr.save(memory)
+                # Switching backends (Piper↔Kokoro) may download a model.
+                await send({
+                    "type": "voice_status",
+                    "state": ("downloading"
+                              if _voice_download_pending(active_language, active_voice)
+                              else "loading"),
+                    "voice": active_voice,
+                })
+                ok = await asyncio.to_thread(tts.reload_voice, active_voice, active_language)
+                await send({"type": "voice_status",
+                            "state": "ready" if ok else "error",
+                            "voice": tts.current_voice or active_voice})
+                await _send_settings()
+                log.info("Language changed to: %s (level %s)", active_language, active_level)
                 continue
 
             # ── Avatar changed: refresh appearance description ───────────
@@ -733,26 +994,59 @@ async def _session(
             # ── Voice change ─────────────────────────────────────────────
             if mtype == "set_voice":
                 new_voice = msg.get("voice", "")
-                if new_voice not in _VOICE_IDS:
+                # Validate against the ACTIVE language's catalog only.
+                if not _is_valid_voice(active_language, new_voice):
                     continue
-                # First use of a voice pulls ~60 MB from HuggingFace — tell
-                # the UI it's downloading (not just loading) so it can show a
-                # clear one-time indicator.
-                downloading = not voice_is_cached(new_voice)
+                # First use pulls the model (Piper voice ~60 MB, or the Kokoro
+                # model) — tell the UI it's downloading, not just loading.
+                downloading = _voice_download_pending(active_language, new_voice)
                 await send({
                     "type": "voice_status",
                     "state": "downloading" if downloading else "loading",
                     "voice": new_voice,
                 })
                 # Reloading loads (and may download) the model — off the loop.
-                ok = await asyncio.to_thread(tts.reload_voice, new_voice)
+                ok = await asyncio.to_thread(tts.reload_voice, new_voice, active_language)
                 if ok:
-                    config.models.tts.voice = new_voice
-                    save_setting("voice", new_voice)
+                    active_voice = new_voice
+                    if active_language == "en":
+                        config.models.tts.voice = new_voice
+                    # Voice lives on the profile now (voices are language-scoped).
+                    if memory is not None:
+                        memory.profile.voice = new_voice
+                        mem_mgr.save(memory)
                     log.info("Voice changed to: %s", new_voice)
                 await send({"type": "voice_status",
                             "state": "ready" if ok else "error",
                             "voice": tts.current_voice or new_voice})
+                continue
+
+            # ── Voice preview: sample line in ANY voice, active voice untouched ──
+            if mtype == "preview_voice":
+                preview_voice_id = msg.get("voice", "")
+                preview_lang = _language_of_voice(preview_voice_id)
+                if not preview_lang:
+                    continue  # unknown voice id — ignore silently, like set_voice
+                sample = system_text("preview_sample", preview_lang)
+                downloading = _voice_download_pending(preview_lang, preview_voice_id)
+                await send({
+                    "type": "preview_status",
+                    "state": "downloading" if downloading else "loading",
+                    "voice": preview_voice_id,
+                })
+                # A preview_voice sent while Nova is mid-reply is naturally
+                # queued, not raced: while _run_speaking() owns the socket the
+                # message lands in its watcher and is buffered for the main
+                # loop, so this handler only ever runs once speaking is done —
+                # it can't interrupt or overlap the active playback.
+                try:
+                    await asyncio.to_thread(tts.preview, sample, preview_voice_id, preview_lang)
+                    await send({"type": "preview_status", "state": "ready",
+                                "voice": preview_voice_id})
+                except Exception as exc:
+                    log.error("Voice preview failed (%s): %s", preview_voice_id, exc)
+                    await send({"type": "preview_status", "state": "error",
+                                "voice": preview_voice_id})
                 continue
 
             # ── Profile switch ───────────────────────────────────────────
@@ -774,7 +1068,18 @@ async def _session(
                         "message": "Please use letters or numbers in the name.",
                     })
                     continue
-                await _swap_profile(new_slug)
+                # When the modal is *creating* a child it also sends the chosen
+                # language + level; validated and used only if the slug is new
+                # (an existing profile keeps its own stored language/level).
+                raw_lang = msg.get("language")
+                create_language = raw_lang if raw_lang in LANGUAGES else None
+                create_level = msg.get("level") if isinstance(msg.get("level"), str) else None
+                await _swap_profile(
+                    new_slug,
+                    create_language=create_language,
+                    create_level=create_level,
+                    create_name=raw_slug.strip() or None,
+                )
                 continue
 
             # ── Profile delete ───────────────────────────────────────────
@@ -825,6 +1130,11 @@ async def _session(
             if mtype != "ptt_start":
                 continue
 
+            # Child pressed Space before tapping the start prompt — that's a
+            # valid start signal too. Skip the greeting (they're initiating
+            # already) and just proceed to LISTENING.
+            has_greeted = True
+
             # ── LISTENING ────────────────────────────────────────────────
             await send({"type": "state", "state": "listening"})
             try:
@@ -862,7 +1172,7 @@ async def _session(
             # ── THINKING ─────────────────────────────────────────────────
             await send({"type": "state", "state": "thinking"})
             _stt_t0 = _time.monotonic()
-            transcript = await asyncio.to_thread(stt.transcribe, audio)
+            transcript = await asyncio.to_thread(stt.transcribe, audio, active_language)
             stt_ms = int((_time.monotonic() - _stt_t0) * 1000)
             _ptt_stop_t = _stt_t0   # approximate ptt_stop time as stt start
 
@@ -871,8 +1181,8 @@ async def _session(
                 if telemetry:
                     telemetry.log_didnt_catch()
                 await send({"type": "state", "state": "didnt_catch"})
-                sorry = "I didn't hear you — try again!"
-                await send({"type": "sentence", "text": sorry})
+                sorry = system_text("sorry", active_language)
+                await send(await _with_furigana({"type": "sentence", "text": sorry}, "text"))
                 await asyncio.to_thread(tts.speak_streaming, sorry, amplitude_cb)
                 await send({"type": "amplitude", "value": 0.0})
                 await asyncio.sleep(0.4)
@@ -880,7 +1190,8 @@ async def _session(
                 continue
 
             log.info("Heard: %s", transcript)
-            await send({"type": "transcript", "text": transcript})
+            await send(await _with_furigana({"type": "transcript", "text": transcript},
+                                            "text"))
 
             word_count = len(transcript.split())
             if word_count <= config.memory.short_response_words:
@@ -919,13 +1230,15 @@ async def _session(
                         if stop_speaking.is_set():
                             break
                         spoken_sentences.append(sentence)
-                        send_from_thread({"type": "sentence", "text": sentence})
+                        send_from_thread(_with_furigana_sync(
+                            {"type": "sentence", "text": sentence}, "text"))
                         tts.speak_streaming(sentence, _tracked_amp, stop_speaking)
                         send_from_thread({"type": "amplitude", "value": 0.0})
                 except RuntimeError as exc:
                     log.error("Pipeline error: %s", exc)
-                    send_from_thread({"type": "sentence",
-                                      "text": "My brain is napping — try again!"})
+                    send_from_thread(_with_furigana_sync(
+                        {"type": "sentence",
+                         "text": system_text("napping", active_language)}, "text"))
 
             # Barge-in while the reply streams: a `stop_speak` sets the shared
             # stop event (TTS aborts, loop breaks after the current sentence);
@@ -941,12 +1254,12 @@ async def _session(
             if spoken_sentences and transcript:
                 conv_turn_n += 1
                 nova_reply = " ".join(spoken_sentences)
-                await send({
+                await send(await _with_furigana({
                     "type": "conversation_turn",
                     "id": conv_turn_n,
                     "you": transcript,
                     "nova": nova_reply,
-                })
+                }, "you", "nova"))
                 if transcript_store:
                     transcript_store.append_turn(conv_turn_n, transcript, nova_reply)
 
@@ -978,13 +1291,13 @@ async def _session(
                             # Patch the transcript entry with the correction so
                             # the tab can highlight what was gently fixed.
                             ptype, wrong, right = parsed
-                            send_from_thread({
+                            send_from_thread(_with_furigana_sync({
                                 "type": "conversation_correction",
                                 "id": _conv_id,
                                 "kind": ptype,
                                 "wrong": wrong,
                                 "right": right,
-                            })
+                            }, "wrong", "right"))
                             if _store_ref:
                                 _store_ref.append_correction(
                                     _conv_id, ptype, wrong, right)
@@ -1056,12 +1369,10 @@ async def _main(profile_slug: Optional[str] = None, port: int = PORT,
                 managed: bool = False) -> None:
     config = Config.load(str(default_config_path()))
 
-    # Apply persisted user settings (Settings panel) over config defaults.
-    _saved = load_settings()
-    if _saved.get("voice") in _VOICE_IDS:
-        config.models.tts.voice = _saved["voice"]
-    if _saved.get("level"):
-        config.child.level = _saved["level"]
+    # Language, level, and voice are now stored per-profile (on ChildProfile),
+    # not in global settings.json — a global voice/level would be wrong across
+    # children and languages. config.yaml still supplies the seed defaults for
+    # the first-run profile.
 
     # Persist the server's own log beside telemetry (the packaged app's stderr
     # is otherwise lost). After config load so log_dir is known.

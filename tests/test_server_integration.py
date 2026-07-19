@@ -47,14 +47,29 @@ def mock_tts() -> MagicMock:
 
 
 def ptt_turn(*extra_msgs: dict) -> list[str]:
-    """Build messages for one complete PTT turn, optionally followed by extras."""
+    """Build messages for one complete PTT turn, optionally followed by extras.
+
+    Auto-prepends a {"type":"start"} so the session's initial awaiting_start
+    gate flips to idle and the greeting fires — restoring the pre-gating
+    behaviour these tests were written against. Tests that want to verify
+    the gating itself (greeting suppressed, first ptt_start acting as an
+    implicit start) build their own message list without this helper.
+    """
     msgs = [
+        json.dumps({"type": "start"}),
         json.dumps({"type": "ptt_start"}),
         json.dumps({"type": "ptt_stop"}),
     ]
     for m in extra_msgs:
         msgs.append(json.dumps(m))
     return msgs
+
+
+def just_start() -> list[str]:
+    """A single {"type":"start"} message — enough to trigger the initial
+    greeting flow in tests that were previously written with MockWebSocket([])
+    (empty queue) and expected the greeting to fire on connect."""
+    return [json.dumps({"type": "start"})]
 
 
 @pytest.fixture(autouse=True)
@@ -77,26 +92,58 @@ class TestOnConnect:
         ws = MockWebSocket([])
         base_config.child.level = "B"
         await _session(ws, base_config, mock_stt(), mock_llm(), mock_tts())
-        assert ws.sent[0] == {"type": "init", "level": "B"}
+        assert ws.sent[0] == {"type": "init", "level": "B", "language": "en"}
 
     async def test_greeting_contains_child_name(self, base_config):
-        ws = MockWebSocket([])
+        ws = MockWebSocket(just_start())
         await _session(ws, base_config, mock_stt(), mock_llm(), mock_tts())
         assert any("TestKid" in s for s in ws.sent_sentences())
 
-    async def test_greeting_state_is_speaking(self, base_config):
+    async def test_first_state_is_awaiting_start(self, base_config):
+        # Regression pin: connect used to fire the greeting immediately,
+        # which was startling. The session now parks in awaiting_start until
+        # the user taps the start prompt or presses Space.
         ws = MockWebSocket([])
         await _session(ws, base_config, mock_stt(), mock_llm(), mock_tts())
-        # The very first state change after init should be 'speaking' (greeting)
-        assert ws.sent_states()[0] == "speaking"
+        assert ws.sent_states()[0] == "awaiting_start"
+
+    async def test_no_greeting_without_start_message(self, base_config):
+        # No 'start' and no ptt_start → the session must stay silent.
+        ws = MockWebSocket([])
+        tts = mock_tts()
+        await _session(ws, base_config, mock_stt(), mock_llm(), tts)
+        tts.speak_streaming.assert_not_called()
+        assert ws.sent_sentences() == []
+
+    async def test_start_message_triggers_greeting(self, base_config):
+        ws = MockWebSocket(just_start())
+        await _session(ws, base_config, mock_stt(), mock_llm(), mock_tts())
+        # After 'start', the state flips to idle and the greeting speaks.
+        assert "speaking" in ws.sent_states()
+
+    async def test_ptt_start_before_start_still_works(self, base_config):
+        # If the child skips the button and hits Space first, greeting is
+        # skipped (they're initiating) but the turn proceeds normally.
+        ws = MockWebSocket([
+            json.dumps({"type": "ptt_start"}),
+            json.dumps({"type": "ptt_stop"}),
+        ])
+        tts = mock_tts()
+        await _session(ws, base_config, mock_stt("hi!"), mock_llm(["Hey!"]), tts)
+        # 'speaking' can appear from the LLM reply but NOT from a greeting —
+        # the greeting-only path shouldn't have fired.
+        # Simpler assertion: 'listening' happened (turn ran) and no message
+        # containing the greeting's 'practice friend' phrase was sent.
+        assert "listening" in ws.sent_states()
+        assert not any("practice friend" in s for s in ws.sent_sentences())
 
     async def test_session_ends_in_idle(self, base_config):
-        ws = MockWebSocket([])
+        ws = MockWebSocket(just_start())
         await _session(ws, base_config, mock_stt(), mock_llm(), mock_tts())
         assert ws.sent_states()[-1] == "idle"
 
     async def test_tts_called_for_greeting(self, base_config):
-        ws = MockWebSocket([])
+        ws = MockWebSocket(just_start())
         tts = mock_tts()
         await _session(ws, base_config, mock_stt(), mock_llm(), tts)
         tts.speak_streaming.assert_called()
@@ -207,10 +254,14 @@ class TestSetLevel:
         llm.set_level.assert_called_once_with("C2")
 
     async def test_set_level_does_not_emit_state_change(self, base_config):
-        ws = MockWebSocket([json.dumps({"type": "set_level", "level": "B"})])
+        ws = MockWebSocket([
+            json.dumps({"type": "start"}),
+            json.dumps({"type": "set_level", "level": "B"}),
+        ])
         await _session(ws, base_config, mock_stt(), mock_llm(), mock_tts())
-        # Greeting produces speaking + idle; set_level should add nothing
-        assert ws.sent_states() == ["speaking", "idle"]
+        # Initial awaiting_start + start-triggered greeting (speaking + idle);
+        # set_level itself should add nothing.
+        assert ws.sent_states() == ["awaiting_start", "idle", "speaking", "idle"]
 
     async def test_set_level_then_ptt_uses_new_level(self, base_config):
         """After set_level, the next PTT turn should call LLM (level was updated)."""
@@ -229,10 +280,14 @@ class TestSetLevel:
 
 class TestUnknownMessages:
     async def test_unknown_message_type_is_ignored(self, base_config):
-        ws = MockWebSocket([json.dumps({"type": "ping", "data": "hello"})])
-        # Should complete without errors or state changes beyond greeting
+        # Send start first so we get the usual greeting states; the ping in
+        # between must not produce additional state changes.
+        ws = MockWebSocket([
+            json.dumps({"type": "start"}),
+            json.dumps({"type": "ping", "data": "hello"}),
+        ])
         await _session(ws, base_config, mock_stt(), mock_llm(), mock_tts())
-        assert ws.sent_states() == ["speaking", "idle"]
+        assert ws.sent_states() == ["awaiting_start", "idle", "speaking", "idle"]
 
 
 # ── Memory — on-connect messages ───────────────────────────────────
@@ -291,10 +346,21 @@ class TestMemoryOnConnect:
 
     async def test_greeting_uses_child_name_from_memory(self, base_config, tmp_path):
         mem_mgr = _make_mem_mgr(tmp_path, memory=_make_memory("Mia", 7))
-        ws = MockWebSocket([])
+        ws = MockWebSocket(just_start())
         await _session(ws, base_config, mock_stt(), mock_llm(), mock_tts(), mem_mgr)
         sentences = ws.sent_sentences()
         assert any("Mia" in s for s in sentences)
+
+    async def test_greeting_uses_japanese_for_japanese_profile(self, base_config, tmp_path):
+        from app.memory import ChildMemory, ChildProfile
+        memory = ChildMemory(profile=ChildProfile(
+            name="Yuki", age=7, language="ja", level="N5"))
+        mem_mgr = _make_mem_mgr(tmp_path, memory=memory)
+        ws = MockWebSocket(just_start())
+        await _session(ws, base_config, mock_stt(), mock_llm(), mock_tts(), mem_mgr)
+        sentences = ws.sent_sentences()
+        assert any(any("぀" <= ch <= "ヿ" for ch in s) for s in sentences)
+        assert not any("practice friend" in s for s in sentences)
 
 
 # ── Memory — profile switching ──────────────────────────────────────
@@ -372,6 +438,6 @@ class TestReEngagement:
             call_count[0] += 1
             return "yes" if call_count[0] == 1 else "I went to the park today with my family"
         stt = mock_stt()
-        stt.transcribe.side_effect = lambda _: alternate_transcript()
+        stt.transcribe.side_effect = lambda *_a, **_k: alternate_transcript()
         await _session(ws, base_config, stt, mock_llm(), mock_tts(), mem_mgr)
         # Should complete without error regardless of counter state

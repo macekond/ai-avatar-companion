@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from app.config import Config
 
-from app.levels import LANGUAGE_LOCK, instructions_for
+from app.levels import instructions_for, language_lock, teaching_frame
 from app.memory import humanize_since, today_context
 
 # ---------------------------------------------------------------------------
@@ -80,27 +80,48 @@ class LLMPipeline:
         self._base_prompt = config.format_system_prompt()
         self._memory = None
         self._appearance: str | None = None
-        self._system_prompt = self._build_prompt(config.child.level)
+        # Active practice language + level are held here (not re-read from config
+        # each rebuild), so the server can drive them per-profile via
+        # set_language_level() without the source of truth drifting.
+        self._language: str = getattr(config.child, "language", "en")
+        self._level: str = config.child.level
+        self._system_prompt = self._build_prompt()
         self._history: list[dict[str, str]] = []
         self._pending_hint: str | None = None   # one-shot extra system message
 
-    def _build_prompt(self, level: str, memory=None) -> str:
+    def _build_prompt(self) -> str:
         parts = [self._base_prompt]
-        instruction = instructions_for(level)
+        # Language-specific teaching identity, grounding the neutral base prompt
+        # in the profile's practice language.
+        frame = teaching_frame(self._language)
+        if frame:
+            parts.append(frame)
+        instruction = instructions_for(self._level, self._language)
         if instruction:
             parts.append(instruction)
-        if memory is not None:
-            parts.append(self._format_memory_block(memory))
+        if self._memory is not None:
+            parts.append(self._format_memory_block(self._memory))
         if self._appearance:
             parts.append(_APPEARANCE_TEMPLATE.format(description=self._appearance))
-        # Always last: the non-negotiable "reply only in English" rule. Placed
+        # Always last: the non-negotiable "reply only in <language>" rule. Placed
         # after everything else so the model treats it as the final word.
-        parts.append(LANGUAGE_LOCK)
+        parts.append(language_lock(self._language))
         return "\n\n".join(parts)
 
     def set_level(self, level: str) -> None:
-        """Switch the CEFR level. Takes effect from the next turn."""
-        self._system_prompt = self._build_prompt(level, self._memory)
+        """Switch the proficiency level. Takes effect from the next turn."""
+        self._level = level
+        self._system_prompt = self._build_prompt()
+
+    def set_language_level(self, language: str, level: str) -> None:
+        """Switch practice language *and* level together (e.g. on profile swap).
+
+        Both change as one unit because a level is only valid within its
+        language's taxonomy. Takes effect from the next turn.
+        """
+        self._language = language
+        self._level = level
+        self._system_prompt = self._build_prompt()
 
     def set_hint(self, hint: str | None) -> None:
         """Set a one-shot system hint injected into the next chat() call then cleared."""
@@ -114,7 +135,7 @@ class LLMPipeline:
         Takes effect from the next turn.
         """
         self._memory = memory
-        self._system_prompt = self._build_prompt(self._config.child.level, memory)
+        self._system_prompt = self._build_prompt()
 
     def set_appearance(self, text: str | None) -> None:
         """Set (or clear) the avatar's appearance description in the system prompt.
@@ -123,7 +144,7 @@ class LLMPipeline:
         like?" in character. Pass None to remove it. Takes effect next turn.
         """
         self._appearance = text
-        self._system_prompt = self._build_prompt(self._config.child.level, self._memory)
+        self._system_prompt = self._build_prompt()
 
     @staticmethod
     def _format_memory_block(memory) -> str:

@@ -78,16 +78,22 @@ class TestReplay:
         assert TranscriptStore(tmp_path / "transcripts", "lily").load() == []
 
     async def test_replay_empty_text_ignored(self, base_config):
-        # The opening greeting always speaks once; an ignored replay must add
-        # no second speaking cycle.
+        # Send 'start' so the greeting fires — an ignored replay must add
+        # no second speaking cycle on top of that greeting.
         tts = _mock_tts()
-        ws = MockWebSocket([json.dumps({"type": "replay", "text": "   "})])
+        ws = MockWebSocket([
+            json.dumps({"type": "start"}),
+            json.dumps({"type": "replay", "text": "   "}),
+        ])
         await _session(ws, base_config, _mock_stt(), _mock_llm(), tts)
         assert ws.sent_states().count("speaking") == 1     # greeting only
         assert tts.speak_streaming.call_count == 1         # greeting only
 
     async def test_replay_missing_text_ignored(self, base_config):
-        ws = MockWebSocket([json.dumps({"type": "replay"})])
+        ws = MockWebSocket([
+            json.dumps({"type": "start"}),
+            json.dumps({"type": "replay"}),
+        ])
         await _session(ws, base_config, _mock_stt(), _mock_llm(), _mock_tts())
         assert ws.sent_states().count("speaking") == 1     # greeting only
 

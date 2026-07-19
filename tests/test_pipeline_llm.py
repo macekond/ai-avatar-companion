@@ -21,9 +21,9 @@ from app.pipeline.llm import (
 
 # ── Helpers ────────────────────────────────────────────────────────────────
 
-def make_config(level: str = "A", child: str = "Lily") -> Config:
+def make_config(level: str = "A", child: str = "Lily", language: str = "en") -> Config:
     config = Config()
-    config.child = ChildConfig(name=child, level=level)
+    config.child = ChildConfig(name=child, language=language, level=level)
     config.personality = PersonalityConfig(
         avatar_name="Nova",
         system_prompt="You are {child_name}'s friend, {avatar_name}.",
@@ -36,8 +36,8 @@ def make_config(level: str = "A", child: str = "Lily") -> Config:
     return config
 
 
-def make_pipeline(level: str = "A") -> LLMPipeline:
-    return LLMPipeline(make_config(level=level))
+def make_pipeline(level: str = "A", language: str = "en") -> LLMPipeline:
+    return LLMPipeline(make_config(level=level, language=language))
 
 
 def fake_stream(*text: str):
@@ -179,6 +179,52 @@ class TestLanguageLock:
         from app.levels import LANGUAGE_LOCK
         low = LANGUAGE_LOCK.lower()
         assert "explain" in low and "just this once" in low
+
+
+# ── Japanese profile prompt ─────────────────────────────────────────────────
+
+class TestJapanesePrompt:
+    def test_japanese_prompt_contains_jlpt_block(self):
+        llm = make_pipeline(level="N5", language="ja")
+        assert "JLPT N5" in llm._system_prompt
+
+    def test_japanese_prompt_ends_with_japanese_lock(self):
+        from app.levels import language_lock
+        llm = make_pipeline(level="N5", language="ja")
+        assert llm._system_prompt.rstrip().endswith(language_lock("ja").rstrip())
+
+    def test_japanese_prompt_forces_japanese_not_english(self):
+        llm = make_pipeline(level="N5", language="ja")
+        prompt = llm._system_prompt
+        assert "reply only in Japanese" in prompt
+        # The English lock's signature clause must NOT leak into a JP prompt.
+        assert "reply only in English" not in prompt
+
+    def test_japanese_prompt_has_teaching_frame(self):
+        llm = make_pipeline(level="N5", language="ja")
+        assert "日本語" in llm._system_prompt
+
+    def test_set_language_level_switches_language_and_level(self):
+        # A profile swap from English to Japanese must flip both at once.
+        llm = make_pipeline(level="A", language="en")
+        assert "reply only in English" in llm._system_prompt
+        llm.set_language_level("ja", "N3")
+        prompt = llm._system_prompt
+        assert "reply only in Japanese" in prompt
+        assert "reply only in English" not in prompt
+        assert "JLPT N3" in prompt
+
+    def test_language_survives_set_memory_and_set_appearance(self):
+        # set_memory/set_appearance must rebuild in the ACTIVE language, not
+        # revert to the config default (the source-of-truth-split bug).
+        from app.memory import ChildMemory, ChildProfile
+        llm = make_pipeline(level="A", language="en")
+        llm.set_language_level("ja", "N4")
+        llm.set_memory(ChildMemory(profile=ChildProfile(name="Yuki", age=7)))
+        assert "reply only in Japanese" in llm._system_prompt
+        llm.set_appearance("short black hair")
+        assert "reply only in Japanese" in llm._system_prompt
+        assert "reply only in English" not in llm._system_prompt
 
 
 # ── set_memory ──────────────────────────────────────────────────────────

@@ -20,11 +20,12 @@ const MODEL_PATH   = '/avatar/VIPEHero_2707.vrm'
 const RECONNECT_MS = 2000
 
 const STATE_LABELS = {
-  idle:        'Hold SPACE to talk!',
-  listening:   '🎤 Listening…',
-  thinking:    '💭 Hmm…',
-  speaking:    '',          // sentence bubble takes over
-  didnt_catch: "I didn't hear you — try again?",
+  awaiting_start: '',       // the #start-btn call-to-action takes over
+  idle:           'Hold SPACE to talk!',
+  listening:      '🎤 Listening…',
+  thinking:       '💭 Hmm…',
+  speaking:       '',       // sentence bubble takes over
+  didnt_catch:    "I didn't hear you — try again?",
 }
 
 // ── DOM refs ──────────────────────────────────────────────────────────────
@@ -33,6 +34,7 @@ const bubbleEl   = document.getElementById('sentence-bubble')
 const labelEl    = document.getElementById('state-label')
 const transcriptEl = document.getElementById('transcript')
 const replayLastEl = document.getElementById('replay-last')
+const startBtnEl   = document.getElementById('start-btn')
 let lastReply = null       // most recent Nova reply text, for "Say it again"
 
 // ── App state ─────────────────────────────────────────────────────────────
@@ -48,6 +50,11 @@ let targetAmp = 0
 let stageReservePx = 0     // px reserved on the right for the transcript panel
 let pttActive = false      // true while Space is held
 let fadeTimer = null       // for bubble fade-out
+
+// Unified startup overlay stays up until BOTH the server and the avatar are
+// ready, so the user sees one continuous loading experience instead of the
+// overlay popping in/out mid-flight (see showSetupOverlay/maybeHideOverlay).
+const readiness = { server: false, avatar: false }
 
 // Target pose (radians) the tick loop eases the head/spine towards —
 // applyState just sets targets, so transitions are always smooth.
@@ -177,6 +184,7 @@ async function loadModel() {
   }
 
   applyState('idle')
+  markAvatarReady()
 }
 
 // ── State machine ─────────────────────────────────────────────────────────
@@ -200,6 +208,9 @@ function applyState(newState) {
 
   // State label
   labelEl.textContent = STATE_LABELS[newState] ?? ''
+
+  // Start-button: visible only while parked in awaiting_start.
+  startBtnEl.hidden = newState !== 'awaiting_start'
 
   if (!vrm) return
   if (didntCatchTimer) { clearTimeout(didntCatchTimer); didntCatchTimer = null }
@@ -237,17 +248,39 @@ function applyState(newState) {
 }
 
 // ── Text UI helpers ───────────────────────────────────────────────────────
-function showSentence(text) {
+// Render either plain text or server-generated furigana HTML (<ruby>…</ruby>).
+// The server only emits html for Japanese profiles and always emits it beside
+// the plain text — never a substitute — so this helper's fallback is safe.
+// The html string is server-produced and contains only <ruby>/<rt> tags
+// (see app/furigana.py); trusted, so innerHTML is safe here.
+function setInlineText(el, text, html) {
+  if (html) el.innerHTML = html
+  else el.textContent = text
+}
+
+// Build an inline node carrying either plain text (a Text node) or
+// server-generated furigana HTML (a <span> with innerHTML). Callers .append()
+// the result alongside other nodes when building richer rows.
+function inlineTextNode(text, html) {
+  if (!html) return document.createTextNode(text)
+  const span = document.createElement('span')
+  span.innerHTML = html
+  return span
+}
+
+function showSentence(text, html) {
   if (fadeTimer) clearTimeout(fadeTimer)
   bubbleEl.classList.remove('fade')
-  bubbleEl.textContent = text
+  setInlineText(bubbleEl, text, html)
   // Fade out after 6 s of silence
   fadeTimer = setTimeout(() => bubbleEl.classList.add('fade'), 6000)
 }
 
 let transcriptTimer = null
-function showTranscript(text) {
-  transcriptEl.textContent = `You: ${text}`
+function showTranscript(text, html) {
+  // "You: " prefix stays plain; the transcript itself may be html for JP.
+  transcriptEl.textContent = 'You: '
+  transcriptEl.appendChild(inlineTextNode(text, html))
   transcriptEl.classList.add('visible')
   if (transcriptTimer) clearTimeout(transcriptTimer)
   transcriptTimer = setTimeout(() => transcriptEl.classList.remove('visible'), 4000)
@@ -265,7 +298,12 @@ function showError(html) {
 const SETUP_MESSAGES = {
   starting: {
     title: 'Waking Nova up…',
-    body: 'Just a moment!',
+    body: 'Just a moment.',
+    spinner: true,
+  },
+  loading_avatar: {
+    title: "Loading Nova's avatar…",
+    body: 'Almost there.',
     spinner: true,
   },
   ollama_missing: {
@@ -294,7 +332,33 @@ const SETUP_MESSAGES = {
   },
 }
 
+const SETUP_TIPS = [
+  'こんにちは (konnichiwa) means ‘hello’ in Japanese',
+  'Kanji started as pictures — 山 looks like a mountain!',
+  'English has ~170,000 words; Japanese has ~500,000',
+  "Kids' brains soak up languages faster than adults'",
+  'Japan uses THREE writing systems: hiragana, katakana, and kanji',
+  "The word 'okay' is used in almost every language",
+  'Learning a language rewires how your brain sees the world',
+  'Mistakes are how every fluent speaker got fluent',
+]
+
 let setupOverlayEl = null
+let setupTitleEl = null
+let setupBodyEl = null
+let setupDetailEl = null
+let setupTipEl = null
+let setupTipTimer = null
+let lastSetupTip = null
+
+function pickSetupTip() {
+  if (SETUP_TIPS.length < 2) return SETUP_TIPS[0]
+  let tip
+  do { tip = SETUP_TIPS[Math.floor(Math.random() * SETUP_TIPS.length)] }
+  while (tip === lastSetupTip)
+  lastSetupTip = tip
+  return tip
+}
 
 function showSetupOverlay(phase, detail) {
   const info = SETUP_MESSAGES[phase] || {
@@ -307,15 +371,42 @@ function showSetupOverlay(phase, detail) {
       'position:fixed;inset:0;z-index:1000;display:flex;align-items:center;'
       + 'justify-content:center;background:rgba(255,250,244,0.96);'
       + 'font-family:system-ui;color:#5a3a2a;text-align:center;padding:40px'
+    // The credits block satisfies the CC-BY 4.0 §3(a) attribution requirement
+     // for the bundled VIPE Hero avatar every launch (previously in the
+     // Settings panel; moved here when that panel became purely per-kid).
+    setupOverlayEl.innerHTML =
+      `<div style="max-width:460px">
+        <div class="setup-spinner" style="margin:0 auto 24px;width:44px;height:44px;border:4px solid #f0d9c8;border-top-color:#d98a5f;border-radius:50%;animation:setup-spin 1s linear infinite"></div>
+        <h2 style="margin:0 0 12px;font-size:1.4rem"></h2>
+        <p style="margin:0;line-height:1.5"></p>
+        <p class="setup-detail" style="margin-top:16px;font-size:0.85rem;opacity:0.7"></p>
+        <div class="setup-tip" style="font-size:0.85rem;color:rgba(90,60,40,0.6);margin-top:20px;min-height:1.4em"></div>
+        <div class="setup-credits" style="margin-top:36px;font-size:0.72rem;line-height:1.5;color:rgba(90,60,40,0.55)">
+          Avatar: <em>VIPE Hero #2707</em> by
+          <a href="https://vipe.io" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;text-decoration-color:rgba(160,138,118,0.5)">VIPE Heroes Genesis</a>,
+          via <a href="https://www.opensourceavatars.com/en/finder?avatar=vipe-hero-2707" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;text-decoration-color:rgba(160,138,118,0.5)">opensourceavatars.com</a>
+          (ToxSam) — <a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;text-decoration-color:rgba(160,138,118,0.5)">CC BY 4.0</a>.<br>
+          Alt avatar: <em>Olivia</em> by Polygonal Mind, CC0.
+        </div>
+      </div>`
     document.body.appendChild(setupOverlayEl)
+    setupTitleEl = setupOverlayEl.querySelector('h2')
+    setupBodyEl = setupOverlayEl.querySelector('p')
+    setupDetailEl = setupOverlayEl.querySelector('.setup-detail')
+    setupTipEl = setupOverlayEl.querySelector('.setup-tip')
+    lastSetupTip = null
+    setupTipEl.textContent = pickSetupTip()
+    if (setupTipTimer) clearInterval(setupTipTimer)
+    setupTipTimer = setInterval(() => {
+      if (setupTipEl) setupTipEl.textContent = pickSetupTip()
+    }, 4000)
   }
-  setupOverlayEl.innerHTML =
-    `<div style="max-width:420px">
-      ${info.spinner ? '<div class="setup-spinner" style="margin:0 auto 24px;width:44px;height:44px;border:4px solid #f0d9c8;border-top-color:#d98a5f;border-radius:50%;animation:setup-spin 1s linear infinite"></div>' : ''}
-      <h2 style="margin:0 0 12px;font-size:1.4rem">${info.title}</h2>
-      <p style="margin:0;line-height:1.5">${info.body}</p>
-      ${detail && phase === 'ollama_missing' ? `<p style="margin-top:16px;font-size:0.85rem;opacity:0.7">${detail}</p>` : ''}
-    </div>`
+  setupOverlayEl.querySelector('.setup-spinner').style.display = info.spinner ? '' : 'none'
+  setupTitleEl.innerHTML = info.title
+  setupBodyEl.innerHTML = info.body
+  const showDetail = Boolean(detail && phase === 'ollama_missing')
+  setupDetailEl.textContent = showDetail ? detail : ''
+  setupDetailEl.style.display = showDetail ? '' : 'none'
   if (!document.getElementById('setup-spin-style')) {
     const style = document.createElement('style')
     style.id = 'setup-spin-style'
@@ -324,21 +415,39 @@ function showSetupOverlay(phase, detail) {
   }
 }
 
-function hideSetupOverlay() {
-  if (setupOverlayEl) {
-    setupOverlayEl.remove()
-    setupOverlayEl = null
-  }
+// Only actually removes the overlay once BOTH the server and the avatar are
+// ready, so the setup_status:ready phase (server-only) doesn't drop the user
+// onto an empty canvas while the VRM is still loading.
+function maybeHideOverlay() {
+  if (!(readiness.server && readiness.avatar) || !setupOverlayEl) return
+  setupOverlayEl.classList.add('fade')
+  const el = setupOverlayEl
+  setupOverlayEl = null
+  const tipTimer = setupTipTimer
+  setupTipTimer = null
+  setTimeout(() => {
+    el.remove()
+    if (tipTimer) clearInterval(tipTimer)
+  }, 400)
+}
+
+function markServerReady() {
+  readiness.server = true
+  if (!readiness.avatar) showSetupOverlay('loading_avatar')
+  maybeHideOverlay()
+}
+
+function markAvatarReady() {
+  readiness.avatar = true
+  maybeHideOverlay()
 }
 
 // ── WebSocket ─────────────────────────────────────────────────────────────
 function connectWS() {
-  labelEl.textContent = 'Connecting to Nova…'
   ws = new WebSocket(WS_URL)
 
   ws.onopen = () => {
     console.log('[ws] connected')
-    labelEl.textContent = 'Connected! Loading avatar…'
     // Tell the server which avatar is on screen so it can load the matching
     // appearance description ("what colour is your hair?"). The key is the VRM
     // basename, derived from the static MODEL_PATH — no model load needed.
@@ -350,16 +459,35 @@ function connectWS() {
     const msg = JSON.parse(e.data)
     switch (msg.type) {
       case 'init':
-        setActiveLevel(msg.level)
+        // Language first; the 'settings' message (sent right after) renders the
+        // level chips for that language and highlights the active one.
+        if (msg.language) setActiveLanguage(msg.language)
+        // Sent right after WS open on a warm server — covers the fast path
+        // where no setup_status ever arrives.
+        markServerReady()
         break
       case 'profiles':
         renderProfileSelector(msg.list, msg.active)
+        noteActiveKid(msg.active)
+        // After '+' added a kid, open their detail once the server confirms
+        // the profile file exists (i.e. the slug is now in the list).
+        if (pendingOpenDetailForNewSlug && msg.list.includes(msg.active)) {
+          pendingOpenDetailForNewSlug = false
+          openKidDetail(msg.active)
+        }
         break
       case 'profile_error':
         showToast(msg.message)
+        // A refused delete lands us back on the still-existing kid — reopen
+        // their detail so the user isn't left staring at the kids picker
+        // thinking "did that work?".
+        if (currentDetailSlug === null && knownActive) openKidDetail(knownActive)
         break
       case 'memory_loaded':
-        // Profile loaded — update active highlight (slug not sent, use active from profiles)
+        // Real display name for the active kid — nicer than a Title-cased slug.
+        lastMemoryName = msg.name
+        activeKidEl.textContent = msg.name
+        activeKidEl.hidden = false
         break
       case 'onboarding_start':
         applyState('idle')
@@ -369,38 +497,43 @@ function connectWS() {
         applyState(msg.state)
         break
       case 'sentence':
-        showSentence(msg.text)
+        showSentence(msg.text, msg.text_html)
         break
       case 'transcript':
-        showTranscript(msg.text)
+        showTranscript(msg.text, msg.text_html)
         break
       case 'amplitude':
         targetAmp = msg.value
         break
       case 'setup_status':
         if (msg.phase === 'ready') {
-          hideSetupOverlay()
+          markServerReady()
         } else {
           showSetupOverlay(msg.phase, msg.detail)
         }
         break
       case 'settings':
+        if (msg.language) setActiveLanguage(msg.language)
         renderVoiceSelector(msg.voices, msg.voice)
-        if (msg.level) setActiveLevel(msg.level)
+        renderLevelSelector(msg.levels, msg.level, msg.language || activeLanguage)
         break
       case 'voice_status':
         updateVoiceStatus(msg.state, msg.voice)
+        break
+      case 'preview_status':
+        updatePreviewStatus(msg.state, msg.voice)
         break
       case 'conversation_reset':
         resetConversation()
         break
       case 'conversation_turn':
-        addConversationTurn(msg.id, msg.you, msg.nova)
+        addConversationTurn(msg.id, msg.you, msg.nova, msg.you_html, msg.nova_html)
         lastReply = msg.nova
         updateReplayLast()
         break
       case 'conversation_correction':
-        addConversationCorrection(msg.id, msg.kind, msg.wrong, msg.right)
+        addConversationCorrection(msg.id, msg.kind, msg.wrong, msg.right,
+                                  msg.wrong_html, msg.right_html)
         break
     }
   }
@@ -435,7 +568,12 @@ window.addEventListener('keydown', (e) => {
   if (e.code !== 'Space' || e.repeat) return
   if (pttBlocked()) return
   e.preventDefault()
-  if (state === 'idle' && !pttActive) {
+  if (state === 'awaiting_start') {
+    // First interaction: server accepts a plain ptt_start too (it flips its
+    // has_greeted flag and skips the greeting since the child is initiating).
+    pttActive = true
+    wsSend({ type: 'ptt_start' })
+  } else if (state === 'idle' && !pttActive) {
     pttActive = true
     wsSend({ type: 'ptt_start' })
   } else if (state === 'speaking' || state === 'thinking') {
@@ -455,17 +593,14 @@ window.addEventListener('keyup', (e) => {
   }
 })
 
-// ── Settings panel (gear → Kid / Voice / Level) ───────────────────
-const gearEl        = document.getElementById('settings-gear')
-const panelEl       = document.getElementById('settings-panel')
-const closeEl       = document.getElementById('settings-close')
+// ── Settings panel (opened via the active-kid pill) ───────────────
+const panelEl = document.getElementById('settings-panel')
+const closeEl = document.getElementById('settings-close')
 
 function toggleSettings(open) {
   panelEl.hidden = open === undefined ? !panelEl.hidden : !open
-  gearEl.classList.toggle('active', !panelEl.hidden)
   if (!panelEl.hidden) toggleTranscript(false)   // one panel at a time
 }
-gearEl.addEventListener('click', () => toggleSettings())
 closeEl.addEventListener('click', () => toggleSettings(false))
 window.addEventListener('keydown', (e) => {
   if (e.code === 'Escape' && !panelEl.hidden) toggleSettings(false)
@@ -555,7 +690,14 @@ function updateReplayLast() {
 }
 replayLastEl.addEventListener('click', () => requestReplay(lastReply))
 
-function addConversationTurn(id, you, nova) {
+// "Say hi to Nova!" — sends {type:"start"} and lets the server fire the
+// opening greeting. Hidden as soon as state leaves awaiting_start.
+startBtnEl.addEventListener('click', () => {
+  if (state !== 'awaiting_start') return
+  wsSend({ type: 'start' })
+})
+
+function addConversationTurn(id, you, nova, youHtml, novaHtml) {
   const empty = transcriptListEl.querySelector('.transcript-empty')
   if (empty) empty.remove()
 
@@ -564,11 +706,13 @@ function addConversationTurn(id, you, nova) {
 
   const youEl = document.createElement('div')
   youEl.className = 'turn-you'
-  youEl.append(tag('You'), textNode(you))
+  youEl.append(tag('You'), inlineTextNode(you, youHtml))
 
   const novaEl = document.createElement('div')
   novaEl.className = 'turn-nova'
-  novaEl.append(tag('Nova'), textNode(nova), replayButton(nova))
+  // Replay always uses the PLAIN text — Kokoro/Piper have no idea what to
+  // do with <ruby> markup, and it would be spoken as literal characters.
+  novaEl.append(tag('Nova'), inlineTextNode(nova, novaHtml), replayButton(nova))
 
   turn.append(youEl, novaEl)
   transcriptListEl.appendChild(turn)
@@ -577,17 +721,21 @@ function addConversationTurn(id, you, nova) {
   conversation.set(id, { el: turn, youEl })
 }
 
-function addConversationCorrection(id, kind, wrong, right) {
+function addConversationCorrection(id, kind, wrong, right, wrongHtml, rightHtml) {
   const entry = conversation.get(id)
   if (!entry) return
   // Emphasise the fix inline on the child's line: strike the wrong word,
   // show the right one, and add a small note underneath.
   const note = document.createElement('div')
   note.className = 'turn-correction'
+  const wrongEl = span('correction-wrong', '')
+  wrongEl.append(inlineTextNode(wrong, wrongHtml))
+  const rightEl = span('correction-right', '')
+  rightEl.append(inlineTextNode(right, rightHtml))
   note.append(
-    span('correction-wrong', wrong),
+    wrongEl,
     span('correction-arrow', ' → '),
-    span('correction-right', right),
+    rightEl,
     kind ? span('correction-kind', ` (${kind.replace(/_/g, ' ')})`) : document.createComment(''),
   )
   entry.el.insertBefore(note, entry.el.querySelector('.turn-nova'))
@@ -609,22 +757,69 @@ function span(cls, text) {
   return s
 }
 
-// ── Level selector ────────────────────────────────────────────────
-const levelBtns = document.querySelectorAll('#level-selector .chip')
+// ── Language selector ─────────────────────────────────────────────
+const languageSelectorEl = document.getElementById('language-selector')
+const languageBtns = languageSelectorEl.querySelectorAll('.chip')
+let activeLanguage = 'en'
 
-function setActiveLevel(level) {
-  levelBtns.forEach(btn => {
-    btn.classList.toggle('active', btn.dataset.level === level)
+const LEVEL_HEADINGS = { en: 'English level (CEFR)', ja: 'Japanese level (JLPT)' }
+
+function applyContentLanguage(language) {
+  // Set lang on the conversation surfaces so CJK ideographs render with
+  // Japanese (not Chinese) glyph shapes and break lines correctly. The app
+  // chrome stays English.
+  ;['transcript-list', 'sentence-bubble', 'transcript'].forEach(id => {
+    const el = document.getElementById(id)
+    if (el) el.lang = language
   })
 }
 
-levelBtns.forEach(btn => {
+function setActiveLanguage(language) {
+  activeLanguage = language || 'en'
+  languageBtns.forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.language === activeLanguage)
+  })
+  applyContentLanguage(activeLanguage)
+}
+
+languageBtns.forEach(btn => {
   btn.addEventListener('click', () => {
-    const level = btn.dataset.level
-    setActiveLevel(level)
-    wsSend({ type: 'set_level', level })
+    const language = btn.dataset.language
+    if (language === activeLanguage) return
+    // Server resets level + voice to the new language's defaults and re-sends
+    // the 'settings' message, which re-renders these selectors.
+    wsSend({ type: 'set_language', language })
   })
 })
+
+// ── Level selector (server-driven; options depend on the language) ─
+const levelSelectorEl = document.getElementById('level-selector')
+const levelHeadingEl = document.getElementById('level-heading')
+let activeLevel = null
+
+function renderLevelSelector(levels, current, language) {
+  levelHeadingEl.textContent = LEVEL_HEADINGS[language] || 'Level'
+  levelSelectorEl.innerHTML = ''
+  ;(levels || []).forEach(level => {
+    const btn = document.createElement('button')
+    btn.className = 'chip' + (level === current ? ' active' : '')
+    btn.textContent = level
+    btn.dataset.level = level
+    btn.addEventListener('click', () => {
+      setActiveLevel(level)
+      wsSend({ type: 'set_level', level })
+    })
+    levelSelectorEl.appendChild(btn)
+  })
+  activeLevel = current
+}
+
+function setActiveLevel(level) {
+  activeLevel = level
+  levelSelectorEl.querySelectorAll('.chip').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.level === level)
+  })
+}
 
 // ── Voice selector ────────────────────────────────────────────────
 const voiceSelectorEl = document.getElementById('voice-selector')
@@ -637,16 +832,49 @@ function renderVoiceSelector(voices, current) {
   voiceLabels.clear()
   ;(voices || []).forEach(v => {
     voiceLabels.set(v.id, v.label)
+
+    const item = document.createElement('div')
+    item.className = 'voice-item'
+
     const btn = document.createElement('button')
     btn.className = 'chip voice-chip' + (v.id === current ? ' active' : '')
     btn.textContent = v.label
     btn.dataset.voice = v.id
     btn.addEventListener('click', () => {
       if (v.id === activeVoice) return
+      voiceSelectorEl.querySelectorAll('.voice-chip').forEach(c => c.classList.remove('active'))
+      btn.classList.add('active', 'loading')
       wsSend({ type: 'set_voice', voice: v.id })
     })
-    voiceSelectorEl.appendChild(btn)
+
+    // ▶ preview: plays a sample line in this voice without selecting it.
+    // stopPropagation isn't needed (it's a sibling, not a child, of btn) but
+    // the click must not bubble into anything that toggles selection.
+    const preview = document.createElement('button')
+    preview.className = 'voice-preview'
+    preview.textContent = '▶'
+    preview.title = `Preview ${v.label}`
+    preview.setAttribute('aria-label', `Preview ${v.label}`)
+    preview.dataset.voice = v.id
+    preview.addEventListener('click', (e) => {
+      e.stopPropagation()
+      preview.classList.add('loading')
+      wsSend({ type: 'preview_voice', voice: v.id })
+    })
+
+    item.append(btn, preview)
+    voiceSelectorEl.appendChild(item)
   })
+}
+
+// preview_status targets a specific voice's ▶ button by id — independent of
+// (and never confused with) set_voice's own voice_status stream, since the
+// server sends a distinct message type for each.
+function updatePreviewStatus(state, voice) {
+  const btn = voiceSelectorEl.querySelector(
+    `.voice-preview[data-voice="${CSS.escape(voice)}"]`)
+  if (!btn) return
+  btn.classList.toggle('loading', state === 'loading' || state === 'downloading')
 }
 
 function updateVoiceStatus(state, voice) {
@@ -668,6 +896,7 @@ function updateVoiceStatus(state, voice) {
     chips.forEach(c => c.classList.toggle('active', c.dataset.voice === voice))
     showToast(`✓ ${name}'s voice ready`, { duration: 1800 })
   } else if (state === 'error') {
+    chips.forEach(c => c.classList.toggle('active', c.dataset.voice === activeVoice))
     showToast(`Couldn't load ${name}'s voice — kept the previous one`, { duration: 3000 })
   }
 }
@@ -704,15 +933,26 @@ function hideToast() {
 const modalOverlayEl = document.getElementById('modal-overlay')
 const modalMessageEl = document.getElementById('modal-message')
 const modalInputEl   = document.getElementById('modal-input')
+const modalChoicesEl = document.getElementById('modal-choices')
 const modalCancelEl  = document.getElementById('modal-cancel')
 const modalConfirmEl = document.getElementById('modal-confirm')
 let modalResolve = null
 let modalHasInput = false
+let modalMode = 'confirm'   // 'confirm' | 'input' | 'choices'
 let modalReturnFocus = null
 
-// Tab order inside the dialog: the input (when shown) then the two buttons.
+// Cancel/dismiss result by mode: confirm → false, input/choices → null.
+function modalCancelValue() {
+  return modalMode === 'confirm' ? false : null
+}
+
+// Tab order inside the dialog: input (when shown), then any choice chips, then
+// the two buttons.
 function modalFocusables() {
-  return [modalInputEl, modalCancelEl, modalConfirmEl].filter(el => !el.hidden)
+  const choiceBtns = modalChoicesEl.hidden
+    ? [] : Array.from(modalChoicesEl.querySelectorAll('button'))
+  return [modalInputEl, ...choiceBtns, modalCancelEl, modalConfirmEl]
+    .filter(el => !el.hidden)
 }
 
 function closeModal(result) {
@@ -728,25 +968,47 @@ function closeModal(result) {
   resolve(result)
 }
 
-// Returns a Promise: a trimmed string (or null if cancelled) when `input`,
-// otherwise a boolean confirm result.
+// Returns a Promise resolving to:
+//   input mode   → trimmed string, or null if cancelled
+//   choices mode → the chosen choice's `value`, or null if cancelled
+//   confirm mode → boolean
 function openModal({ message, input = false, placeholder = '',
-                    confirmLabel = 'OK', danger = false } = {}) {
+                    confirmLabel = 'OK', danger = false, choices = null } = {}) {
   // A dialog already open resolves as cancelled before opening the new one.
-  if (modalResolve) closeModal(modalHasInput ? null : false)
+  if (modalResolve) closeModal(modalCancelValue())
   const opener = document.activeElement
   return new Promise(resolve => {
     modalResolve = resolve
     modalReturnFocus = opener instanceof HTMLElement ? opener : null
     modalHasInput = input
+    modalMode = choices ? 'choices' : (input ? 'input' : 'confirm')
     modalMessageEl.textContent = message
     modalInputEl.hidden = !input
     modalInputEl.value = ''
     modalInputEl.placeholder = placeholder
+    // Choices mode: render chips and hide the default OK (Cancel stays).
+    modalChoicesEl.innerHTML = ''
+    modalChoicesEl.hidden = !choices
+    modalConfirmEl.hidden = !!choices
+    if (choices) {
+      choices.forEach(c => {
+        const b = document.createElement('button')
+        b.type = 'button'
+        b.className = 'chip'
+        b.textContent = c.label
+        if (c.lang) b.lang = c.lang
+        b.addEventListener('click', () => closeModal(c.value))
+        modalChoicesEl.appendChild(b)
+      })
+    }
     modalConfirmEl.textContent = confirmLabel
     modalConfirmEl.classList.toggle('danger', danger)
     modalOverlayEl.hidden = false
-    setTimeout(() => (input ? modalInputEl : modalConfirmEl).focus(), 0)
+    setTimeout(() => {
+      if (input) modalInputEl.focus()
+      else if (choices) modalChoicesEl.querySelector('button')?.focus()
+      else modalConfirmEl.focus()
+    }, 0)
   })
 }
 
@@ -754,9 +1016,9 @@ function confirmModal() {
   closeModal(modalHasInput ? modalInputEl.value.trim() || null : true)
 }
 modalConfirmEl.addEventListener('click', confirmModal)
-modalCancelEl.addEventListener('click', () => closeModal(modalHasInput ? null : false))
+modalCancelEl.addEventListener('click', () => closeModal(modalCancelValue()))
 modalOverlayEl.addEventListener('click', (e) => {
-  if (e.target === modalOverlayEl) closeModal(modalHasInput ? null : false)
+  if (e.target === modalOverlayEl) closeModal(modalCancelValue())
 })
 modalInputEl.addEventListener('keydown', (e) => {
   // NumpadEnter is a distinct code from Enter — both submit the name.
@@ -769,7 +1031,7 @@ window.addEventListener('keydown', (e) => {
   if (modalOverlayEl.hidden) return
   if (e.code === 'Escape') {
     e.stopPropagation()
-    closeModal(modalHasInput ? null : false)
+    closeModal(modalCancelValue())
     return
   }
   // aria-modal="true" promises focus stays in the dialog — implement it, or
@@ -799,47 +1061,63 @@ function displayName(slug) {
   return slug.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
 }
 
+// ── Active-kid pill (top chrome) ───────────────────────────────────
+const activeKidEl = document.getElementById('active-kid')
+let previousActiveSlug = null   // for detecting a real switch vs. first load
+let lastMemoryName = null       // most recent real name from 'memory_loaded'
+
+// Called whenever a 'profiles' broadcast reveals the active slug. Fills in
+// the pill if 'memory_loaded' hasn't beaten us to it yet, and toasts on an
+// actual switch (never on the first-ever profile load).
+function noteActiveKid(slug) {
+  if (!slug) return
+  if (activeKidEl.hidden) {
+    activeKidEl.textContent = displayName(slug)
+    activeKidEl.hidden = false
+  }
+  if (previousActiveSlug !== null && previousActiveSlug !== slug) {
+    showToast(`👋 Switched to ${lastMemoryName || displayName(slug)}`, { duration: 1800 })
+  }
+  previousActiveSlug = slug
+}
+
+activeKidEl.addEventListener('click', () => {
+  if (!knownActive) return
+  toggleSettings(true)
+  openKidDetail(knownActive)
+})
+
+// Latest server-known profile list + active slug — the detail view uses this
+// (a) to size the "Remove this kid" button (hidden when only one kid remains,
+// since the app always needs an active profile to fall back to) and (b) to
+// title the panel with the active kid's name.
+let knownProfiles = []
+let knownActive = null
+
 function renderProfileSelector(profiles, activeSlug) {
+  knownProfiles = profiles.slice()
+  knownActive = activeSlug
   profileSelectorEl.innerHTML = ''
-  // Only offer removal when more than one child exists — the app always needs
-  // an active profile to fall back to.
-  const canRemove = profiles.length > 1
 
   profiles.forEach(slug => {
-    const item = document.createElement('span')
-    item.className = 'profile-item'
-
     const btn = document.createElement('button')
     btn.className = 'chip' + (slug === activeSlug ? ' active' : '')
     btn.textContent = displayName(slug)
     btn.dataset.slug = slug
+    // A kid chip is now the entry point to that kid's DETAIL view: clicking
+    // switches to them (if they're not already active) AND opens the detail
+    // page with their language/voice/level + delete. Delete moved out of the
+    // per-chip ✕ (mis-tap risk) and into the detail's danger zone.
     btn.addEventListener('click', () => {
       if (slug !== activeSlug) wsSend({ type: 'switch_profile', slug })
+      openKidDetail(slug)
     })
-    item.appendChild(btn)
-
-    if (canRemove) {
-      const removeBtn = document.createElement('button')
-      removeBtn.className = 'profile-remove'
-      removeBtn.textContent = '✕'
-      removeBtn.setAttribute('aria-label', `Remove ${displayName(slug)}`)
-      removeBtn.title = `Remove ${displayName(slug)}`
-      removeBtn.addEventListener('click', async (e) => {
-        e.stopPropagation()
-        const ok = await openModal({
-          message: `Remove ${displayName(slug)}? This permanently deletes their saved progress.`,
-          confirmLabel: 'Remove',
-          danger: true,
-        })
-        if (ok) wsSend({ type: 'delete_profile', slug })
-      })
-      item.appendChild(removeBtn)
-    }
-
-    profileSelectorEl.appendChild(item)
+    profileSelectorEl.appendChild(btn)
   })
 
-  // '+' button to add a new child (triggers onboarding for a fresh slug)
+  // '+' button to add a new child: collect name + practice language, then the
+  // server creates the profile (with that language's default level) and skips
+  // spoken onboarding. Language/level are fine-tuned afterwards in the detail.
   const addBtn = document.createElement('button')
   addBtn.className = 'chip'
   addBtn.textContent = '+'
@@ -848,24 +1126,104 @@ function renderProfileSelector(profiles, activeSlug) {
     const rawName = await openModal({
       message: "What's the new child's name?",
       input: true,
-      placeholder: 'Name',
-      confirmLabel: 'Add',
+      // Name must contain letters/numbers — it becomes the profile slug, and a
+      // name with no ASCII (e.g. a purely kanji name) is rejected by the server.
+      placeholder: 'Name (letters or numbers)',
+      confirmLabel: 'Next',
     })
     if (!rawName) return
+    const language = await openModal({
+      message: `What language will ${rawName} practise?`,
+      choices: [
+        { label: 'English', value: 'en' },
+        { label: '日本語', value: 'ja', lang: 'ja' },
+      ],
+    })
+    if (!language) return
     // Send the raw name — the server runs it through name_to_slug (the single
-    // source of truth for slugs), so we don't duplicate that logic here.
-    wsSend({ type: 'switch_profile', slug: rawName })
+    // source of truth for slugs), so we don't duplicate that logic here. The
+    // detail view opens once the server confirms creation with a 'profiles'
+    // broadcast (see the profiles handler in ws.onmessage).
+    pendingOpenDetailForNewSlug = true
+    wsSend({ type: 'switch_profile', slug: rawName, language })
   })
   profileSelectorEl.appendChild(addBtn)
 }
 
 function setActiveProfile(slug) {
+  knownActive = slug
   profileSelectorEl.querySelectorAll('.chip[data-slug]').forEach(btn => {
     btn.classList.toggle('active', btn.dataset.slug === slug)
   })
 }
 
+// ── Kids view ↔ Kid detail view ───────────────────────────────
+const kidsViewEl        = document.getElementById('kids-view')
+const kidDetailViewEl   = document.getElementById('kid-detail-view')
+const kidDetailBackEl   = document.getElementById('kid-detail-back')
+const kidDetailRemoveEl = document.getElementById('kid-detail-remove')
+const settingsTitleEl   = document.getElementById('settings-title')
+let currentDetailSlug = null
+// Set when '+' adds a kid: the server hasn't confirmed yet, but once the
+// profiles broadcast returns with the new slug active, we open its detail.
+let pendingOpenDetailForNewSlug = false
+
+function showKidsView() {
+  currentDetailSlug = null
+  kidDetailViewEl.hidden = true
+  kidsViewEl.hidden = false
+  settingsTitleEl.textContent = 'Settings'
+}
+
+// Voice/Level chips (and the language highlight) reflect whatever kid was
+// last loaded — stale until the server's 'settings' message for the new kid
+// arrives. Blank them out so a mid-switch peek never shows the wrong kid's
+// state.
+function resetKidDetailToLoading() {
+  voiceSelectorEl.innerHTML = '<div class="loading-note">Loading…</div>'
+  levelSelectorEl.innerHTML = '<div class="loading-note">Loading…</div>'
+  languageBtns.forEach(b => b.classList.remove('active'))
+  levelHeadingEl.textContent = 'Level'
+}
+
+function openKidDetail(slug) {
+  currentDetailSlug = slug
+  resetKidDetailToLoading()
+  kidsViewEl.hidden = true
+  kidDetailViewEl.hidden = false
+  settingsTitleEl.textContent = displayName(slug)
+  // Delete disabled when this is the only kid — the app always needs an
+  // active profile to fall back to (server enforces this too, with a
+  // profile_error toast, but hiding the button avoids the dead-end tap).
+  const canRemove = knownProfiles.length > 1
+  kidDetailRemoveEl.disabled = !canRemove
+  kidDetailRemoveEl.title = canRemove
+    ? `Remove ${displayName(slug)} — deletes their saved progress`
+    : `Can't remove the only kid`
+}
+
+kidDetailBackEl.addEventListener('click', showKidsView)
+
+kidDetailRemoveEl.addEventListener('click', async () => {
+  const slug = currentDetailSlug
+  if (!slug) return
+  const ok = await openModal({
+    message: `Remove ${displayName(slug)}? This permanently deletes their saved progress.`,
+    confirmLabel: 'Remove',
+    danger: true,
+  })
+  if (!ok) return
+  wsSend({ type: 'delete_profile', slug })
+  // Server will respond with a fresh profiles list on success (with a
+  // different active kid) or a profile_error toast on refusal; either way,
+  // pop back to the kids view immediately for a snappy feel.
+  showKidsView()
+})
+
 // ── Bootstrap ────────────────────────────────────────────────
+// Show the overlay before anything else so the very first frame is "Waking
+// Nova up…", not an empty canvas — see maybeHideOverlay for when it clears.
+showSetupOverlay('starting')
 initThree()
 connectWS()
 loadModel()   // async; non-blocking

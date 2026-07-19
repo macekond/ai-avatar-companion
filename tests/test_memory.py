@@ -158,6 +158,54 @@ class TestChildMemoryRoundTrip:
         assert restored.topics == []
         assert restored.problems == []
 
+    def test_new_profile_defaults_to_english_cefr(self):
+        # A freshly-created profile is English at CEFR level "A" — the historical
+        # single-language default — so existing behaviour is unchanged.
+        p = ChildProfile(name="Mia")
+        assert p.language == "en"
+        assert p.level == "A"
+
+    def test_legacy_profile_dict_loads_with_defaults(self):
+        # Profiles written before language/level existed have neither key. They
+        # must still load (not be swallowed as "corrupt" -> silent memory loss),
+        # defaulting to English/"A".
+        legacy = {
+            "profile": {"name": "Lily", "age": 8, "first_session_date": "2026-01-01"},
+            "topics": [],
+            "problems": [],
+            "last_updated": "2026-01-01",
+        }
+        restored = ChildMemory.from_dict(legacy)
+        assert restored.profile.name == "Lily"
+        assert restored.profile.language == "en"
+        assert restored.profile.level == "A"
+
+    def test_language_and_level_survive_round_trip(self):
+        mem = ChildMemory(profile=ChildProfile(name="Yuki", language="ja", level="N5"))
+        restored = ChildMemory.from_dict(mem.to_dict())
+        assert restored.profile.language == "ja"
+        assert restored.profile.level == "N5"
+
+    def test_voice_defaults_empty_and_survives_round_trip(self):
+        # Empty voice = "use the language default"; a chosen voice persists.
+        assert ChildProfile(name="Mia").voice == ""
+        mem = ChildMemory(profile=ChildProfile(name="Yuki", language="ja",
+                                               level="N5", voice="jf_alpha"))
+        restored = ChildMemory.from_dict(mem.to_dict())
+        assert restored.profile.voice == "jf_alpha"
+
+    def test_japanese_transcript_persists_unescaped(self, tmp_path):
+        # A Japanese turn must round-trip through the transcript store; on disk
+        # it should be human-readable UTF-8, not \uXXXX escapes.
+        from app.transcript import TranscriptStore
+        store = TranscriptStore(tmp_path, "yuki")
+        store.append_turn(1, "ねこがすきです", "いいですね！")
+        raw = (tmp_path / "yuki.jsonl").read_text(encoding="utf-8")
+        assert "ねこがすきです" in raw
+        loaded = store.load()
+        assert loaded[0]["you"] == "ねこがすきです"
+        assert loaded[0]["nova"] == "いいですね！"
+
 
 # ── MemoryManager persistence ──────────────────────────────────────────────
 

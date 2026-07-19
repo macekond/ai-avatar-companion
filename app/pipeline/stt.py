@@ -128,8 +128,14 @@ class STTPipeline:
         audio = np.concatenate(chunks, axis=0).squeeze()
         return audio
 
-    def transcribe(self, audio: np.ndarray) -> str:
+    def transcribe(self, audio: np.ndarray, language: str | None = None) -> str:
         """Transcribe audio, returning the text or "" if no/low-confidence speech.
+
+        *language* is the ISO code Whisper should decode as ("en", "ja", …). It
+        must be passed per call because the active child's practice language can
+        change at runtime (profile swap). When None, falls back to the config's
+        default language. The model must be multilingual (e.g. "small", not the
+        English-only "small.en") for any non-English language to work.
 
         Filters using:
         - minimum duration (avoids sending silence)
@@ -140,10 +146,11 @@ class STTPipeline:
             return ""
 
         threshold = self._config.models.stt.no_speech_threshold
+        lang = language or getattr(self._config.child, "language", "en")
 
         segments, _info = self._model.transcribe(
             audio,
-            language="en",
+            language=lang,
             vad_filter=True,
             vad_parameters={"min_silence_duration_ms": 300},
         )
