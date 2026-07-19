@@ -106,8 +106,10 @@ jobs:
             BODY=$(git tag -l --format='%(contents)' "v${VERSION}")
           fi
           # --notes-file handles multi-line bodies safely (env vars would need
-          # extra quoting).
-          printf '%s\n' "$BODY" > release-notes.md
+          # extra quoting). Written to RUNNER_TEMP, not the repo root — every
+          # single release attempt so far has been mislabelled a "dev build"
+          # because build.sh's dirty-tree check sees this file as untracked.
+          printf '%s\n' "$BODY" > "${RUNNER_TEMP}/release-notes.md"
 
       - name: Set up Python
         if: steps.check.outputs.exists == 'false'
@@ -172,6 +174,6 @@ jobs:
           [[ -f "$DMG" ]] || { echo "::error::DMG not found at $DMG"; ls -R src-tauri/target/aarch64-apple-darwin/release/bundle || true; exit 1; }
           gh release create "v${VERSION}" \
             --title "Nova v${VERSION}" \
-            --notes-file release-notes.md \
+            --notes-file "${RUNNER_TEMP}/release-notes.md" \
             -R "${{ github.repository }}" \
             "$DMG"
