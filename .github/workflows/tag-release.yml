@@ -124,7 +124,30 @@ jobs:
 
       - name: Install UI deps
         if: steps.check.outputs.exists == 'false'
-        run: npm --prefix ui install
+        # `ci`, not `install` — install silently rewrites package-lock.json on
+        # any drift (e.g. a missed version bump), which git then reports as a
+        # dirty tree and mislabels the release build as a dev build. `ci`
+        # trusts the lockfile as-is and fails loudly instead if it's stale.
+        run: npm --prefix ui ci
+
+      - name: Free up disk space
+        if: steps.check.outputs.exists == 'false'
+        # macOS runners preinstall the Android SDK and several Xcode versions
+        # that this build never touches but that eat into the ~14GB free
+        # budget. The Japanese TTS chain (pyopenjtalk, Kokoro, onnxruntime,
+        # unidic-lite — see requirements.txt) plus the Rust/Tauri release
+        # build plus a second PyInstaller-frozen copy of the venv routinely
+        # blew past that budget (hdiutil failing with "No space left on
+        # device"). Only the ACTIVE Xcode is kept — Tauri's build links
+        # against it (swift-rs) — everything else is safe to drop.
+        run: |
+          df -h /
+          sudo rm -rf /Users/runner/Library/Android/sdk
+          ACTIVE_XCODE=$(xcode-select -p | sed -E 's#(/Applications/Xcode[^/]*\.app)/.*#\1#')
+          for x in /Applications/Xcode*.app; do
+            [[ "$x" == "$ACTIVE_XCODE" ]] || sudo rm -rf "$x"
+          done
+          df -h /
 
       - name: Build DMG
         if: steps.check.outputs.exists == 'false'
