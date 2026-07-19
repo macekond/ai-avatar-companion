@@ -72,6 +72,9 @@ VERSION=$(python3 -c "import json;print(json.load(open('src-tauri/tauri.conf.jso
 # release signal.
 BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
 TAG_AT_HEAD=$(git describe --exact-match --tags HEAD 2>/dev/null || true)
+echo "---- git status --porcelain (full) ----"
+git status --porcelain 2>/dev/null || true
+echo "----------------------------------------"
 WORKTREE_DIRTY=$(git status --porcelain 2>/dev/null | head -n1)
 if [[ "${TAG_AT_HEAD}" == "v${VERSION}" && -z "${WORKTREE_DIRTY}" ]]; then
   LABEL="${VERSION}"
