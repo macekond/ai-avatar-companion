@@ -25,8 +25,24 @@ cd "$(dirname "$0")/.."
 
 TRIPLE="aarch64-apple-darwin"
 
+# Temporary diagnostics for the "No space left on device" CI failure — hdiutil
+# fails during DMG creation even with the root volume showing tens of GB free,
+# so something's consuming space (or writing to a smaller volume) that a bare
+# `df -h /` doesn't explain. Report the root volume, $TMPDIR's volume (mktemp
+# -d below stages the DMG source there — may be a different, smaller volume
+# than '/'), and the size of the biggest build directories at each phase.
+_report_disk() {
+  echo "---- disk report: $1 ----"
+  df -h / "${TMPDIR:-/tmp}"
+  du -sh .venv ui/node_modules packaging/build packaging/dist \
+       src-tauri/target "${TMPDIR:-/tmp}" 2>/dev/null || true
+}
+
+_report_disk "start"
+
 echo "==> [1/3] Building frontend (ui/dist)"
 npm --prefix ui run build
+_report_disk "after frontend build"
 
 echo "==> [2/3] Freezing Python sidecar (PyInstaller)"
 source .venv/bin/activate
@@ -34,6 +50,7 @@ pyinstaller --noconfirm --clean packaging/nova-server.spec \
     --distpath packaging/dist --workpath packaging/build
 mkdir -p src-tauri/binaries
 cp packaging/dist/nova-server "src-tauri/binaries/nova-server-${TRIPLE}"
+_report_disk "after PyInstaller freeze"
 
 echo "==> [3/3] Building Tauri app + DMG"
 source "$HOME/.cargo/env"
@@ -41,6 +58,7 @@ source "$HOME/.cargo/env"
 # Bundle only the .app: Tauri's own DMG script drives Finder via
 # AppleScript and fails in headless shells; hdiutil below is reliable.
 ./ui/node_modules/.bin/tauri build --target "${TRIPLE}" --bundles app
+_report_disk "after Tauri build"
 
 BUNDLE_DIR="src-tauri/target/${TRIPLE}/release/bundle"
 VERSION=$(python3 -c "import json;print(json.load(open('src-tauri/tauri.conf.json'))['version'])")
@@ -65,9 +83,12 @@ fi
 DMG="${BUNDLE_DIR}/dmg/Nova_${LABEL}_aarch64.dmg"
 
 mkdir -p "${BUNDLE_DIR}/dmg"
+du -sh "${BUNDLE_DIR}/macos/Nova.app"
 STAGING=$(mktemp -d)
+echo "STAGING=${STAGING} on volume: $(df -h "${STAGING}" | tail -n1)"
 cp -R "${BUNDLE_DIR}/macos/Nova.app" "${STAGING}/"
 ln -s /Applications "${STAGING}/Applications"
+_report_disk "staged, before hdiutil"
 hdiutil create -volname "Nova" -srcfolder "${STAGING}" -ov -format UDZO "${DMG}"
 rm -rf "${STAGING}"
 
