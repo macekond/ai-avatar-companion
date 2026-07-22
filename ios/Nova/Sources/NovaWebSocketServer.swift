@@ -2,6 +2,16 @@ import Foundation
 import Network
 import NovaCore
 
+/// No iOS port of open_jtalk exists yet (ios/spikes/04-tts-kokoro-openjtalk)
+/// — this analyzer always fails, so `FuriganaFormatter` takes its documented
+/// fallback path (plain escaped text) for Japanese profiles instead of
+/// producing `<ruby>` markup. Real morpheme analysis lands with that spike.
+private struct UnavailableMorphemeAnalyzer: MorphemeAnalyzing {
+    func analyze(_ text: String) throws -> [Morpheme] {
+        throw CocoaError(.featureUnsupported)
+    }
+}
+
 /// In-process WebSocket server replacing the Python `app/server.py` sidecar
 /// (Phase 1/2 of the iOS port plan). Listens on loopback so the bundled
 /// `ui/src/main.js` — unmodified — can open its existing `ws://localhost:8765`
@@ -24,6 +34,18 @@ public final class NovaWebSocketServer: ObservableObject {
     /// One state machine per connection — each browser tab/session is
     /// independent, mirroring `app/server.py`'s per-connection `_session`.
     private var stateMachines: [ObjectIdentifier: SessionStateMachine] = [:]
+
+    /// Active profile memory + the manager that owns it, per connection —
+    /// mirrors `app/server.py`'s per-session `mem_mgr`/`memory` (Phase 7).
+    /// Loaded/created on `avatarLoaded` (mirroring the desktop app loading
+    /// the default profile right after connect).
+    private var memoryManagers: [ObjectIdentifier: MemoryManager] = [:]
+    private var memories: [ObjectIdentifier: ChildMemory] = [:]
+
+    private static func profilesDir() -> URL {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        return base.appendingPathComponent("profiles")
+    }
 
     /// One persistent mic recorder for the whole process — the Python
     /// original scopes `_MicRecorder` per-session, but this app only ever
@@ -175,10 +197,12 @@ public final class NovaWebSocketServer: ObservableObject {
         case .avatarLoaded:
             // main.js sends this immediately on socket open and waits for
             // `init` to hide its "Connecting…" overlay (see ws.onopen /
-            // markServerReady in ui/src/main.js) — real language/level come
-            // from the loaded profile once Phase 7 (memory) is wired in;
-            // "en"/"A" mirrors config.yaml's own defaults for now.
-            send(.initMessage(level: "A", language: "en"), on: connection)
+            // markServerReady in ui/src/main.js).
+            let memory = loadOrCreateDefaultProfile(for: connection)
+            let manager = memoryManagers[ObjectIdentifier(connection)]!
+            send(.profiles(list: manager.listProfiles(), active: manager.slug), on: connection)
+            send(.memoryLoaded(name: memory.profile.name, age: memory.profile.age, language: memory.profile.language, level: memory.profile.level), on: connection)
+            send(.initMessage(level: memory.profile.level, language: memory.profile.language), on: connection)
             // app/server.py sends this right after connect too (line 771) —
             // without it the state label never leaves its static HTML
             // placeholder text, since applyState() only fires on a `state`
@@ -202,10 +226,103 @@ public final class NovaWebSocketServer: ObservableObject {
             speechInterrupted = true
             ttsEngine.stop()
             machine.stopSpeak()
+        case .switchProfile(let slug, let language, let level):
+            switchProfile(slug: slug, language: language, level: level, for: connection)
+        case .deleteProfile(let slug):
+            // Refuses to delete the last remaining profile — mirrors
+            // app/server.py's delete_profile guard (a parent must always
+            // have at least one child profile to fall back to).
+            let id = ObjectIdentifier(connection)
+            let safeSlug = nameToSlug(slug, fallback: "")
+            let isActiveProfile = !safeSlug.isEmpty && memoryManagers[id]?.slug == safeSlug
+            // Delete through the connection's own live manager instance when
+            // it's the active profile — MemoryManager's delete-tombstone is
+            // an instance property, so deleting via a throwaway instance
+            // would leave the live one un-tombstoned and able to resurrect
+            // the file on its next save() (the same bug class the tombstone
+            // pattern exists to prevent).
+            let manager = isActiveProfile ? memoryManagers[id]! : MemoryManager(profilesDir: Self.profilesDir(), slug: slug)
+
+            if manager.listProfiles().count <= 1 {
+                send(.profileError(message: "Can't remove the only child."), on: connection)
+            } else {
+                _ = manager.deleteProfile(slug: slug)
+                if isActiveProfile {
+                    // The active profile is gone — fall back to another
+                    // remaining profile (or create a fresh default if
+                    // somehow none exist) rather than leaving this
+                    // connection pointed at a deleted one.
+                    memories.removeValue(forKey: id)
+                    memoryManagers.removeValue(forKey: id)
+                    let remaining = manager.listProfiles()
+                    let fallback: ChildMemory
+                    if let nextSlug = remaining.first {
+                        let nextManager = MemoryManager(profilesDir: Self.profilesDir(), slug: nextSlug)
+                        fallback = nextManager.load() ?? ChildMemory(profile: ChildProfile(name: nextSlug))
+                        memoryManagers[id] = nextManager
+                        memories[id] = fallback
+                    } else {
+                        fallback = loadOrCreateDefaultProfile(for: connection)
+                    }
+                    let fallbackManager = memoryManagers[id]!
+                    send(.profiles(list: fallbackManager.listProfiles(), active: fallbackManager.slug), on: connection)
+                    send(.memoryLoaded(name: fallback.profile.name, age: fallback.profile.age, language: fallback.profile.language, level: fallback.profile.level), on: connection)
+                    send(.initMessage(level: fallback.profile.level, language: fallback.profile.language), on: connection)
+                } else if let activeManager = memoryManagers[id] {
+                    send(.profiles(list: activeManager.listProfiles(), active: activeManager.slug), on: connection)
+                }
+            }
         default:
             break
         }
         send(.state(machine.state), on: connection)
+    }
+
+    /// Loads the connection's active profile (creating one on first run) —
+    /// mirrors `app/server.py` loading the default child profile right after
+    /// connect. `nameToSlug`'s default fallback ("child") is used since no
+    /// onboarding flow exists yet to collect a real name (Phase 8).
+    @discardableResult
+    private func loadOrCreateDefaultProfile(for connection: NWConnection) -> ChildMemory {
+        let id = ObjectIdentifier(connection)
+        if let existing = memories[id] { return existing }
+
+        let manager = MemoryManager(profilesDir: Self.profilesDir(), slug: "child")
+        let memory = manager.load() ?? ChildMemory(profile: ChildProfile(name: "child"))
+        manager.save(memory)
+        memoryManagers[id] = manager
+        memories[id] = memory
+        return memory
+    }
+
+    /// Handles `switch_profile` — loads an existing profile by slug, or (when
+    /// `language`/`level` are supplied, mirroring the "create from the modal"
+    /// path in app/server.py) creates a new one. Re-sanitizes the slug the
+    /// same way `MemoryManager` itself does, so a crafted slug can't escape
+    /// the profiles directory.
+    private func switchProfile(slug rawSlug: String, language: String?, level: String?, for connection: NWConnection) {
+        let id = ObjectIdentifier(connection)
+        let safeSlug = nameToSlug(rawSlug, fallback: "child")
+        let manager = MemoryManager(profilesDir: Self.profilesDir(), slug: safeSlug)
+
+        let memory: ChildMemory
+        if let existing = manager.load() {
+            memory = existing
+        } else if let language, let level {
+            memory = ChildMemory(profile: ChildProfile(name: safeSlug, language: language, level: level))
+            manager.save(memory)
+        } else {
+            memory = ChildMemory(profile: ChildProfile(name: safeSlug))
+            manager.save(memory)
+        }
+
+        memoryManagers[id] = manager
+        memories[id] = memory
+        stateMachines[id] = SessionStateMachine()
+
+        send(.profiles(list: manager.listProfiles(), active: manager.slug), on: connection)
+        send(.memoryLoaded(name: memory.profile.name, age: memory.profile.age, language: memory.profile.language, level: memory.profile.level), on: connection)
+        send(.initMessage(level: memory.profile.level, language: memory.profile.language), on: connection)
     }
 
     /// Runs whisper_full off the main actor (it's a blocking C call) and,
@@ -215,8 +332,9 @@ public final class NovaWebSocketServer: ObservableObject {
     /// engine are available; otherwise stays in `.thinking` with no further
     /// progress, same as before whisper.cpp was wired in.
     private func transcribeAndContinue(samples: [Float], engine: WhisperEngine, connection: NWConnection) {
+        let language = memories[ObjectIdentifier(connection)]?.profile.language ?? "en"
         Task.detached {
-            let text = try? engine.transcribe(samples: samples, language: "en")
+            let text = try? engine.transcribe(samples: samples, language: language)
             await MainActor.run { [weak self] in
                 guard let self else { return }
                 let id = ObjectIdentifier(connection)
@@ -226,7 +344,8 @@ public final class NovaWebSocketServer: ObservableObject {
                 machine.transcribed(hasText ? trimmed : nil)
                 self.stateMachines[id] = machine
                 if hasText, let trimmed {
-                    self.send(.transcript(text: trimmed, textHtml: nil), on: connection)
+                    let textHtml = FuriganaFormatter(analyzer: UnavailableMorphemeAnalyzer()).annotateFor(trimmed, language: language)
+                    self.send(.transcript(text: trimmed, textHtml: textHtml), on: connection)
                 }
                 self.send(.state(machine.state), on: connection)
 
@@ -250,8 +369,10 @@ public final class NovaWebSocketServer: ObservableObject {
         stateMachines[ObjectIdentifier(connection)] = machine
         send(.state(machine.state), on: connection)
 
-        // memory/appearance wiring lands with Phase 7 (memory) — omitted for now.
-        let builder = PromptBuilder(basePrompt: Self.placeholderBasePrompt, language: "en", level: "A")
+        let profile = memories[ObjectIdentifier(connection)]?.profile
+        let language = profile?.language ?? "en"
+        var builder = PromptBuilder(basePrompt: Self.placeholderBasePrompt, language: language, level: profile?.level ?? "A")
+        builder.memory = memories[ObjectIdentifier(connection)]
         let systemPrompt = builder.build()
         let prompt = "\(systemPrompt)\n\nChild: \(userMessage)\nNova:"
 
@@ -261,7 +382,7 @@ public final class NovaWebSocketServer: ObservableObject {
             await MainActor.run { [weak self] in
                 guard let self else { return }
                 self.speechInterrupted = false
-                self.speakSentences(sentences, index: 0, connection: connection)
+                self.speakSentences(sentences, index: 0, language: language, connection: connection)
             }
         }
     }
@@ -273,7 +394,7 @@ public final class NovaWebSocketServer: ObservableObject {
     /// Recurses to the next sentence on finish; transitions to `.idle` once
     /// all sentences have been spoken (or the barge-in path via
     /// `stopSpeak`/`ttsEngine.stop()` cut it short).
-    private func speakSentences(_ sentences: [String], index: Int, connection: NWConnection) {
+    private func speakSentences(_ sentences: [String], index: Int, language: String, connection: NWConnection) {
         guard !speechInterrupted, index < sentences.count else {
             let id = ObjectIdentifier(connection)
             var machine = stateMachines[id] ?? SessionStateMachine()
@@ -282,11 +403,12 @@ public final class NovaWebSocketServer: ObservableObject {
             send(.state(machine.state), on: connection)
             return
         }
-        send(.sentence(text: sentences[index], textHtml: nil), on: connection)
-        ttsEngine.speak(sentences[index], language: "en") { [weak self] amplitude in
+        let textHtml = FuriganaFormatter(analyzer: UnavailableMorphemeAnalyzer()).annotateFor(sentences[index], language: language)
+        send(.sentence(text: sentences[index], textHtml: textHtml), on: connection)
+        ttsEngine.speak(sentences[index], language: language) { [weak self] amplitude in
             self?.send(.amplitude(value: amplitude), on: connection)
         } onFinish: { [weak self] in
-            self?.speakSentences(sentences, index: index + 1, connection: connection)
+            self?.speakSentences(sentences, index: index + 1, language: language, connection: connection)
         }
     }
 
