@@ -1,0 +1,65 @@
+name: Nova
+options:
+  bundleIdPrefix: com.novaapp
+  deploymentTarget:
+    iOS: "17.0"
+packages:
+  NovaCore:
+    path: NovaCore
+targets:
+  Nova:
+    type: application
+    platform: iOS
+    sources:
+      - path: Nova/Sources
+      - path: Nova/Resources/www
+        type: folder
+        buildPhase: resources
+    dependencies:
+      - package: NovaCore
+        product: NovaCore
+    prebuildScripts:
+      - name: Build ui/ frontend
+        script: |
+          set -e
+          npm --prefix "$SRCROOT/../ui" install
+          # --base=./ (not the shared vite.config.js, which the desktop Tauri
+          # build also uses): Vite's default absolute "/assets/..." paths
+          # resolve against the filesystem root when index.html is loaded via
+          # file://, not relative to the html file — breaks asset loading in
+          # WKWebView specifically.
+          npm --prefix "$SRCROOT/../ui" run build -- --base=./
+          rm -rf "$SRCROOT/Nova/Resources/www"
+          cp -R "$SRCROOT/../ui/dist" "$SRCROOT/Nova/Resources/www"
+        basedOnDependencyAnalysis: false
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.novaapp.nova
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        SWIFT_VERSION: "5.9"
+        TARGETED_DEVICE_FAMILY: "1"
+    info:
+      path: Nova/GeneratedInfo.plist
+      properties:
+        UILaunchScreen: {}
+        NSMicrophoneUsageDescription: "Nova listens while you hold the talk button so it can hear your practice conversation."
+  NovaTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: NovaTests
+    dependencies:
+      - target: Nova
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        SWIFT_VERSION: "5.9"
+schemes:
+  Nova:
+    build:
+      targets:
+        Nova: all
+    test:
+      targets:
+        - NovaTests

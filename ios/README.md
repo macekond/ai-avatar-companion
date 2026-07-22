@@ -6,28 +6,62 @@ Scaffolding for a from-scratch, fully on-device iOS build of Nova. The desktop a
 reimplementation of the same protocol and pipeline behaviors, hosting the existing
 `ui/` (three.js/VRM) frontend in a `WKWebView`.
 
-## Status: Phase 0 — feasibility spike, not yet started
+## Status
 
-Nothing here builds or runs yet. `ios/spikes/` holds one subdirectory per spike — each needs to
-become a disposable, minimal Xcode project that proves one native-inference component works
-standalone on a real device before any of the full app (protocol port, state machine, memory
-storage, etc.) gets built. See each spike's `README.md` for what to integrate and what to
-measure. Do not skip ahead to the full app until all four spikes have real numbers.
+**Working today, verified on iOS Simulator:**
+- `NovaCore` (Swift package): TDD port of the mechanical, device-independent logic —
+  CEFR/JLPT level tables + `LANGUAGE_LOCK` (`Levels.swift`), the sentence-boundary streaming
+  splitter (`SentenceSegmenter.swift`), `ChildProfile`/`ChildMemory`/`MemoryManager` including
+  `name_to_slug` and the delete-tombstone pattern (`Memory.swift`), prompt assembly
+  (`PromptBuilder.swift`), furigana annotation behind a swappable analyzer protocol
+  (`Furigana.swift`), the 5-state session machine (`SessionStateMachine.swift`), the
+  one-reader-on-socket invariant (`MessageStash.swift`), the stale-callback guard
+  (`GenerationGuard.swift`), and the full WebSocket wire protocol (`ProtocolMessages.swift`).
+  Run `swift test` inside `ios/NovaCore/` — no simulator or device needed.
+- `Nova` app target: a SwiftUI shell hosting the **real, unmodified** `ui/dist` build in a
+  `WKWebView`, served over a custom URL scheme (`NovaSchemeHandler.swift`) rather than `file://`
+  — `file://` origins are CORS-opaque in WKWebView, and Vite's `<script type="module"
+  crossorigin>` output can never satisfy that, so the frontend's JS silently never ran until
+  this was fixed. An in-process WebSocket server (`NovaWebSocketServer.swift`, built on
+  `Network.framework`) implements enough of the real protocol (`avatar_loaded` → `init` +
+  `state`, plus PTT/stop_speak state transitions) that the actual VRM avatar renders and the
+  real "👋 Say hi to Nova!" button appears — verified by installing and launching the built
+  app on a simulator and screenshotting it, not just by getting a clean compile.
 
-## Environment requirements (not available in a terminal-only session)
+**Not done yet** (still Phase 0/3-6 per the plan): no real STT/LLM/TTS engines are wired in —
+`pttStop` currently assumes audio was always captured, and no sentence/amplitude ever flows.
+Nothing has been measured on a **physical** iPhone; simulator numbers for latency, memory, and
+thermal behavior are not representative of the real thing, so Phase 0's actual go/no-go
+question (can whisper.cpp + llama.cpp + Kokoro/open_jtalk coexist fast enough on real hardware)
+is still open. `ios/spikes/` holds the per-component spike instructions for that work.
+
+## Environment requirements
 
 - **Full Xcode** (not just Command Line Tools) — needed for the iOS SDK, Metal shader
-  compilation, and device provisioning. Command Line Tools alone (`swift --version` working
-  for a macOS target) is not sufficient; `xcodebuild` needs the full Xcode.app installed and
-  selected via `xcode-select -s /Applications/Xcode.app`.
-- **A physical iPhone**, connected and provisioned for development. Simulator numbers for
-  Metal GPU performance, thermal throttling, and jetsam memory limits are not representative —
-  do not treat simulator results as a spike pass.
+  compilation, and device provisioning.
+- **[XcodeGen](https://github.com/yonaskolb/XcodeGen)** (`brew install xcodegen`) generates
+  `Nova.xcodeproj` from `project.yml`, which is the checked-in source of truth — the
+  `.xcodeproj` itself is gitignored. After cloning or editing `project.yml`, run:
+  ```
+  cd ios && xcodegen generate
+  ```
+- **A physical iPhone** for anything performance-related. The simulator (no Metal GPU passthrough
+  in the way a device has it, no real thermal/jetsam behavior) is enough to verify the app
+  actually renders and the protocol wiring works, which is what's been done so far — not enough
+  to answer Phase 0's real questions.
 
 ## Layout
 
 ```
 ios/
+  project.yml                    XcodeGen spec — source of truth for Nova.xcodeproj
+  Nova/
+    Sources/                     NovaApp.swift, ContentView.swift (WKWebView host),
+                                  NovaSchemeHandler.swift, NovaWebSocketServer.swift
+    Resources/www/               ui/dist, copied in by an Xcode prebuild script (gitignored;
+                                  regenerated every build via `npm run build -- --base=./`)
+  NovaCore/                      Swift package — the TDD-tested mechanical logic (see Status)
+  NovaTests/                     app-level test target (thin; NovaCore's own tests do the work)
   spikes/
     01-stt-whisper/              whisper.cpp (or WhisperKit) standalone STT spike
     02-llm-llama/                llama.cpp + Metal standalone LLM spike
@@ -49,4 +83,6 @@ investigate first — vendoring a guess would just be noise.
 
 ```
 git submodule update --init --recursive
+brew install xcodegen
+cd ios && xcodegen generate
 ```
