@@ -58,3 +58,34 @@ added and confirmed by test to actually halt the remaining reply, not just the i
 This means the app has genuine (if not final-quality) spoken output today. Piper/Kokoro remain
 the real target engines for actual production quality — this spike's original scope is
 unchanged and still pending a physical device + the cross-compile work above.
+
+## Follow-up investigation: why this is harder than whisper.cpp/llama.cpp/open_jtalk were
+
+Those three all had clean CMake-based iOS-ready build systems — genuinely tractable, as the
+other spikes document. Piper's two dependencies are a different category:
+
+- **espeak-ng** (the phonemizer `piper-phonemize` wraps) uses **autotools**, not CMake — no
+  `CMakeLists.txt` anywhere in its source tree, only `configure.ac`/`Makefile.am` plus a
+  separate Android NDK build (Gradle/`jni/`) that doesn't transfer to iOS. Generating `configure`
+  requires `autoreconf`/`automake`/`libtool` (installed via `brew install autoconf automake
+  libtool pkg-config` — straightforward) and hit friction partway through `./autogen.sh`
+  (automake's dist-file checks erroring on a missing `ChangeLog.md` that persisted even after
+  creating the file) before a `configure` script was ever produced. Autotools cross-compilation
+  in general is more fragile than CMake's built-in iOS toolchain support (manual `--host=` triples,
+  hand-written cross toolchain wrapper scripts, configure-time test programs that can't execute
+  against a cross-compiled target) — this is real, bounded work, but a different scale of effort
+  than the CMake-based wins.
+- **onnxruntime** (needed for Piper's actual acoustic model — and Kokoro's) has **no prebuilt iOS
+  binary in its GitHub releases** (checked `api.github.com/repos/microsoft/onnxruntime/releases/
+  latest` — only linux/macOS/windows assets). Its iOS distribution goes through CocoaPods
+  (`onnxruntime-objc`/`onnxruntime-c`), which points at a separately-hosted prebuilt xcframework
+  whose exact CDN URL wasn't found without CocoaPods' own trunk-lookup tooling; the alternative is
+  onnxruntime's own from-source iOS build (`build_ios.py`), a considerably larger CMake project
+  than any of whisper.cpp/llama.cpp/open_jtalk with its own multi-step documented process — not
+  attempted this session given the scale.
+
+**Net effect**: `AVSpeechSynthesizer` remains what actually produces audio today (verified
+working, see above). Real Piper (and Kokoro) TTS audio is genuinely open work, not just
+untried — it needs either the CocoaPods-hosted onnxruntime xcframework URL (tractable once
+found) or a full from-source onnxruntime iOS build, plus espeak-ng's autotools cross-compile
+debugged past the point reached here.
