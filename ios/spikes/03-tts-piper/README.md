@@ -110,9 +110,31 @@ audio would sound wrong (placeholder style, not a trained voice), but this prove
 tensor-plumbing, session-lifecycle, and C API integration is correct — the risk that mattered
 (does onnxruntime + this specific model graph actually run on iOS) is resolved.
 
-**Still needed**: parsing the voices file's binary format (`.bin`, per-length style vectors) to
-replace the placeholder, wiring real phonemes from the open_jtalk/misaki-equivalent path
-(Phase 6) instead of a hardcoded test string, and playback/amplitude integration into
-`NovaWebSocketServer` (currently only `AVSpeechSynthesizer` is wired into the live reply flow).
+## Update: real voice styling parsed and verified — placeholder eliminated
+
+Kokoro's voices file (`voices-v1.0.bin`) turned out to be a numpy `.npz` — a ZIP archive of
+per-voice `.npy` files, each shaped `(maxLength, 1, styleWidth)` — pure binary parsing, no native
+library needed. `NpyArray.swift` (numpy `.npy` v1.0 format) + `StoredZipReader.swift` (minimal
+STORED-only ZIP reader) + `KokoroVoiceStore.swift` (ties them together, porting
+`voice[len(tokens)]` indexing) are all TDD'd in NovaCore against hand-crafted fixtures.
+
+**Verified against the real 28MB file, not just synthetic fixtures** — this caught a real bug
+the fixtures couldn't: the actual file uses **ZIP64** (32-bit size fields are `0xFFFFFFFF`
+sentinels; real sizes live in a tag-`0x0001` extended-info extra field), which a first-pass
+STORED-only reader didn't handle and threw on the very first entry. Fixed, then re-verified: the
+parsed `af_alloy` style vector matches Python's own `numpy.load()` output exactly
+(`-0.23859501, -0.05444383, -0.01275184, ...`).
+
+**Then verified the full real-voice synthesis pipeline end-to-end** (not a placeholder style
+vector this time): loaded the real model + real voices file into the running app, tokenized
+`"hɪˈloʊ ðɛr"` ("hello there"), looked up `af_alloy`'s real style vector for that token count,
+and ran inference — produced 39,000 samples (1.625s at 24kHz, a plausible duration for that
+phrase) with max amplitude 0.78 (no clipping) and RMS 0.095 (a healthy speech-level signal, not
+noise or silence) — exactly the statistical signature of real, correctly-scaled speech audio.
+
+**Still needed**: wiring real Japanese phonemes into this pipeline (Kokoro's IPA-style vocab
+needs a `misaki`-equivalent JA phoneme mapper — a different, not-yet-ported step from
+open_jtalk's kana readings used for furigana), and playback/amplitude integration into
+`NovaWebSocketServer`'s live reply flow (currently only `AVSpeechSynthesizer` is wired in there).
 Piper (English) remains separately blocked on **espeak-ng's autotools cross-compile**, still
 unresolved. `AVSpeechSynthesizer` remains what actually produces audio in the live app today.
