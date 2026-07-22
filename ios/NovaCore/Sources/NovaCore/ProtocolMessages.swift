@@ -86,6 +86,7 @@ public enum ServerMessage: Equatable {
     case conversationReset
     case conversationTurn(id: Int, you: String, nova: String, youHtml: String?, novaHtml: String?)
     case conversationCorrection(id: Int, kind: String, wrong: String, right: String, wrongHtml: String?, rightHtml: String?)
+    case setupStatus(phase: String, detail: String)
 }
 
 extension ServerMessage: Encodable {
@@ -94,6 +95,7 @@ extension ServerMessage: Encodable {
         case state, text, textHtml = "text_html", value
         case list, active, message
         case name, age
+        case phase, detail
         case id, you, nova, youHtml = "you_html", novaHtml = "nova_html"
         case kind, wrong, right, wrongHtml = "wrong_html", rightHtml = "right_html"
     }
@@ -167,6 +169,10 @@ extension ServerMessage: Encodable {
             try c.encode(right, forKey: .right)
             try c.encodeIfPresent(wrongHtml, forKey: .wrongHtml)
             try c.encodeIfPresent(rightHtml, forKey: .rightHtml)
+        case .setupStatus(let phase, let detail):
+            try c.encode("setup_status", forKey: .type)
+            try c.encode(phase, forKey: .phase)
+            try c.encode(detail, forKey: .detail)
         }
     }
 }

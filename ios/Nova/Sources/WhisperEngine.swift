@@ -22,7 +22,18 @@ final class WhisperEngine: @unchecked Sendable {
     /// own first-run model fetch), so this must be resolved by the caller.
     init(modelPath: String) throws {
         var params = whisper_context_default_params()
+        #if targetEnvironment(simulator)
+        // The iOS Simulator's Metal shim (MTLSimDevice) crashes allocating
+        // the large GPU buffer a ~500MB model needs — hit this directly:
+        // ggml_metal_buffer_set_tensor -> newBufferWithLength:... ->
+        // _xpc_shmem_create_with_prot -> _xpc_api_misuse (SIGTRAP). This is
+        // a simulator-only limitation, not something that exists on real
+        // hardware, so Metal is only disabled here, not unconditionally —
+        // per Spike 1, real device numbers still need Metal enabled.
+        params.use_gpu = false
+        #else
         params.use_gpu = true   // Metal backend, per Spike 1's recommendation
+        #endif
         guard let ctx = whisper_init_from_file_with_params(modelPath, params) else {
             throw EngineError.modelLoadFailed
         }

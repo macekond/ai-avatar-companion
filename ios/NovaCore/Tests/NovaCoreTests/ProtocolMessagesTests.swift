@@ -138,6 +138,12 @@ final class ServerMessageTests: XCTestCase {
         XCTAssertTrue(json.contains(#""right":"went""#))
     }
 
+    func test_setupStatus_encodesPhaseAndDetail() throws {
+        let json = try roundTrip(.setupStatus(phase: "downloading_models", detail: "42%"))
+        XCTAssertTrue(json.contains(#""phase":"downloading_models""#))
+        XCTAssertTrue(json.contains(#""detail":"42%""#))
+    }
+
     func test_profiles_encodesListAndActive() throws {
         let json = try roundTrip(.profiles(list: ["lily", "mia"], active: "lily"))
         XCTAssertTrue(json.contains(#""list":["lily","mia"]"#))

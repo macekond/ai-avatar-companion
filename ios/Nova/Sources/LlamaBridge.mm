@@ -8,6 +8,7 @@
 
 #include <string>
 #include <vector>
+#include <TargetConditionals.h>
 
 namespace {
 
@@ -28,7 +29,15 @@ NovaLlamaHandle nova_llama_load(const char *modelPath) {
     }
 
     llama_model_params modelParams = llama_model_default_params();
+#if TARGET_OS_SIMULATOR
+    // Same iOS Simulator Metal-shim crash WhisperEngine works around (see
+    // its init's comment): MTLSimDevice's shared-memory buffer allocation
+    // traps on large GPU buffers. CPU-only here is simulator-only, not a
+    // real-device limitation.
+    modelParams.n_gpu_layers = 0;
+#else
     modelParams.n_gpu_layers = 999;
+#endif
     llama_model *model = llama_model_load_from_file(modelPath, modelParams);
     if (!model) return nullptr;
 

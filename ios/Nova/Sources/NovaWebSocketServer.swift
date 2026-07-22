@@ -74,6 +74,21 @@ public final class NovaWebSocketServer: ObservableObject {
     /// Same story as `whisperEngine` — see ios/spikes/02-llm-llama/README.md.
     private var llamaEngine: LlamaEngine?
 
+    private let modelDownloader = ModelDownloader()
+    /// Interim direct-from-HuggingFace URLs — Phase 9's plan calls for
+    /// mirroring these to a CDN the app controls rather than depending on a
+    /// live third-party fetch from a shipped App Store app; not done yet.
+    /// Filenames match what `Self.modelPath` looks for.
+    /// "llm.gguf" here is SmolLM2-135M (small enough to verify the download
+    /// mechanism itself without exhausting this environment's disk/bandwidth)
+    /// — NOT one of the real candidates (Llama-3.2-3B / Qwen2.5-3B) Spike 2
+    /// still needs to A/B on a physical device.
+    private static let modelSpecs = [
+        ModelSpec(filename: "ggml-small.bin", urlString: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"),
+        ModelSpec(filename: "llm.gguf", urlString: "https://huggingface.co/QuantFactory/SmolLM2-135M-Instruct-GGUF/resolve/main/SmolLM2-135M-Instruct.Q4_K_M.gguf"),
+    ]
+    private var setupPhase = "ready"
+
     /// Always available (no model download needed) — see SystemTTSEngine's
     /// doc comment for why this, not Piper/Kokoro, is what actually produces
     /// audio right now.
@@ -106,13 +121,57 @@ public final class NovaWebSocketServer: ObservableObject {
         return FileManager.default.fileExists(atPath: path) ? path : nil
     }
 
+    /// Instantiates whichever engines have their model file already present.
+    /// Safe to call again after a download completes to pick up newly
+    /// arrived files. Construction (Metal shader compilation for the LLM
+    /// engine especially) is a genuinely slow blocking call — done via
+    /// `Task.detached` so it never stalls the main actor, which also runs
+    /// this app's WebSocket networking (a real bug caught by testing: engine
+    /// construction on the main actor stalled ping/receive handling long
+    /// enough that a connected client's socket timed out and closed).
+    private func loadAvailableEngines() async {
+        if whisperEngine == nil, let modelPath = Self.modelPath("ggml-small.bin") {
+            whisperEngine = await Task.detached { try? WhisperEngine(modelPath: modelPath) }.value
+        }
+        if llamaEngine == nil, let modelPath = Self.modelPath("llm.gguf") {
+            llamaEngine = await Task.detached { try? LlamaEngine(modelPath: modelPath) }.value
+        }
+    }
+
+    /// Downloads whatever's missing (Phase 9), broadcasting `setup_status`
+    /// progress to every connected client along the way — mirrors
+    /// app/server.py's `setup_state`/`setup_watchers` broadcast pattern
+    /// (lines ~1412-1468), just without the multi-watcher plumbing since
+    /// this app only ever has one local WKWebView client.
+    private func downloadMissingModelsThenLoad() async {
+        await modelDownloader.downloadMissing(Self.modelSpecs) { [weak self] fraction in
+            guard let self else { return }
+            let percent = Int(fraction * 100)
+            self.broadcast(.setupStatus(phase: "downloading_models", detail: "\(percent)%"))
+        }
+        await loadAvailableEngines()
+        setupPhase = "ready"
+        broadcast(.setupStatus(phase: "ready", detail: ""))
+    }
+
+    private func broadcast(_ message: ServerMessage) {
+        for connection in connections.values {
+            send(message, on: connection)
+        }
+    }
+
     public func start() throws {
         try recorder.start()
-        if let modelPath = Self.modelPath("ggml-small.bin") {
-            whisperEngine = try? WhisperEngine(modelPath: modelPath)
-        }
-        if let modelPath = Self.modelPath("llm.gguf") {
-            llamaEngine = try? LlamaEngine(modelPath: modelPath)
+        setupPhase = "loading_models"
+        Task {
+            await loadAvailableEngines()
+            if whisperEngine == nil || llamaEngine == nil {
+                setupPhase = "downloading_models"
+                await downloadMissingModelsThenLoad()
+            } else {
+                setupPhase = "ready"
+                broadcast(.setupStatus(phase: "ready", detail: ""))
+            }
         }
         guard let nwPort = NWEndpoint.Port(rawValue: port) else {
             throw ServerError.invalidPort
@@ -209,7 +268,11 @@ public final class NovaWebSocketServer: ObservableObject {
         case .avatarLoaded:
             // main.js sends this immediately on socket open and waits for
             // `init` to hide its "Connecting…" overlay (see ws.onopen /
-            // markServerReady in ui/src/main.js).
+            // markServerReady in ui/src/main.js). A connection that lands
+            // mid-download gets the current phase immediately, same as
+            // app/server.py sending `setup_state` right away rather than
+            // making a late-joining client wait for the next progress tick.
+            send(.setupStatus(phase: setupPhase, detail: ""), on: connection)
             let (memory, isNewProfile) = loadOrCreateDefaultProfile(for: connection)
             if isNewProfile {
                 startOnboarding(for: connection)
