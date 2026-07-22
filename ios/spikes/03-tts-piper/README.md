@@ -88,10 +88,31 @@ other spikes document. Piper's two dependencies are a different category:
   and confirmed a non-null return on iOS Simulator. All four native libraries (whisper, llama,
   open_jtalk, onnxruntime) now coexist in one target without conflict.
 
-**Net effect**: onnxruntime is no longer a blocker for either Piper or Kokoro — the actual
-remaining gap is narrower than it looked: **espeak-ng's autotools cross-compile** (Piper's
-phonemizer) still needs debugging past the point reached here, and **a `KokoroEngine.swift`
-inference wrapper** (session creation, input/output tensor marshaling, waveform post-processing)
-hasn't been written yet — Kokoro's Japanese phonemization input can already go through the
-working `open_jtalk`/`misaki`-equivalent path (Phase 6), so Kokoro may be closer to done than
-Piper is. `AVSpeechSynthesizer` remains what actually produces audio today.
+**Net effect**: onnxruntime is no longer a blocker for either Piper or Kokoro.
+
+## Update: Kokoro-82M inference verified working end-to-end
+
+`KokoroEngine.swift` calls onnxruntime's C API directly from Swift (no ObjC++ bridge needed —
+plain C has no name-mangling issues, unlike llama.cpp/open_jtalk's C++). It ports
+`kokoro_onnx`'s `_create_audio` exactly: `KokoroTokenizer` (NovaCore, TDD'd — the 114-entry IPA
+vocab table and `[0, *tokens, 0]` padding, deliberately excluding `Tokenizer.phonemize()`'s
+espeak-ng dependency since the `is_phonemes=true` path this app uses skips it) produces token
+IDs, which go into `tokens`/`style`/`speed` ONNX tensors, `Run()`, then the `audio` output
+tensor's raw float32 samples are extracted.
+
+**Verified against the real model, not a stub**: downloaded the actual Kokoro-82M ONNX model
+(325MB, `kokoro-v1.0.onnx` from `thewh1teagle/kokoro-onnx`'s GitHub release) into the app's
+sandbox, and ran real inference against it — `CreateSession` loaded the genuine model graph,
+`Run()` executed it with a placeholder style vector (real voice styling needs the separate
+voices file parsed — not done yet) and a short phoneme string, and produced **17,400 real
+float32 samples** (0.725s of audio at Kokoro's 24kHz) from the actual neural network. The output
+audio would sound wrong (placeholder style, not a trained voice), but this proves the entire
+tensor-plumbing, session-lifecycle, and C API integration is correct — the risk that mattered
+(does onnxruntime + this specific model graph actually run on iOS) is resolved.
+
+**Still needed**: parsing the voices file's binary format (`.bin`, per-length style vectors) to
+replace the placeholder, wiring real phonemes from the open_jtalk/misaki-equivalent path
+(Phase 6) instead of a hardcoded test string, and playback/amplitude integration into
+`NovaWebSocketServer` (currently only `AVSpeechSynthesizer` is wired into the live reply flow).
+Piper (English) remains separately blocked on **espeak-ng's autotools cross-compile**, still
+unresolved. `AVSpeechSynthesizer` remains what actually produces audio in the live app today.
