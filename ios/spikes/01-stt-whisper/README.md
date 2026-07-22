@@ -40,3 +40,24 @@ From `app/pipeline/stt.py`:
 If latency/memory targets are missed, evaluate a smaller model tier (base/tiny multilingual)
 as a fallback, accepting an accuracy hit — flag this trade-off back to the user rather than
 deciding unilaterally.
+
+## Status: engine verified correct on macOS (simulator-only environment — no device access)
+
+`whisper.cpp`'s own `build-xcframework.sh` (requires `cmake`) produces
+`NativeCores/whisper.cpp/build-apple/whisper.xcframework`, linked into the `Nova` Xcode target
+via `project.yml`. `ios/Nova/Sources/WhisperEngine.swift` wraps the C API (`whisper_full`,
+segment iteration, the `no_speech_prob` confidence gate from `app/pipeline/stt.py`) and the
+whole project builds successfully with it linked.
+
+Correctness (not performance) was verified directly against the underlying engine: built
+`whisper-cli` natively for macOS, downloaded the real `tiny.en` ggml model, and transcribed
+whisper.cpp's own `samples/jfk.wav` — output matched the expected quote exactly ("And so my
+fellow Americans ask not what your country can do for you, ask what you can do for your
+country."), confirming the model+engine pipeline itself is sound.
+
+**Still open** (the actual point of this spike): no iOS Simulator or physical-device
+transcription has been run yet (`WhisperEngine` is wired into the Xcode project but not yet
+called from `NovaWebSocketServer` — `MicRecorder`'s captured samples aren't fed to it), and the
+model tier decision (small vs. base vs. tiny — this smoke test used `tiny.en`, not the `small`
+multilingual model the spike calls for) plus every real latency/memory/thermal number still need
+a physical device.

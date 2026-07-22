@@ -31,12 +31,32 @@ public final class NovaWebSocketServer: ObservableObject {
     /// lifetime and session lifetime coincide in practice.
     private let recorder = MicRecorder()
 
+    /// Nil until a model file exists (Phase 9: on-demand download — nothing
+    /// is bundled yet). `WhisperEngine` itself is verified correct (see
+    /// ios/spikes/01-stt-whisper/README.md's Status section); this wiring is
+    /// real but inert until a model is actually present on disk.
+    private var whisperEngine: WhisperEngine?
+
     public init(port: UInt16) {
         self.port = port
     }
 
+    /// Where a downloaded ggml model would live — `Application
+    /// Support/models/ggml-small.bin`, mirroring the desktop app's
+    /// `~/.ai-avatar/` layout under the app's own sandboxed directory.
+    private static func modelPath() -> String? {
+        guard let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
+            return nil
+        }
+        let path = dir.appendingPathComponent("models/ggml-small.bin").path
+        return FileManager.default.fileExists(atPath: path) ? path : nil
+    }
+
     public func start() throws {
         try recorder.start()
+        if let modelPath = Self.modelPath() {
+            whisperEngine = try? WhisperEngine(modelPath: modelPath)
+        }
         guard let nwPort = NWEndpoint.Port(rawValue: port) else {
             throw ServerError.invalidPort
         }
@@ -149,19 +169,41 @@ public final class NovaWebSocketServer: ObservableObject {
             recorder.pttStart()
         case .pttStop:
             // hasAudio mirrors app/pipeline/stt.py's MIN_DURATION_S floor
-            // (STTConstants.hasEnoughAudio) — real transcription of
-            // `samples` still needs an STT engine (whisper.cpp integration,
-            // in progress); until then a captured turn goes straight from
-            // thinking back to idle rather than producing a transcript.
-            let (hasAudio, _samples) = recorder.pttStop()
-            _ = _samples
+            // (STTConstants.hasEnoughAudio).
+            let (hasAudio, samples) = recorder.pttStop()
             machine.pttStop(hasAudio: hasAudio)
+            if hasAudio, let engine = whisperEngine {
+                transcribeAndContinue(samples: samples, engine: engine, connection: connection)
+            }
         case .stopSpeak:
             machine.stopSpeak()
         default:
             break
         }
         send(.state(machine.state), on: connection)
+    }
+
+    /// Runs whisper_full off the main actor (it's a blocking C call) and,
+    /// once done, feeds the result back into that connection's state machine
+    /// — mirrors app/server.py's listening -> thinking -> transcript flow,
+    /// minus the LLM/TTS continuation (Phases 4-5, not wired yet).
+    private func transcribeAndContinue(samples: [Float], engine: WhisperEngine, connection: NWConnection) {
+        Task.detached {
+            let text = try? engine.transcribe(samples: samples, language: "en")
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                let id = ObjectIdentifier(connection)
+                var machine = self.stateMachines[id] ?? SessionStateMachine()
+                let trimmed = text?.trimmingCharacters(in: .whitespaces)
+                let hasText = trimmed?.isEmpty == false
+                machine.transcribed(hasText ? trimmed : nil)
+                self.stateMachines[id] = machine
+                if hasText, let trimmed {
+                    self.send(.transcript(text: trimmed, textHtml: nil), on: connection)
+                }
+                self.send(.state(machine.state), on: connection)
+            }
+        }
     }
 
     private func send(_ message: ServerMessage, on connection: NWConnection) {

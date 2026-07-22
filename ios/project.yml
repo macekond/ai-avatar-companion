@@ -18,6 +18,8 @@ targets:
     dependencies:
       - package: NovaCore
         product: NovaCore
+      - framework: ../NativeCores/whisper.cpp/build-apple/whisper.xcframework
+        embed: true
     prebuildScripts:
       - name: Build ui/ frontend
         script: |
