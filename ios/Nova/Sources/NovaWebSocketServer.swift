@@ -2,10 +2,11 @@ import Foundation
 import Network
 import NovaCore
 
-/// No iOS port of open_jtalk exists yet (ios/spikes/04-tts-kokoro-openjtalk)
-/// — this analyzer always fails, so `FuriganaFormatter` takes its documented
+/// open_jtalk's dictionary isn't bundled/downloaded yet (Phase 9 — see
+/// OpenJTalkMorphemeAnalyzer's doc comment), so this analyzer always fails
+/// until one is present, and `FuriganaFormatter` takes its documented
 /// fallback path (plain escaped text) for Japanese profiles instead of
-/// producing `<ruby>` markup. Real morpheme analysis lands with that spike.
+/// producing `<ruby>` markup.
 private struct UnavailableMorphemeAnalyzer: MorphemeAnalyzing {
     func analyze(_ text: String) throws -> [Morpheme] {
         throw CocoaError(.featureUnsupported)
@@ -74,6 +75,12 @@ public final class NovaWebSocketServer: ObservableObject {
     /// Same story as `whisperEngine` — see ios/spikes/02-llm-llama/README.md.
     private var llamaEngine: LlamaEngine?
 
+    /// Real once open_jtalk's dictionary directory exists on disk (Phase 9 —
+    /// the dictionary itself isn't bundled, only the library is vendored),
+    /// else `UnavailableMorphemeAnalyzer`'s documented fallback applies.
+    private var morphemeAnalyzer: MorphemeAnalyzing = UnavailableMorphemeAnalyzer()
+    private func furiganaFormatter() -> FuriganaFormatter { FuriganaFormatter(analyzer: morphemeAnalyzer) }
+
     private let modelDownloader = ModelDownloader()
     /// Interim direct-from-HuggingFace URLs — Phase 9's plan calls for
     /// mirroring these to a CDN the app controls rather than depending on a
@@ -136,6 +143,26 @@ public final class NovaWebSocketServer: ObservableObject {
         if llamaEngine == nil, let modelPath = Self.modelPath("llm.gguf") {
             llamaEngine = await Task.detached { try? LlamaEngine(modelPath: modelPath) }.value
         }
+        if morphemeAnalyzer is UnavailableMorphemeAnalyzer, let dictDir = Self.dictionaryDirectory() {
+            let loaded: OpenJTalkMorphemeAnalyzer? = await Task.detached {
+                try? OpenJTalkMorphemeAnalyzer(dictDir: dictDir)
+            }.value
+            if let loaded {
+                morphemeAnalyzer = loaded
+            }
+        }
+    }
+
+    /// The compiled naist-jdic directory — not bundled in git (Phase 9: it's
+    /// ~50-100MB of `.dic`/`.bin` files, sourced from pyopenjtalk's own wheel
+    /// distribution, same on-demand pattern as the other models).
+    private static func dictionaryDirectory() -> String? {
+        guard let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
+            return nil
+        }
+        let path = dir.appendingPathComponent("models/openjtalk_dic").path
+        var isDirectory: ObjCBool = false
+        return FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory) && isDirectory.boolValue ? path : nil
     }
 
     /// Downloads whatever's missing (Phase 9), broadcasting `setup_status`
@@ -503,7 +530,7 @@ public final class NovaWebSocketServer: ObservableObject {
                 machine.transcribed(hasText ? trimmed : nil)
                 self.stateMachines[id] = machine
                 if hasText, let trimmed {
-                    let textHtml = FuriganaFormatter(analyzer: UnavailableMorphemeAnalyzer()).annotateFor(trimmed, language: language)
+                    let textHtml = furiganaFormatter().annotateFor(trimmed, language: language)
                     self.send(.transcript(text: trimmed, textHtml: textHtml), on: connection)
                 }
                 self.send(.state(machine.state), on: connection)
@@ -562,7 +589,7 @@ public final class NovaWebSocketServer: ObservableObject {
             send(.state(machine.state), on: connection)
             return
         }
-        let textHtml = FuriganaFormatter(analyzer: UnavailableMorphemeAnalyzer()).annotateFor(sentences[index], language: language)
+        let textHtml = furiganaFormatter().annotateFor(sentences[index], language: language)
         send(.sentence(text: sentences[index], textHtml: textHtml), on: connection)
         ttsEngine.speak(sentences[index], language: language) { [weak self] amplitude in
             self?.send(.amplitude(value: amplitude), on: connection)

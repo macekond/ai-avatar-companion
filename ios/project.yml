@@ -22,6 +22,8 @@ targets:
         embed: true
       - framework: ../NativeCores/llama.cpp/build-apple/llama.xcframework
         embed: true
+      - framework: ../NativeCores/open_jtalk/build-apple/openjtalk.xcframework
+        embed: true
     prebuildScripts:
       - name: Build ui/ frontend
         script: |
@@ -43,7 +45,7 @@ targets:
         CURRENT_PROJECT_VERSION: "1"
         SWIFT_VERSION: "5.9"
         TARGETED_DEVICE_FAMILY: "1"
-        SWIFT_OBJC_BRIDGING_HEADER: Nova/Sources/LlamaBridge.h
+        SWIFT_OBJC_BRIDGING_HEADER: Nova/Sources/Nova-Bridging-Header.h
         CLANG_CXX_LANGUAGE_STANDARD: "c++17"
     info:
       path: Nova/GeneratedInfo.plist

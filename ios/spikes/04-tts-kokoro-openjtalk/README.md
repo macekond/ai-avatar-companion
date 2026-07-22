@@ -57,3 +57,57 @@ incorrect output, stop and bring this back to the user with two real options:
 2. Accept a real schedule slip while a proper port is pursued.
 
 Do not pick either option unilaterally inside this spike.
+
+## Status: open_jtalk cross-compile **succeeded** — this was NOT the risk it looked like
+
+Contrary to this spike's original "no known existing port" framing, `open_jtalk`'s C++ source
+cross-compiles to iOS **cleanly, with zero errors**, for both device and simulator.
+
+**How the source was found**: `pyopenjtalk`'s published PyPI wheel only ships prebuilt binaries
+(no C++ source) — but `pip download --no-binary=:all: --no-deps pyopenjtalk` fetches its sdist,
+which vendors the actual `open_jtalk` 1.11 C++ source at `lib/open_jtalk/src/`. That source is
+now vendored at `NativeCores/open_jtalk/` (BSD-style license — see its `VENDORED.md`).
+
+**Why it was tractable**: `open_jtalk`'s own `CMakeLists.txt` already builds a portable static
+library (`add_library(openjtalk STATIC ...)`) using `check_include_files`/`configure_file` for
+its `mecab/config.h` generation — every header it probes for (`ctype.h`, `dirent.h`, `unistd.h`,
+`sys/mman.h`, etc.) is a standard POSIX header iOS's libc provides. There were no glibc-specific
+assumptions to work around, contrary to this spike's original worry.
+
+**Verified**: ran both
+```
+cmake -B build-ios-sim    -G Xcode -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_SYSROOT=iphonesimulator -DCMAKE_OSX_ARCHITECTURES=arm64 ...
+cmake -B build-ios-device -G Xcode -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_SYSROOT=iphoneos        -DCMAKE_OSX_ARCHITECTURES=arm64 ...
+```
+from `NativeCores/open_jtalk/` — both configure and build with `** BUILD SUCCEEDED **`, producing
+a 2.3MB `libopenjtalk.a` (`lipo -info` confirms `arm64`) for each target. Only two harmless
+warnings (a deprecated `sprintf` call, an integer-narrowing warning), no errors.
+
+**Update — the bridge is built, wired, and verified correct, not just linking:**
+
+1. `OpenJTalkBridge.h`/`.mm` (same ObjC++ pattern as `LlamaBridge.h`/`.mm`) exposes
+   `pyopenjtalk.run_frontend`'s exact call sequence — `text2mecab` → `Mecab_analysis` →
+   `mecab2njd` → `njd_set_pronunciation/digit/accent_phrase/accent_type/unvoiced_vowel/
+   long_vowel` → walk the `NJD` linked list — through a plain-C API. `OpenJTalkMorphemeAnalyzer.swift`
+   implements NovaCore's `MorphemeAnalyzing` protocol against it for real, replacing the stub.
+   Both are wired into `NovaWebSocketServer` (loaded from Application Support/models/openjtalk_dic
+   if present, same on-demand pattern as the other models — see `dictionaryDirectory()`).
+2. **Dictionary sourcing solved for verification purposes**: the compiled dictionary
+   (`open_jtalk_dic_utf_8-1.11`) is bundled inside `pyopenjtalk`'s own wheel — copied directly
+   from the local Python venv's `site-packages/pyopenjtalk/open_jtalk_dic_utf_8-1.11/` into the
+   app's sandbox for testing. A production build still needs to host this ~50-100MB asset
+   somewhere the app can download it from (Phase 9), but sourcing it at all is no longer unclear.
+3. **Correctness verified end-to-end against ground truth**: ran the real on-device pipeline
+   (Swift → ObjC++ bridge → cross-compiled `open_jtalk` → real dictionary) against
+   `"私は日本語を話します"` and compared to `pyopenjtalk.run_frontend()` called directly in
+   Python (same underlying library, different binding) as ground truth. Both agree exactly:
+   `私→わたし`, `日本語→にほんご`, `話し→はなし`, with non-kanji tokens (`は`/`を`/`ます`)
+   passed through unwrapped — the app produced
+   `<ruby>私<rt>わたし</rt></ruby>は<ruby>日本語<rt>にほんご</rt></ruby>を<ruby>話し<rt>はなし</rt></ruby>ます`,
+   byte-for-byte the expected furigana HTML.
+4. Kokoro-82M via onnxruntime-mobile (the other half of this spike) is still untouched — the
+   TTS *audio* side of Japanese support remains open; only phonemization/furigana is done.
+
+The originally-flagged worst-case (a from-scratch C++ library port with unknown feasibility) did
+not materialize. What's left is comparable in shape to the whisper.cpp/llama.cpp integrations
+already done: bridge + wire + verify, not open-ended research.
