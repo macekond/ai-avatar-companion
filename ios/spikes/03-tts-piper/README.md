@@ -75,17 +75,23 @@ other spikes document. Piper's two dependencies are a different category:
   hand-written cross toolchain wrapper scripts, configure-time test programs that can't execute
   against a cross-compiled target) — this is real, bounded work, but a different scale of effort
   than the CMake-based wins.
-- **onnxruntime** (needed for Piper's actual acoustic model — and Kokoro's) has **no prebuilt iOS
-  binary in its GitHub releases** (checked `api.github.com/repos/microsoft/onnxruntime/releases/
-  latest` — only linux/macOS/windows assets). Its iOS distribution goes through CocoaPods
-  (`onnxruntime-objc`/`onnxruntime-c`), which points at a separately-hosted prebuilt xcframework
-  whose exact CDN URL wasn't found without CocoaPods' own trunk-lookup tooling; the alternative is
-  onnxruntime's own from-source iOS build (`build_ios.py`), a considerably larger CMake project
-  than any of whisper.cpp/llama.cpp/open_jtalk with its own multi-step documented process — not
-  attempted this session given the scale.
+- **onnxruntime — UPDATE: solved.** It's true there's no binary in GitHub releases, but its
+  CocoaPods distribution's actual download URL was found and works: the CDN podspec path is
+  MD5-sharded (`https://cdn.cocoapods.org/Specs/<h0>/<h1>/<h2>/onnxruntime-c/<version>/
+  onnxruntime-c.podspec.json`, `h = md5("onnxruntime-c")`); its `source.http` field points at
+  `https://download.onnxruntime.ai/pod-archive-onnxruntime-c-1.20.0.zip`, a **44MB official
+  Microsoft-built xcframework** with real `ios-arm64` and `ios-arm64_x86_64-simulator` slices.
+  Fetched via `ios/scripts/fetch-onnxruntime.sh`, linked into the `Nova` target (its C API headers
+  needed a flattened, platform-independent copy for the bridging header — xcframework per-slice
+  paths aren't directly referenceable via `HEADER_SEARCH_PATHS`), and **verified executing at
+  runtime** (not just linking): called `OrtGetApiBase()` from Swift through the bridging header
+  and confirmed a non-null return on iOS Simulator. All four native libraries (whisper, llama,
+  open_jtalk, onnxruntime) now coexist in one target without conflict.
 
-**Net effect**: `AVSpeechSynthesizer` remains what actually produces audio today (verified
-working, see above). Real Piper (and Kokoro) TTS audio is genuinely open work, not just
-untried — it needs either the CocoaPods-hosted onnxruntime xcframework URL (tractable once
-found) or a full from-source onnxruntime iOS build, plus espeak-ng's autotools cross-compile
-debugged past the point reached here.
+**Net effect**: onnxruntime is no longer a blocker for either Piper or Kokoro — the actual
+remaining gap is narrower than it looked: **espeak-ng's autotools cross-compile** (Piper's
+phonemizer) still needs debugging past the point reached here, and **a `KokoroEngine.swift`
+inference wrapper** (session creation, input/output tensor marshaling, waveform post-processing)
+hasn't been written yet — Kokoro's Japanese phonemization input can already go through the
+working `open_jtalk`/`misaki`-equivalent path (Phase 6), so Kokoro may be closer to done than
+Piper is. `AVSpeechSynthesizer` remains what actually produces audio today.

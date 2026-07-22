@@ -24,6 +24,8 @@ targets:
         embed: true
       - framework: ../NativeCores/open_jtalk/build-apple/openjtalk.xcframework
         embed: true
+      - framework: ../NativeCores/onnxruntime/build-apple/onnxruntime.xcframework
+        embed: true
     prebuildScripts:
       - name: Build ui/ frontend
         script: |
@@ -47,6 +49,7 @@ targets:
         TARGETED_DEVICE_FAMILY: "1"
         SWIFT_OBJC_BRIDGING_HEADER: Nova/Sources/Nova-Bridging-Header.h
         CLANG_CXX_LANGUAGE_STANDARD: "c++17"
+        HEADER_SEARCH_PATHS: "../NativeCores/onnxruntime/build-apple/Headers"
     info:
       path: Nova/GeneratedInfo.plist
       properties:
