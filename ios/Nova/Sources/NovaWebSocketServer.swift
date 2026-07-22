@@ -25,11 +25,18 @@ public final class NovaWebSocketServer: ObservableObject {
     /// independent, mirroring `app/server.py`'s per-connection `_session`.
     private var stateMachines: [ObjectIdentifier: SessionStateMachine] = [:]
 
+    /// One persistent mic recorder for the whole process — the Python
+    /// original scopes `_MicRecorder` per-session, but this app only ever
+    /// hosts a single local WKWebView connection at a time, so process
+    /// lifetime and session lifetime coincide in practice.
+    private let recorder = MicRecorder()
+
     public init(port: UInt16) {
         self.port = port
     }
 
     public func start() throws {
+        try recorder.start()
         guard let nwPort = NWEndpoint.Port(rawValue: port) else {
             throw ServerError.invalidPort
         }
@@ -139,11 +146,16 @@ public final class NovaWebSocketServer: ObservableObject {
             machine.start()
         case .pttStart:
             machine.pttStart()
+            recorder.pttStart()
         case .pttStop:
-            // Placeholder: real audio-presence detection lands in Phase 3
-            // (AVAudioEngine capture). Assume audio was captured for now so
-            // the state machine's happy path is exercisable end-to-end.
-            machine.pttStop(hasAudio: true)
+            // hasAudio mirrors app/pipeline/stt.py's MIN_DURATION_S floor
+            // (STTConstants.hasEnoughAudio) — real transcription of
+            // `samples` still needs an STT engine (whisper.cpp integration,
+            // in progress); until then a captured turn goes straight from
+            // thinking back to idle rather than producing a transcript.
+            let (hasAudio, _samples) = recorder.pttStop()
+            _ = _samples
+            machine.pttStop(hasAudio: hasAudio)
         case .stopSpeak:
             machine.stopSpeak()
         default:
