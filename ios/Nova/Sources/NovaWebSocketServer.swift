@@ -40,6 +40,17 @@ public final class NovaWebSocketServer: ObservableObject {
     /// Same story as `whisperEngine` — see ios/spikes/02-llm-llama/README.md.
     private var llamaEngine: LlamaEngine?
 
+    /// Always available (no model download needed) — see SystemTTSEngine's
+    /// doc comment for why this, not Piper/Kokoro, is what actually produces
+    /// audio right now.
+    private let ttsEngine = SystemTTSEngine()
+
+    /// Set by `stopSpeak` (barge-in) so `speakSentences`'s recursion stops
+    /// dead instead of continuing to the next sentence — `ttsEngine.stop()`
+    /// alone only cancels the *current* utterance; its onFinish callback
+    /// still fires and would otherwise keep the reply going.
+    private var speechInterrupted = false
+
     /// Base personality prompt — placeholder until Config (config.yaml's
     /// `personality.system_prompt`) is ported; PromptBuilder's own load-bearing
     /// assembly order (teaching frame -> level -> memory -> appearance ->
@@ -188,6 +199,8 @@ public final class NovaWebSocketServer: ObservableObject {
                 transcribeAndContinue(samples: samples, engine: engine, connection: connection)
             }
         case .stopSpeak:
+            speechInterrupted = true
+            ttsEngine.stop()
             machine.stopSpeak()
         default:
             break
@@ -224,14 +237,13 @@ public final class NovaWebSocketServer: ObservableObject {
         }
     }
 
-    /// Runs llama_decode off the main actor and streams each completed
-    /// sentence (via NovaCore's SentenceSegmenter, inside LlamaEngine) back
-    /// as a real `sentence` message — mirrors app/pipeline/llm.py's
-    /// streaming boundary, so a future TTS engine could start speaking
-    /// sentence 1 the same way the desktop app does. No TTS/amplitude yet
-    /// (Phase 5): the state machine moves through `.speaking` for the
-    /// duration of generation and back to `.idle`, so the UI's text bubbles
-    /// update in real time even before audio output exists.
+    /// Runs llama_decode off the main actor to get the full reply (segmented
+    /// into sentences via NovaCore's SentenceSegmenter, inside LlamaEngine),
+    /// then hands each sentence to `speakSentences` in turn — mirrors
+    /// app/pipeline/llm.py's streaming boundary crossed with
+    /// app/pipeline/tts.py's speak_streaming: each sentence becomes both a
+    /// `sentence` text message and real spoken audio with live amplitude,
+    /// one at a time, exactly like the desktop app's per-sentence handoff.
     private func replyAndContinue(userMessage: String, engine: LlamaEngine, connection: NWConnection) {
         var machine = stateMachines[ObjectIdentifier(connection)] ?? SessionStateMachine()
         machine.beginSpeaking()
@@ -248,15 +260,33 @@ public final class NovaWebSocketServer: ObservableObject {
             try? engine.generate(prompt: prompt) { sentence in sentences.append(sentence) }
             await MainActor.run { [weak self] in
                 guard let self else { return }
-                for sentence in sentences {
-                    self.send(.sentence(text: sentence, textHtml: nil), on: connection)
-                }
-                let id = ObjectIdentifier(connection)
-                var machine = self.stateMachines[id] ?? SessionStateMachine()
-                machine.finishSpeaking()
-                self.stateMachines[id] = machine
-                self.send(.state(machine.state), on: connection)
+                self.speechInterrupted = false
+                self.speakSentences(sentences, index: 0, connection: connection)
             }
+        }
+    }
+
+    /// Speaks `sentences[index...]` one at a time via `ttsEngine`, sending
+    /// the text as a `sentence` message right before each one starts and
+    /// streaming `amplitude` messages while it plays (drives the avatar's
+    /// lip-sync in ui/src/main.js, same wire shape as the desktop app).
+    /// Recurses to the next sentence on finish; transitions to `.idle` once
+    /// all sentences have been spoken (or the barge-in path via
+    /// `stopSpeak`/`ttsEngine.stop()` cut it short).
+    private func speakSentences(_ sentences: [String], index: Int, connection: NWConnection) {
+        guard !speechInterrupted, index < sentences.count else {
+            let id = ObjectIdentifier(connection)
+            var machine = stateMachines[id] ?? SessionStateMachine()
+            machine.finishSpeaking()
+            stateMachines[id] = machine
+            send(.state(machine.state), on: connection)
+            return
+        }
+        send(.sentence(text: sentences[index], textHtml: nil), on: connection)
+        ttsEngine.speak(sentences[index], language: "en") { [weak self] amplitude in
+            self?.send(.amplitude(value: amplitude), on: connection)
+        } onFinish: { [weak self] in
+            self?.speakSentences(sentences, index: index + 1, connection: connection)
         }
     }
 
