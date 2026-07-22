@@ -47,3 +47,34 @@ Memory pressure crashes/jetsam on a 4-6GB device, decode too slow to sustain str
 Japanese output quality unacceptable even under language-lock prompting → try a JA-specialized
 small model, or flag a real schedule/scope risk back to the user rather than silently
 compromising the language-lock behavior.
+
+## Status: engine verified correct on macOS; linked into the iOS app (simulator-only environment)
+
+Built `llama.cpp`'s own `build-xcframework.sh` — but the full script builds 7 platform slices
+(iOS, iOS-sim, macOS, visionOS×2, tvOS×2) and this environment has a **very small disk quota**
+(hit `ENOSPC` twice, once badly enough that the tool harness itself briefly couldn't write). Use
+`NativeCores/llama.cpp/build-xcframework-ios-only.sh` instead — a trimmed copy that builds only
+iOS device + simulator and deletes intermediates immediately after assembling the xcframework.
+
+**Correctness verified directly** (not performance): built `llama-cli` natively for macOS,
+downloaded a real small GGUF (`SmolLM2-135M-Instruct`, ~100MB — not the eventual 3B model
+candidates, just something fast to fetch), and confirmed it loads and generates actual text via
+Metal (~200 tok/s on this Mac's GPU). Output quality was poor, as expected of a 135M model — this
+only confirms the engine/model-loading pipeline is sound, not anything about the real candidate
+models.
+
+**Real integration obstacle found and fixed**: `whisper.xcframework` and `llama.xcframework` each
+vendor their own (differently versioned) copy of `ggml`. Importing both as Clang modules in the
+same Swift target fails — `'ggml_op' has different definitions in different modules`. Fixed by
+removing `llama.framework`'s `module.modulemap` (in each platform slice) so Clang can never treat
+it as a module, and bridging llama.cpp through a plain-C API (`LlamaBridge.h`/`.mm`, Objective-C++
+`#include <llama/llama.h>` as a normal textual header) instead of `import llama` in Swift —
+`LlamaEngine.swift` talks to that C API via an opaque handle, never touching `ggml` types
+directly. Both engines now link into the same `Nova` target and the app runs correctly on iOS
+Simulator with both present (avatar renders, protocol handshake completes) — verified by
+installing and launching the built app, not just compiling it.
+
+**Still open** (the actual point of this spike): no real 3B candidate model (Llama-3.2-3B vs.
+Qwen2.5-3B) has been tried, no JA language-lock steerability test has been run, and — as with
+Spike 1 — every real latency/memory/thermal number needs a **physical iPhone**, which this
+environment doesn't have.

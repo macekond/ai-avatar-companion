@@ -37,25 +37,37 @@ public final class NovaWebSocketServer: ObservableObject {
     /// real but inert until a model is actually present on disk.
     private var whisperEngine: WhisperEngine?
 
+    /// Same story as `whisperEngine` — see ios/spikes/02-llm-llama/README.md.
+    private var llamaEngine: LlamaEngine?
+
+    /// Base personality prompt — placeholder until Config (config.yaml's
+    /// `personality.system_prompt`) is ported; PromptBuilder's own load-bearing
+    /// assembly order (teaching frame -> level -> memory -> appearance ->
+    /// LANGUAGE_LOCK last) is real and unaffected by this placeholder.
+    private static let placeholderBasePrompt = "You are Nova, a warm and encouraging language-practice companion for children."
+
     public init(port: UInt16) {
         self.port = port
     }
 
-    /// Where a downloaded ggml model would live — `Application
-    /// Support/models/ggml-small.bin`, mirroring the desktop app's
-    /// `~/.ai-avatar/` layout under the app's own sandboxed directory.
-    private static func modelPath() -> String? {
+    /// Where a downloaded model would live under Application Support,
+    /// mirroring the desktop app's `~/.ai-avatar/` layout under the app's
+    /// own sandboxed directory.
+    private static func modelPath(_ filename: String) -> String? {
         guard let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
             return nil
         }
-        let path = dir.appendingPathComponent("models/ggml-small.bin").path
+        let path = dir.appendingPathComponent("models/\(filename)").path
         return FileManager.default.fileExists(atPath: path) ? path : nil
     }
 
     public func start() throws {
         try recorder.start()
-        if let modelPath = Self.modelPath() {
+        if let modelPath = Self.modelPath("ggml-small.bin") {
             whisperEngine = try? WhisperEngine(modelPath: modelPath)
+        }
+        if let modelPath = Self.modelPath("llm.gguf") {
+            llamaEngine = try? LlamaEngine(modelPath: modelPath)
         }
         guard let nwPort = NWEndpoint.Port(rawValue: port) else {
             throw ServerError.invalidPort
@@ -185,8 +197,10 @@ public final class NovaWebSocketServer: ObservableObject {
 
     /// Runs whisper_full off the main actor (it's a blocking C call) and,
     /// once done, feeds the result back into that connection's state machine
-    /// — mirrors app/server.py's listening -> thinking -> transcript flow,
-    /// minus the LLM/TTS continuation (Phases 4-5, not wired yet).
+    /// — mirrors app/server.py's listening -> thinking -> transcript flow.
+    /// Continues into LLM generation (below) when both a transcript and an
+    /// engine are available; otherwise stays in `.thinking` with no further
+    /// progress, same as before whisper.cpp was wired in.
     private func transcribeAndContinue(samples: [Float], engine: WhisperEngine, connection: NWConnection) {
         Task.detached {
             let text = try? engine.transcribe(samples: samples, language: "en")
@@ -201,6 +215,46 @@ public final class NovaWebSocketServer: ObservableObject {
                 if hasText, let trimmed {
                     self.send(.transcript(text: trimmed, textHtml: nil), on: connection)
                 }
+                self.send(.state(machine.state), on: connection)
+
+                if hasText, let trimmed, let llama = self.llamaEngine {
+                    self.replyAndContinue(userMessage: trimmed, engine: llama, connection: connection)
+                }
+            }
+        }
+    }
+
+    /// Runs llama_decode off the main actor and streams each completed
+    /// sentence (via NovaCore's SentenceSegmenter, inside LlamaEngine) back
+    /// as a real `sentence` message — mirrors app/pipeline/llm.py's
+    /// streaming boundary, so a future TTS engine could start speaking
+    /// sentence 1 the same way the desktop app does. No TTS/amplitude yet
+    /// (Phase 5): the state machine moves through `.speaking` for the
+    /// duration of generation and back to `.idle`, so the UI's text bubbles
+    /// update in real time even before audio output exists.
+    private func replyAndContinue(userMessage: String, engine: LlamaEngine, connection: NWConnection) {
+        var machine = stateMachines[ObjectIdentifier(connection)] ?? SessionStateMachine()
+        machine.beginSpeaking()
+        stateMachines[ObjectIdentifier(connection)] = machine
+        send(.state(machine.state), on: connection)
+
+        // memory/appearance wiring lands with Phase 7 (memory) — omitted for now.
+        let builder = PromptBuilder(basePrompt: Self.placeholderBasePrompt, language: "en", level: "A")
+        let systemPrompt = builder.build()
+        let prompt = "\(systemPrompt)\n\nChild: \(userMessage)\nNova:"
+
+        Task.detached {
+            var sentences: [String] = []
+            try? engine.generate(prompt: prompt) { sentence in sentences.append(sentence) }
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                for sentence in sentences {
+                    self.send(.sentence(text: sentence, textHtml: nil), on: connection)
+                }
+                let id = ObjectIdentifier(connection)
+                var machine = self.stateMachines[id] ?? SessionStateMachine()
+                machine.finishSpeaking()
+                self.stateMachines[id] = machine
                 self.send(.state(machine.state), on: connection)
             }
         }
