@@ -42,6 +42,18 @@ public final class NovaWebSocketServer: ObservableObject {
     private var memoryManagers: [ObjectIdentifier: MemoryManager] = [:]
     private var memories: [ObjectIdentifier: ChildMemory] = [:]
 
+    /// Two-turn spoken onboarding (name, then age) for a brand-new profile —
+    /// port of `_run_onboarding` in app/server.py. `nil` for a connection
+    /// means onboarding isn't in progress (either finished, or not needed
+    /// because the profile already existed). `onboardingNames` holds the
+    /// name collected in step 1 until step 2 completes the profile.
+    private enum OnboardingStep {
+        case askingName
+        case askingAge
+    }
+    private var onboardingSteps: [ObjectIdentifier: OnboardingStep] = [:]
+    private var onboardingNames: [ObjectIdentifier: String] = [:]
+
     private static func profilesDir() -> URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         return base.appendingPathComponent("profiles")
@@ -198,7 +210,11 @@ public final class NovaWebSocketServer: ObservableObject {
             // main.js sends this immediately on socket open and waits for
             // `init` to hide its "Connecting…" overlay (see ws.onopen /
             // markServerReady in ui/src/main.js).
-            let memory = loadOrCreateDefaultProfile(for: connection)
+            let (memory, isNewProfile) = loadOrCreateDefaultProfile(for: connection)
+            if isNewProfile {
+                startOnboarding(for: connection)
+                return
+            }
             let manager = memoryManagers[ObjectIdentifier(connection)]!
             send(.profiles(list: manager.listProfiles(), active: manager.slug), on: connection)
             send(.memoryLoaded(name: memory.profile.name, age: memory.profile.age, language: memory.profile.language, level: memory.profile.level), on: connection)
@@ -218,6 +234,17 @@ public final class NovaWebSocketServer: ObservableObject {
             // hasAudio mirrors app/pipeline/stt.py's MIN_DURATION_S floor
             // (STTConstants.hasEnoughAudio).
             let (hasAudio, samples) = recorder.pttStop()
+            if let step = onboardingSteps[ObjectIdentifier(connection)] {
+                // Onboarding has its own explicit state sends (matching the
+                // Python original) rather than routing through the general
+                // session state machine.
+                if hasAudio, let engine = whisperEngine {
+                    transcribeForOnboarding(samples: samples, engine: engine, step: step, connection: connection)
+                } else {
+                    continueOnboarding(transcript: nil, step: step, connection: connection)
+                }
+                return
+            }
             machine.pttStop(hasAudio: hasAudio)
             if hasAudio, let engine = whisperEngine {
                 transcribeAndContinue(samples: samples, engine: engine, connection: connection)
@@ -262,7 +289,7 @@ public final class NovaWebSocketServer: ObservableObject {
                         memoryManagers[id] = nextManager
                         memories[id] = fallback
                     } else {
-                        fallback = loadOrCreateDefaultProfile(for: connection)
+                        fallback = loadOrCreateDefaultProfile(for: connection).memory
                     }
                     let fallbackManager = memoryManagers[id]!
                     send(.profiles(list: fallbackManager.listProfiles(), active: fallbackManager.slug), on: connection)
@@ -280,19 +307,76 @@ public final class NovaWebSocketServer: ObservableObject {
 
     /// Loads the connection's active profile (creating one on first run) —
     /// mirrors `app/server.py` loading the default child profile right after
-    /// connect. `nameToSlug`'s default fallback ("child") is used since no
-    /// onboarding flow exists yet to collect a real name (Phase 8).
-    @discardableResult
-    private func loadOrCreateDefaultProfile(for connection: NWConnection) -> ChildMemory {
+    /// connect. Returns whether a profile file already existed (`false`
+    /// means this is a brand-new profile that still needs spoken onboarding,
+    /// per `app/server.py`'s "no profile file exists" trigger).
+    private func loadOrCreateDefaultProfile(for connection: NWConnection) -> (memory: ChildMemory, isNew: Bool) {
         let id = ObjectIdentifier(connection)
-        if let existing = memories[id] { return existing }
+        if let existing = memories[id] { return (existing, false) }
 
         let manager = MemoryManager(profilesDir: Self.profilesDir(), slug: "child")
-        let memory = manager.load() ?? ChildMemory(profile: ChildProfile(name: "child"))
-        manager.save(memory)
         memoryManagers[id] = manager
-        memories[id] = memory
-        return memory
+        if let existing = manager.load() {
+            memories[id] = existing
+            return (existing, false)
+        }
+        // Not saved yet — onboarding (startOnboarding) fills in the real
+        // name/age and saves once both turns complete, mirroring
+        // _run_onboarding's mem_mgr.save(memory) at the end, not before.
+        let placeholder = ChildMemory(profile: ChildProfile(name: "child"))
+        memories[id] = placeholder
+        return (placeholder, true)
+    }
+
+    /// Kicks off the two-turn spoken onboarding — port of `_run_onboarding`.
+    /// Speaks the "what's your name?" question directly via `ttsEngine`
+    /// (onboarding has its own explicit state sends in the Python original
+    /// rather than going through the general session state machine).
+    private func startOnboarding(for connection: NWConnection) {
+        let id = ObjectIdentifier(connection)
+        onboardingSteps[id] = .askingName
+        send(.onboardingStart, on: connection)
+        speakOnboardingPrompt(systemText("onboarding_ask_name", language: "en", ["avatar": "Nova"]), on: connection)
+    }
+
+    private func speakOnboardingPrompt(_ text: String, on connection: NWConnection) {
+        send(.state(.speaking), on: connection)
+        send(.sentence(text: text, textHtml: nil), on: connection)
+        ttsEngine.speak(text, language: "en") { [weak self] amplitude in
+            self?.send(.amplitude(value: amplitude), on: connection)
+        } onFinish: { [weak self] in
+            self?.send(.state(.idle), on: connection)
+        }
+    }
+
+    /// Handles one onboarding turn's transcript — advances from asking the
+    /// name to asking the age, or (after age) finalizes the real profile and
+    /// sends the normal post-connect profiles/memory_loaded/init sequence,
+    /// exactly mirroring `_run_onboarding`'s two `_one_ptt_turn` calls.
+    private func continueOnboarding(transcript: String?, step: OnboardingStep, connection: NWConnection) {
+        let id = ObjectIdentifier(connection)
+        switch step {
+        case .askingName:
+            let name = transcript.flatMap { extractName(from: $0) } ?? "Friend"
+            onboardingNames[id] = name
+            onboardingSteps[id] = .askingAge
+            speakOnboardingPrompt(systemText("onboarding_ask_age", language: "en", ["name": name]), on: connection)
+        case .askingAge:
+            let age = transcript.flatMap { extractAge(from: $0) }
+            let name = onboardingNames[id] ?? "Friend"
+            onboardingNames.removeValue(forKey: id)
+            onboardingSteps.removeValue(forKey: id)
+
+            let memory = ChildMemory(profile: ChildProfile(name: name, age: age))
+            memoryManagers[id]?.save(memory)
+            memories[id] = memory
+
+            guard let manager = memoryManagers[id] else { return }
+            send(.profiles(list: manager.listProfiles(), active: manager.slug), on: connection)
+            send(.memoryLoaded(name: memory.profile.name, age: memory.profile.age, language: memory.profile.language, level: memory.profile.level), on: connection)
+            send(.initMessage(level: memory.profile.level, language: memory.profile.language), on: connection)
+            send(.state((stateMachines[id] ?? SessionStateMachine()).state), on: connection)
+        }
     }
 
     /// Handles `switch_profile` — loads an existing profile by slug, or (when
@@ -323,6 +407,18 @@ public final class NovaWebSocketServer: ObservableObject {
         send(.profiles(list: manager.listProfiles(), active: manager.slug), on: connection)
         send(.memoryLoaded(name: memory.profile.name, age: memory.profile.age, language: memory.profile.language, level: memory.profile.level), on: connection)
         send(.initMessage(level: memory.profile.level, language: memory.profile.language), on: connection)
+    }
+
+    /// Onboarding counterpart to `transcribeAndContinue` — same off-main-actor
+    /// whisper_full call, but hands the result to `continueOnboarding`
+    /// instead of the LLM reply flow.
+    private func transcribeForOnboarding(samples: [Float], engine: WhisperEngine, step: OnboardingStep, connection: NWConnection) {
+        Task.detached {
+            let text = try? engine.transcribe(samples: samples, language: "en")
+            await MainActor.run { [weak self] in
+                self?.continueOnboarding(transcript: text, step: step, connection: connection)
+            }
+        }
     }
 
     /// Runs whisper_full off the main actor (it's a blocking C call) and,
