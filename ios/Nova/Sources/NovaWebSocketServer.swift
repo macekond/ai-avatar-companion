@@ -93,18 +93,36 @@ public final class NovaWebSocketServer: ObservableObject {
     private static let modelSpecs = [
         ModelSpec(filename: "ggml-small.bin", urlString: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"),
         ModelSpec(filename: "llm.gguf", urlString: "https://huggingface.co/QuantFactory/SmolLM2-135M-Instruct-GGUF/resolve/main/SmolLM2-135M-Instruct.Q4_K_M.gguf"),
+        ModelSpec(filename: "kokoro-v1.0.onnx", urlString: "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx"),
+        ModelSpec(filename: "voices-v1.0.bin", urlString: "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin"),
     ]
     private var setupPhase = "ready"
 
     /// Always available (no model download needed) — see SystemTTSEngine's
-    /// doc comment for why this, not Piper/Kokoro, is what actually produces
-    /// audio right now.
+    /// doc comment for why this is the guaranteed fallback: for English
+    /// (Piper still blocked on espeak-ng, see ios/spikes/03-tts-piper) it's
+    /// what actually produces audio; for Japanese it's the fallback when
+    /// Kokoro isn't loaded or synthesis fails.
     private let ttsEngine = SystemTTSEngine()
 
+    /// Real once both the Kokoro ONNX model and voices archive exist on disk
+    /// (Phase 9 on-demand download — not bundled). See
+    /// ios/spikes/04-tts-kokoro-openjtalk/README.md and
+    /// ios/spikes/03-tts-piper/README.md's Kokoro updates: this engine and
+    /// its voice-styling/tokenizer plumbing are verified against real models,
+    /// but weren't wired into the live reply flow until now.
+    private var kokoroEngine: KokoroEngine?
+    private var kokoroVoiceStore: KokoroVoiceStore?
+    private let kokoroPlayer = KokoroPlayer()
+    /// `af_alloy` is the voice this engine's Kokoro integration has actually
+    /// been verified against (see the spike README's real-voice-synthesis
+    /// update) — arbitrary otherwise, no per-profile voice picker yet.
+    private static let kokoroVoiceName = "af_alloy"
+
     /// Set by `stopSpeak` (barge-in) so `speakSentences`'s recursion stops
-    /// dead instead of continuing to the next sentence — `ttsEngine.stop()`
-    /// alone only cancels the *current* utterance; its onFinish callback
-    /// still fires and would otherwise keep the reply going.
+    /// dead instead of continuing to the next sentence — stopping the active
+    /// engine alone only cancels the *current* utterance; its onFinish
+    /// callback still fires and would otherwise keep the reply going.
     private var speechInterrupted = false
 
     /// Base personality prompt — placeholder until Config (config.yaml's
@@ -150,6 +168,14 @@ public final class NovaWebSocketServer: ObservableObject {
             if let loaded {
                 morphemeAnalyzer = loaded
             }
+        }
+        if kokoroEngine == nil, let modelPath = Self.modelPath("kokoro-v1.0.onnx") {
+            kokoroEngine = await Task.detached { try? KokoroEngine(modelPath: modelPath) }.value
+        }
+        if kokoroVoiceStore == nil, let voicesPath = Self.modelPath("voices-v1.0.bin") {
+            kokoroVoiceStore = await Task.detached {
+                (try? Data(contentsOf: URL(fileURLWithPath: voicesPath))).flatMap { try? KokoroVoiceStore(data: $0) }
+            }.value
         }
     }
 
@@ -342,6 +368,7 @@ public final class NovaWebSocketServer: ObservableObject {
         case .stopSpeak:
             speechInterrupted = true
             ttsEngine.stop()
+            kokoroPlayer.stop()
             machine.stopSpeak()
         case .switchProfile(let slug, let language, let level):
             switchProfile(slug: slug, language: language, level: level, for: connection)
@@ -591,10 +618,52 @@ public final class NovaWebSocketServer: ObservableObject {
         }
         let textHtml = furiganaFormatter().annotateFor(sentences[index], language: language)
         send(.sentence(text: sentences[index], textHtml: textHtml), on: connection)
-        ttsEngine.speak(sentences[index], language: language) { [weak self] amplitude in
+        speak(sentences[index], language: language) { [weak self] amplitude in
             self?.send(.amplitude(value: amplitude), on: connection)
         } onFinish: { [weak self] in
             self?.speakSentences(sentences, index: index + 1, language: language, connection: connection)
+        }
+    }
+
+    /// Builds the hiragana reading open_jtalk's morpheme analysis produces
+    /// for `text` — the input `JapanesePhonemizer.phonemize` expects, per its
+    /// documented contract (an already-resolved kana reading, not raw
+    /// orthographic text). Falls back to a morpheme's surface when it has no
+    /// reading (matches `FuriganaFormatter`'s same fallback).
+    private func japaneseReading(for text: String) throws -> String {
+        let morphemes = try morphemeAnalyzer.analyze(text)
+        return morphemes.map { katakanaToHiragana($0.readingKatakana ?? $0.surface) }.joined()
+    }
+
+    /// TTS dispatch by language (Phase 5's `TTSRouter`): Japanese text goes
+    /// through open_jtalk -> `JapanesePhonemizer` -> Kokoro when a model,
+    /// voices archive, and real morpheme analyzer are all loaded; any
+    /// failure along that path (missing files, a throw, empty output) falls
+    /// back to `ttsEngine` (`AVSpeechSynthesizer`), mirroring the "never
+    /// hard-fail" guarantee `_SystemTTSBackend` provides on desktop. English
+    /// always uses `ttsEngine` — Piper remains blocked (see
+    /// ios/spikes/03-tts-piper/README.md).
+    private func speak(_ text: String, language: String, onAmplitude: @escaping (Double) -> Void, onFinish: @escaping () -> Void) {
+        guard language == "ja", let kokoroEngine, let kokoroVoiceStore, !(morphemeAnalyzer is UnavailableMorphemeAnalyzer) else {
+            ttsEngine.speak(text, language: language, onAmplitude: onAmplitude, onFinish: onFinish)
+            return
+        }
+        Task.detached { [weak self] in
+            guard let self else { return }
+            do {
+                let hiragana = try await self.japaneseReading(for: text)
+                let phonemes = JapanesePhonemizer.phonemize(hiragana: hiragana)
+                let tokenCount = KokoroTokenizer.tokenize(phonemes).count
+                let style = try kokoroVoiceStore.styleVector(voice: Self.kokoroVoiceName, tokenCount: tokenCount)
+                let samples = try kokoroEngine.synthesize(phonemes: phonemes, style: style)
+                await MainActor.run {
+                    self.kokoroPlayer.play(samples: samples, sampleRate: KokoroEngine.sampleRate, onAmplitude: onAmplitude, onFinish: onFinish)
+                }
+            } catch {
+                await MainActor.run {
+                    self.ttsEngine.speak(text, language: language, onAmplitude: onAmplitude, onFinish: onFinish)
+                }
+            }
         }
     }
 

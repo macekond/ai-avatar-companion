@@ -138,3 +138,29 @@ open_jtalk's kana readings used for furigana), and playback/amplitude integratio
 `NovaWebSocketServer`'s live reply flow (currently only `AVSpeechSynthesizer` is wired in there).
 Piper (English) remains separately blocked on **espeak-ng's autotools cross-compile**, still
 unresolved. `AVSpeechSynthesizer` remains what actually produces audio in the live app today.
+
+## Update: Kokoro wired into the live reply flow for Japanese
+
+`JapanesePhonemizer.swift` (NovaCore, TDD'd against `misaki.ja.JAG2P` run directly in Python —
+its `HEPBURN` table + digraph/sokuon/moraic-nasal/long-vowel-mark logic) bridges the remaining
+gap: `NovaWebSocketServer.speak(_:language:...)` now dispatches Japanese text through
+`morphemeAnalyzer.analyze()` (open_jtalk) -> `katakanaToHiragana` -> `JapanesePhonemizer` ->
+`KokoroTokenizer` -> `KokoroVoiceStore.styleVector(voice: "af_alloy", ...)` -> `KokoroEngine.synthesize`
+-> a new `KokoroPlayer` (`AVAudioEngine`-based, direct port of `_play_float_audio`'s
+`BLOCK = max(256, sampleRate/20)` RMS-pulse-at-20Hz algorithm). Any failure at any step (missing
+model/voices file, missing dictionary, a throw) falls back to `ttsEngine`
+(`AVSpeechSynthesizer`) — the same "never hard-fail" guarantee as before, now enforced by a
+`do`/`catch` around the whole Kokoro path rather than Kokoro being entirely unwired.
+
+**Verified real (not just compiling)**: built and ran the actual app in iOS Simulator via
+`xcodebuild`/`xcrun simctl` (full Xcode is now installed, not just CLT), confirmed the
+WebSocket server starts, a real `websockets` Python client can complete
+`avatar_loaded` -> `switch_profile` (to a Japanese profile) -> `stop_speak`, and that
+`stop_speak` cleanly no-ops on both `ttsEngine` and the new `kokoroPlayer` when nothing is
+speaking (this is exactly the code path a prior barge-in bug lived in). No model/voices file is
+present in this sandboxed environment (disk-constrained, and downloading the ~350MB combined
+Kokoro assets here isn't warranted just to re-prove what Kokoro's own inference correctness
+update above already verified against the real files) — so this run exercises the fallback
+branch and the routing/plumbing, not a live Kokoro-Japanese utterance end-to-end. That last mile
+(real device, real downloaded model, an actual spoken Japanese reply) still needs a physical
+device pass, same as every other engine in this app.

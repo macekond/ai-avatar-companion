@@ -23,17 +23,27 @@ reimplementation of the same protocol and pipeline behaviors, hosting the existi
   — `file://` origins are CORS-opaque in WKWebView, and Vite's `<script type="module"
   crossorigin>` output can never satisfy that, so the frontend's JS silently never ran until
   this was fixed. An in-process WebSocket server (`NovaWebSocketServer.swift`, built on
-  `Network.framework`) implements enough of the real protocol (`avatar_loaded` → `init` +
-  `state`, plus PTT/stop_speak state transitions) that the actual VRM avatar renders and the
-  real "👋 Say hi to Nova!" button appears — verified by installing and launching the built
-  app on a simulator and screenshotting it, not just by getting a clean compile.
+  `Network.framework`) implements the real protocol end-to-end: onboarding, profile
+  switch/delete, PTT → `WhisperEngine` (whisper.cpp) → `LlamaEngine` (llama.cpp + Metal) →
+  per-sentence TTS with live amplitude streaming, furigana annotation via
+  `OpenJTalkMorphemeAnalyzer`, and barge-in (`stop_speak`). TTS is dispatched by language: `en`
+  always goes through `SystemTTSEngine` (`AVSpeechSynthesizer`, since Piper remains blocked —
+  see `ios/spikes/03-tts-piper`); `ja` goes through open_jtalk → `JapanesePhonemizer` →
+  `KokoroEngine`/`KokoroPlayer` when a Kokoro model, voices file, and dictionary are all present
+  on disk, falling back to `SystemTTSEngine` otherwise (mirrors the desktop app's "never
+  hard-fail" TTS guarantee). All of STT/LLM/TTS engines are **inert until their model files
+  exist** (Phase 9: on-demand download to Application Support, via `ModelDownloader` — nothing
+  is bundled in the IPA).
 
-**Not done yet** (still Phase 0/3-6 per the plan): no real STT/LLM/TTS engines are wired in —
-`pttStop` currently assumes audio was always captured, and no sentence/amplitude ever flows.
-Nothing has been measured on a **physical** iPhone; simulator numbers for latency, memory, and
-thermal behavior are not representative of the real thing, so Phase 0's actual go/no-go
-question (can whisper.cpp + llama.cpp + Kokoro/open_jtalk coexist fast enough on real hardware)
-is still open. `ios/spikes/` holds the per-component spike instructions for that work.
+**Not done yet**: Piper's espeak-ng autotools cross-compile (English TTS relies on the
+`AVSpeechSynthesizer` fallback until this lands); a production-ready model CDN (interim
+`modelSpecs` point straight at HuggingFace/GitHub, not a CDN the app controls); a per-profile
+voice picker for Kokoro (hardcoded to `af_alloy`). Nothing has been measured on a **physical**
+iPhone; simulator numbers for latency, memory, and thermal behavior are not representative of
+the real thing, so Phase 0's actual go/no-go question (can whisper.cpp + llama.cpp +
+Kokoro/open_jtalk coexist fast enough on real hardware) is still open. `ios/spikes/` holds the
+per-component spike write-ups with the real-model/real-device verification status for each
+engine.
 
 ## Environment requirements
 
