@@ -164,3 +164,65 @@ update above already verified against the real files) — so this run exercises 
 branch and the routing/plumbing, not a live Kokoro-Japanese utterance end-to-end. That last mile
 (real device, real downloaded model, an actual spoken Japanese reply) still needs a physical
 device pass, same as every other engine in this app.
+
+## Update: espeak-ng cross-compiled — the actual blocker is resolved
+
+The "autotools, no CMake" framing above was based on a stale/pre-CMake read of espeak-ng —
+current upstream (`master`, v1.53.0) ships `CMakeLists.txt` throughout its tree. Cross-compiled
+cleanly for iOS device (arm64) + simulator (arm64 + x86_64) via
+`ios/scripts/build-espeak-ng-ios.sh`, producing `NativeCores/espeak-ng/build-apple/espeak-ng.xcframework`
+(1.7MB) plus a 30MB compiled dictionary/intonation data directory
+(`build-apple/espeak-ng-data`, not committed — Phase 9 on-demand download, same as every other
+model). Two non-obvious fixes over a naive iOS CMake invocation, both documented in the script's
+own comments: `-DCMAKE_MACOSX_BUNDLE=OFF` (without it, configuring fails outright — CMake's iOS
+platform defaults executables to `MACOSX_BUNDLE`, irrelevant since only the library target is
+built) and `-DNativeBuild_DIR=<native-build-dir>` (the upstream CMakeLists.txt's own help text
+says `-DNativeBuild=`, but the variable it actually reads is `NativeBuild_DIR` — a real upstream
+inconsistency). `COMPILE_INTONATIONS` needs a *native* (macOS host) espeak-ng binary to compile
+dictionary data even when cross-compiling for iOS; the script builds that native binary first.
+espeak-ng's public API (`speak_lib.h`) is plain C with no C++ dependency, so `EspeakPhonemizer.swift`
+calls it directly via the bridging header (same pattern as onnxruntime — no ObjC++ bridge needed).
+
+`EspeakPhonemizer.swift` is a direct Swift port of piper-tts's own `espeakbridge.c` (fetched from
+the `OHF-Voice/piper1-gpl` GitHub repo to read the real reference implementation) — same
+`espeak_TextToPhonemesWithTerminator` call, same `CLAUSE_INTONATION_*`/`CLAUSE_TYPE_*` bit-masking
+for clause terminators (espeak-ng doesn't expose these constants publicly; piper redefines them
+locally, and so does this port). `PiperPhonemeIds.swift` (NovaCore, TDD'd against
+`piper.phoneme_ids.phonemes_to_ids` run directly in Python) ports the `DEFAULT_PHONEME_ID_MAP`
+and BOS/PAD-interleave/EOS wrapping — including a real correctness fix caught by testing an NFD
+edge case first: piper's own phonemizer NFD-normalizes espeak's output *and iterates by Unicode
+scalar*, so a precomposed accented phoneme (e.g. nasalized "ɛ̃") decomposes into a base letter +
+a *separate* combining-mark id. Iterating by Swift `Character` (extended grapheme cluster, the
+more natural default) would keep such a sequence as one element and silently drop it as
+unmapped — fixed by decomposing and iterating by `unicodeScalars` instead, matching Python's
+`list(unicodedata.normalize("NFD", s))` exactly. `PiperConfig.swift` (NovaCore, TDD'd) parses a
+voice's `.onnx.json` (`espeak.voice`, `phoneme_id_map`, `inference` scales, sample rate).
+`PiperEngine.swift` mirrors `KokoroEngine`'s direct-onnxruntime-C-API pattern with Piper's
+different tensor shapes (`input`/`input_lengths`/`scales`, optional `sid`) — confirmed against
+the real `en_US-amy-medium.onnx` model's actual input/output tensor names via `onnxruntime.InferenceSession`
+in Python before writing the Swift side, not guessed.
+
+**Wired into the live reply flow and verified against real files, not just unit tests**: this
+environment already had real Piper voices cached at `~/.local/share/piper/voices/` (~380MB
+across 6 voices, downloaded by earlier desktop-app runs) and a real whisper/llama model pair
+already present in a prior Simulator app container from earlier phases — a lucky, real-data
+verification opportunity, not staged. Implemented `replay` (`app/server.py`'s "re-speak a stored
+line" feature — `_speak_interruptible`: `state:speaking` -> `sentence` -> TTS with live,
+barge-in-able amplitude -> `state:idle`, no transcript/memory) in `NovaWebSocketServer`, since
+it's the real protocol feature that happens to be the cleanest way to exercise TTS directly
+without needing a live mic/STT/LLM turn. Copied `en_US-amy-medium.onnx`(+`.json`) and the
+compiled `espeak-ng-data` into a running Simulator app's container, drove a real `avatar_loaded`
+-> `replay` over a live WebSocket connection, and confirmed: real audio played (83 amplitude
+messages over ~4s at the expected 20Hz cadence, with values up to 0.99 — `AVSpeechSynthesizer`'s
+sine-wave fallback caps at 0.6, so this couldn't be the fallback path; no espeak/Piper errors in
+the device log); and `stop_speak` sent mid-utterance correctly cut playback short (state reached
+`idle` well before the ~8s sentence would have finished naturally, matching the same barge-in
+guarantee already verified for Kokoro/AVSpeechSynthesizer). `en_US-amy-medium` is a placeholder
+voice choice for this verification, same status as the interim LLM model — Phase 8's license
+re-verification pass hasn't targeted a specific shipping English voice yet.
+
+**Net effect**: neither TTS backend is blocked anymore. Both Piper (English) and Kokoro
+(Japanese) are wired into the live reply flow with real-file verification; `AVSpeechSynthesizer`
+remains the fallback for both when a model/data file is missing or synthesis throws. All
+physical-device validation (latency, memory, thermal, and real spoken-audio quality judgment)
+remains open — this and Kokoro's Japanese path have only been verified in Simulator.

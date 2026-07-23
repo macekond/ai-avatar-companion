@@ -26,23 +26,26 @@ reimplementation of the same protocol and pipeline behaviors, hosting the existi
   `Network.framework`) implements the real protocol end-to-end: onboarding, profile
   switch/delete, PTT → `WhisperEngine` (whisper.cpp) → `LlamaEngine` (llama.cpp + Metal) →
   per-sentence TTS with live amplitude streaming, furigana annotation via
-  `OpenJTalkMorphemeAnalyzer`, and barge-in (`stop_speak`). TTS is dispatched by language: `en`
-  always goes through `SystemTTSEngine` (`AVSpeechSynthesizer`, since Piper remains blocked —
-  see `ios/spikes/03-tts-piper`); `ja` goes through open_jtalk → `JapanesePhonemizer` →
-  `KokoroEngine`/`KokoroPlayer` when a Kokoro model, voices file, and dictionary are all present
-  on disk, falling back to `SystemTTSEngine` otherwise (mirrors the desktop app's "never
+  `OpenJTalkMorphemeAnalyzer`, `replay` (re-speak a stored line), and barge-in (`stop_speak`).
+  TTS is dispatched by language: `en` goes through `EspeakPhonemizer` (espeak-ng) →
+  `PiperPhonemeIds` → `PiperEngine`; `ja` goes through open_jtalk → `JapanesePhonemizer` →
+  `KokoroEngine`/`KokoroPlayer`. Both fall back to `SystemTTSEngine` (`AVSpeechSynthesizer`) when
+  their model/data files aren't loaded yet or synthesis throws (mirrors the desktop app's "never
   hard-fail" TTS guarantee). All of STT/LLM/TTS engines are **inert until their model files
   exist** (Phase 9: on-demand download to Application Support, via `ModelDownloader` — nothing
-  is bundled in the IPA).
+  is bundled in the IPA). Piper's real synthesis + barge-in were verified end-to-end against a
+  real cached voice model and real compiled espeak-ng dictionary data in a running Simulator app
+  (not just unit tests) — see `ios/spikes/03-tts-piper/README.md`.
 
-**Not done yet**: Piper's espeak-ng autotools cross-compile (English TTS relies on the
-`AVSpeechSynthesizer` fallback until this lands); a production-ready model CDN (interim
-`modelSpecs` point straight at HuggingFace/GitHub, not a CDN the app controls); a per-profile
-voice picker for Kokoro (hardcoded to `af_alloy`). Nothing has been measured on a **physical**
-iPhone; simulator numbers for latency, memory, and thermal behavior are not representative of
-the real thing, so Phase 0's actual go/no-go question (can whisper.cpp + llama.cpp +
-Kokoro/open_jtalk coexist fast enough on real hardware) is still open. `ios/spikes/` holds the
-per-component spike write-ups with the real-model/real-device verification status for each
+**Not done yet**: a production-ready model CDN (interim `modelSpecs` point straight at
+HuggingFace/GitHub, not a CDN the app controls); a per-profile voice picker (Piper hardcoded to
+`en_US-amy-medium`, Kokoro to `af_alloy`); license re-verification for the specific shipping
+voices (Phase 8's diligence pass, same as the VRM/model license checks already done elsewhere).
+Nothing has been measured on a **physical** iPhone; simulator numbers for latency, memory, and
+thermal behavior are not representative of the real thing, so Phase 0's actual go/no-go question
+(can whisper.cpp + llama.cpp + Kokoro/Piper/open_jtalk coexist fast enough on real hardware) is
+still open. `ios/spikes/` holds the per-component spike write-ups with the real-model/real-device
+verification status for each
 engine.
 
 ## Environment requirements

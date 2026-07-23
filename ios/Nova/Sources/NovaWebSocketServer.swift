@@ -95,15 +95,32 @@ public final class NovaWebSocketServer: ObservableObject {
         ModelSpec(filename: "llm.gguf", urlString: "https://huggingface.co/QuantFactory/SmolLM2-135M-Instruct-GGUF/resolve/main/SmolLM2-135M-Instruct.Q4_K_M.gguf"),
         ModelSpec(filename: "kokoro-v1.0.onnx", urlString: "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx"),
         ModelSpec(filename: "voices-v1.0.bin", urlString: "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin"),
+        // "amy" is a placeholder voice for wiring/verification, same status
+        // as the interim LLM model above — Phase 8's license re-verification
+        // pass (this file's `VENDORED.md`-style diligence) hasn't been done
+        // for a specific shipping voice choice yet.
+        ModelSpec(filename: "piper-en.onnx", urlString: "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/amy/medium/en_US-amy-medium.onnx"),
+        ModelSpec(filename: "piper-en.onnx.json", urlString: "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/amy/medium/en_US-amy-medium.onnx.json"),
     ]
     private var setupPhase = "ready"
 
-    /// Always available (no model download needed) — see SystemTTSEngine's
-    /// doc comment for why this is the guaranteed fallback: for English
-    /// (Piper still blocked on espeak-ng, see ios/spikes/03-tts-piper) it's
-    /// what actually produces audio; for Japanese it's the fallback when
-    /// Kokoro isn't loaded or synthesis fails.
+    /// Guaranteed fallback (no model download needed) — see SystemTTSEngine's
+    /// doc comment. Used for English when Piper isn't loaded or fails, and
+    /// for Japanese when Kokoro isn't loaded or fails.
     private let ttsEngine = SystemTTSEngine()
+
+    /// Real once espeak-ng's compiled data directory, a Piper voice model,
+    /// and its `.onnx.json` config all exist on disk (Phase 9 on-demand
+    /// download). See ios/spikes/03-tts-piper/README.md's espeak-ng update:
+    /// the cross-compile that blocked this is done.
+    private var espeakPhonemizer: EspeakPhonemizer?
+    private var piperEngine: PiperEngine?
+    private var piperConfig: PiperConfig?
+    private let piperPlayer = KokoroPlayer()
+    /// espeak-ng voice name Piper's `en_US-amy-medium` config specifies
+    /// (`espeak.voice` in its `.onnx.json`) — this app has one hardcoded
+    /// English voice, same as Kokoro's `af_alloy`, no picker yet.
+    private static let piperEspeakVoiceName = "en-us"
 
     /// Real once both the Kokoro ONNX model and voices archive exist on disk
     /// (Phase 9 on-demand download — not bundled). See
@@ -177,6 +194,32 @@ public final class NovaWebSocketServer: ObservableObject {
                 (try? Data(contentsOf: URL(fileURLWithPath: voicesPath))).flatMap { try? KokoroVoiceStore(data: $0) }
             }.value
         }
+        if espeakPhonemizer == nil, let dataDir = Self.espeakDataDirectory() {
+            espeakPhonemizer = await Task.detached {
+                guard let phonemizer = try? EspeakPhonemizer(dataDir: dataDir) else { return nil }
+                try? phonemizer.setVoice(Self.piperEspeakVoiceName)
+                return phonemizer
+            }.value
+        }
+        if piperEngine == nil, let modelPath = Self.modelPath("piper-en.onnx") {
+            piperEngine = await Task.detached { try? PiperEngine(modelPath: modelPath) }.value
+        }
+        if piperConfig == nil, let configPath = Self.modelPath("piper-en.onnx.json") {
+            piperConfig = await Task.detached {
+                (try? Data(contentsOf: URL(fileURLWithPath: configPath))).flatMap { try? PiperConfig(json: $0) }
+            }.value
+        }
+    }
+
+    /// espeak-ng's compiled dictionary/intonation data (Phase 9: not bundled
+    /// — see `build-espeak-ng-ios.sh`'s `build-apple/espeak-ng-data` output).
+    private static func espeakDataDirectory() -> String? {
+        guard let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
+            return nil
+        }
+        let path = dir.appendingPathComponent("models/espeak-ng-data").path
+        var isDirectory: ObjCBool = false
+        return FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory) && isDirectory.boolValue ? path : nil
     }
 
     /// The compiled naist-jdic directory — not bundled in git (Phase 9: it's
@@ -369,7 +412,17 @@ public final class NovaWebSocketServer: ObservableObject {
             speechInterrupted = true
             ttsEngine.stop()
             kokoroPlayer.stop()
+            piperPlayer.stop()
             machine.stopSpeak()
+        case .replay(let text):
+            // Re-speak a stored line — port of app/server.py's `replay`
+            // handler (_speak_interruptible): pure playback through the same
+            // TTS router as a live reply, no transcript entry, no memory
+            // extraction.
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                replay(trimmed, for: connection)
+            }
         case .switchProfile(let slug, let language, let level):
             switchProfile(slug: slug, language: language, level: level, for: connection)
         case .deleteProfile(let slug):
@@ -600,6 +653,34 @@ public final class NovaWebSocketServer: ObservableObject {
         }
     }
 
+    /// Re-speaks `text` outside the normal reply flow — port of
+    /// app/server.py's `_speak_interruptible`: `speaking` -> `sentence` ->
+    /// TTS with live amplitude (barge-in-able via `stopSpeak`, same as a
+    /// live reply) -> `amplitude: 0` -> `idle`. No transcript, no memory.
+    private func replay(_ text: String, for connection: NWConnection) {
+        let id = ObjectIdentifier(connection)
+        var machine = stateMachines[id] ?? SessionStateMachine()
+        machine.beginSpeaking()
+        stateMachines[id] = machine
+        send(.state(machine.state), on: connection)
+
+        let language = memories[id]?.profile.language ?? "en"
+        let textHtml = furiganaFormatter().annotateFor(text, language: language)
+        send(.sentence(text: text, textHtml: textHtml), on: connection)
+
+        speechInterrupted = false
+        speak(text, language: language) { [weak self] amplitude in
+            self?.send(.amplitude(value: amplitude), on: connection)
+        } onFinish: { [weak self] in
+            guard let self else { return }
+            self.send(.amplitude(value: 0.0), on: connection)
+            var machine = self.stateMachines[id] ?? SessionStateMachine()
+            machine.finishSpeaking()
+            self.stateMachines[id] = machine
+            self.send(.state(machine.state), on: connection)
+        }
+    }
+
     /// Speaks `sentences[index...]` one at a time via `ttsEngine`, sending
     /// the text as a `sentence` message right before each one starts and
     /// streaming `amplitude` messages while it plays (drives the avatar's
@@ -636,35 +717,53 @@ public final class NovaWebSocketServer: ObservableObject {
     }
 
     /// TTS dispatch by language (Phase 5's `TTSRouter`): Japanese text goes
-    /// through open_jtalk -> `JapanesePhonemizer` -> Kokoro when a model,
-    /// voices archive, and real morpheme analyzer are all loaded; any
-    /// failure along that path (missing files, a throw, empty output) falls
-    /// back to `ttsEngine` (`AVSpeechSynthesizer`), mirroring the "never
-    /// hard-fail" guarantee `_SystemTTSBackend` provides on desktop. English
-    /// always uses `ttsEngine` — Piper remains blocked (see
-    /// ios/spikes/03-tts-piper/README.md).
+    /// through open_jtalk -> `JapanesePhonemizer` -> Kokoro; English goes
+    /// through `EspeakPhonemizer` -> `PiperPhonemeIds` -> `PiperEngine`. Both
+    /// need their respective model/data files loaded, and any failure along
+    /// either path (missing files, a throw, empty output) falls back to
+    /// `ttsEngine` (`AVSpeechSynthesizer`), mirroring the "never hard-fail"
+    /// guarantee `_SystemTTSBackend` provides on desktop.
     private func speak(_ text: String, language: String, onAmplitude: @escaping (Double) -> Void, onFinish: @escaping () -> Void) {
-        guard language == "ja", let kokoroEngine, let kokoroVoiceStore, !(morphemeAnalyzer is UnavailableMorphemeAnalyzer) else {
-            ttsEngine.speak(text, language: language, onAmplitude: onAmplitude, onFinish: onFinish)
-            return
-        }
-        Task.detached { [weak self] in
-            guard let self else { return }
-            do {
-                let hiragana = try await self.japaneseReading(for: text)
-                let phonemes = JapanesePhonemizer.phonemize(hiragana: hiragana)
-                let tokenCount = KokoroTokenizer.tokenize(phonemes).count
-                let style = try kokoroVoiceStore.styleVector(voice: Self.kokoroVoiceName, tokenCount: tokenCount)
-                let samples = try kokoroEngine.synthesize(phonemes: phonemes, style: style)
-                await MainActor.run {
-                    self.kokoroPlayer.play(samples: samples, sampleRate: KokoroEngine.sampleRate, onAmplitude: onAmplitude, onFinish: onFinish)
-                }
-            } catch {
-                await MainActor.run {
-                    self.ttsEngine.speak(text, language: language, onAmplitude: onAmplitude, onFinish: onFinish)
+        if language == "ja", let kokoroEngine, let kokoroVoiceStore, !(morphemeAnalyzer is UnavailableMorphemeAnalyzer) {
+            Task.detached { [weak self] in
+                guard let self else { return }
+                do {
+                    let hiragana = try await self.japaneseReading(for: text)
+                    let phonemes = JapanesePhonemizer.phonemize(hiragana: hiragana)
+                    let tokenCount = KokoroTokenizer.tokenize(phonemes).count
+                    let style = try kokoroVoiceStore.styleVector(voice: Self.kokoroVoiceName, tokenCount: tokenCount)
+                    let samples = try kokoroEngine.synthesize(phonemes: phonemes, style: style)
+                    await MainActor.run {
+                        self.kokoroPlayer.play(samples: samples, sampleRate: KokoroEngine.sampleRate, onAmplitude: onAmplitude, onFinish: onFinish)
+                    }
+                } catch {
+                    await MainActor.run {
+                        self.ttsEngine.speak(text, language: language, onAmplitude: onAmplitude, onFinish: onFinish)
+                    }
                 }
             }
+            return
         }
+        if language == "en", let espeakPhonemizer, let piperEngine, let piperConfig {
+            Task.detached { [weak self] in
+                guard let self else { return }
+                do {
+                    let clauses = espeakPhonemizer.phonemize(text)
+                    let allPhonemes = clauses.map { $0.phonemes + $0.terminator }.joined()
+                    let ids = PiperPhonemeIds.phonemesToIds(allPhonemes, idMap: piperConfig.phonemeIdMap)
+                    let samples = try piperEngine.synthesize(phonemeIds: ids, config: piperConfig)
+                    await MainActor.run {
+                        self.piperPlayer.play(samples: samples, sampleRate: piperConfig.sampleRate, onAmplitude: onAmplitude, onFinish: onFinish)
+                    }
+                } catch {
+                    await MainActor.run {
+                        self.ttsEngine.speak(text, language: language, onAmplitude: onAmplitude, onFinish: onFinish)
+                    }
+                }
+            }
+            return
+        }
+        ttsEngine.speak(text, language: language, onAmplitude: onAmplitude, onFinish: onFinish)
     }
 
     private func send(_ message: ServerMessage, on connection: NWConnection) {
