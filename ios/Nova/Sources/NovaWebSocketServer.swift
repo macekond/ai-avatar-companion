@@ -752,6 +752,50 @@ public final class NovaWebSocketServer: ObservableObject {
                 self.generationGuard(for: connection).apply(generationToken) {
                     self.speechInterrupted = false
                     self.speakSentences(sentences, index: 0, language: language, connection: connection)
+                    self.extractMemory(transcript: userMessage, replySentences: sentences, engine: engine, connection: connection, token: generationToken)
+                }
+            }
+        }
+    }
+
+    /// Port of `app/memory_extractor.py`'s post-turn extraction: a small
+    /// focused LLM call (fire-and-forget, after the reply itself) pulls a
+    /// topic keyword and any grammar problem out of the exchange and saves
+    /// them onto the profile's memory — the actual mechanism behind Nova
+    /// "remembering" what a child talked about across sessions.
+    ///
+    /// Scoped down from the desktop original: extracts from the *full*
+    /// generated reply rather than tracking exactly which sentences were
+    /// spoken before a possible `stop_speak` barge-in (that needs threading
+    /// a partial-speech accumulator through `speakSentences`' recursion —
+    /// not done here); also doesn't yet send `conversation_correction` or
+    /// persist a `transcript_store` turn, since neither has an iOS port yet.
+    /// Silent on any failure (no engine, empty reply) — matches the "never
+    /// blocks the conversation" guarantee `MemoryExtractor.extract` provides
+    /// on desktop.
+    private func extractMemory(transcript: String, replySentences: [String], engine: LlamaEngine, connection: NWConnection, token: GenerationGuard.Token) {
+        guard !replySentences.isEmpty else { return }
+        let fullReply = replySentences.joined(separator: " ")
+        Task.detached { [weak self] in
+            let result = MemoryExtractor.extract(transcript: transcript, reply: fullReply, engine: engine)
+            await MainActor.run {
+                guard let self else { return }
+                // Re-checked after the extraction call itself (a second,
+                // shorter async gap a profile swap could also land in) —
+                // not just the token captured before the reply's own
+                // generation, though `replyAndContinue`'s caller already
+                // guarded that outer gap.
+                self.generationGuard(for: connection).apply(token) {
+                    let id = ObjectIdentifier(connection)
+                    guard let manager = self.memoryManagers[id], var memory = self.memories[id] else { return }
+                    if let topic = result.topic {
+                        manager.update(&memory, topic: topic)
+                    }
+                    if let problem = result.parseProblem() {
+                        manager.update(&memory, problemType: problem.type, example: problem.example, correction: problem.correction)
+                    }
+                    self.memories[id] = memory
+                    manager.save(memory)
                 }
             }
         }

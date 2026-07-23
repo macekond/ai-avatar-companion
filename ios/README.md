@@ -15,9 +15,12 @@ reimplementation of the same protocol and pipeline behaviors, hosting the existi
   `name_to_slug` and the delete-tombstone pattern (`Memory.swift`), prompt assembly
   (`PromptBuilder.swift`), furigana annotation behind a swappable analyzer protocol
   (`Furigana.swift`), the 5-state session machine (`SessionStateMachine.swift`), the
-  one-reader-on-socket invariant (`MessageStash.swift`), the stale-callback guard
-  (`GenerationGuard.swift`), and the full WebSocket wire protocol (`ProtocolMessages.swift`).
-  Run `swift test` inside `ios/NovaCore/` — no simulator or device needed.
+  one-reader-on-socket invariant (`MessageStash.swift` — not actually needed by this app's
+  push-based `Network.framework` receive loop, see below), the stale-callback guard
+  (`GenerationGuard.swift`, wired into `replyAndContinue`), post-turn memory-extraction parsing
+  (`MemoryExtraction.swift`, ported from `app/memory_extractor.py`), and the full WebSocket wire
+  protocol (`ProtocolMessages.swift`). Run `swift test` inside `ios/NovaCore/` — no simulator or
+  device needed.
 - `Nova` app target: a SwiftUI shell hosting the **real, unmodified** `ui/dist` build in a
   `WKWebView`, served over a custom URL scheme (`NovaSchemeHandler.swift`) rather than `file://`
   — `file://` origins are CORS-opaque in WKWebView, and Vite's `<script type="module"
@@ -28,7 +31,12 @@ reimplementation of the same protocol and pipeline behaviors, hosting the existi
   per-sentence TTS with live amplitude streaming, furigana annotation via
   `OpenJTalkMorphemeAnalyzer`, `replay` (re-speak a stored line), `set_level`/`set_language`
   (validated against `Levels`, with a `settings` resend on language change per
-  `app/server.py`'s `_send_settings`), and barge-in (`stop_speak`).
+  `app/server.py`'s `_send_settings`), barge-in (`stop_speak`), and post-turn memory extraction
+  (`MemoryExtractor.swift` — a small focused LlamaEngine call after each reply pulls a topic
+  keyword and any grammar problem into the profile's saved memory, guarded by `GenerationGuard`
+  against a mid-extraction profile swap; port of `app/memory_extractor.py`, scoped down to not
+  yet track partial-speech-before-barge-in or send `conversation_correction`/persist a
+  transcript store, neither of which has an iOS port yet).
   TTS is dispatched by language: `en` goes through `EspeakPhonemizer` (espeak-ng) →
   `PiperPhonemeIds` → `PiperEngine`; `ja` goes through open_jtalk → `JapanesePhonemizer` →
   `KokoroEngine`/`KokoroPlayer`. Both fall back to `SystemTTSEngine` (`AVSpeechSynthesizer`) when
