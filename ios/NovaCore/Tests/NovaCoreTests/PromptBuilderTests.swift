@@ -2,6 +2,26 @@ import XCTest
 @testable import NovaCore
 
 final class PromptBuilderTests: XCTestCase {
+    func test_defaultBasePrompt_substitutesChildAndAvatarName() {
+        // Ground truth: app/config.py's PersonalityConfig.system_prompt
+        // default, verbatim, with {child_name}/{avatar_name} substituted.
+        let expected = """
+        You are Lily's friendly learning companion, Nova.
+        - Speak in short, simple sentences
+        - Be warm, curious, and encouraging
+        - Ask open-ended questions about their day
+        - Keep replies under 2 sentences when possible
+        - Never use complex vocabulary without explaining it
+        - If they make a mistake, naturally repeat their idea back correctly within your reply; never point out that they were wrong
+        - Never break character
+        """
+        XCTAssertEqual(PromptBuilder.defaultBasePrompt(childName: "Lily"), expected)
+    }
+
+    func test_defaultBasePrompt_customAvatarName() {
+        XCTAssertTrue(PromptBuilder.defaultBasePrompt(childName: "Mia", avatarName: "Robo").hasPrefix("You are Mia's friendly learning companion, Robo."))
+    }
+
     func test_order_basePersonalityComesFirst() {
         let builder = PromptBuilder(basePrompt: "BASE", language: "en", level: "A")
         XCTAssertTrue(builder.build().hasPrefix("BASE"))

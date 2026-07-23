@@ -223,11 +223,6 @@ public final class NovaWebSocketServer: ObservableObject {
         return base.appendingPathComponent("appearance_cache")
     }
 
-    /// Base personality prompt — placeholder until Config (config.yaml's
-    /// `personality.system_prompt`) is ported; PromptBuilder's own load-bearing
-    /// assembly order (teaching frame -> level -> memory -> appearance ->
-    /// LANGUAGE_LOCK last) is real and unaffected by this placeholder.
-    private static let placeholderBasePrompt = "You are Nova, a warm and encouraging language-practice companion for children."
 
     public init(port: UInt16) {
         self.port = port
@@ -879,7 +874,8 @@ public final class NovaWebSocketServer: ObservableObject {
 
         let profile = memories[ObjectIdentifier(connection)]?.profile
         let language = profile?.language ?? "en"
-        var builder = PromptBuilder(basePrompt: Self.placeholderBasePrompt, language: language, level: profile?.level ?? "A")
+        let basePrompt = PromptBuilder.defaultBasePrompt(childName: profile?.name ?? "friend")
+        var builder = PromptBuilder(basePrompt: basePrompt, language: language, level: profile?.level ?? "A")
         builder.memory = memories[ObjectIdentifier(connection)]
         builder.appearance = currentAppearance
         let systemPrompt = builder.build()

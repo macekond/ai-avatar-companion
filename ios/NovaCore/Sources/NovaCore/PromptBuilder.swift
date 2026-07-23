@@ -20,6 +20,29 @@ public struct PromptBuilder {
         self.level = level
     }
 
+    /// Direct port of `PersonalityConfig.system_prompt`'s default
+    /// (app/config.py) — the actual base personality every reply is meant
+    /// to start from, not a placeholder. Language-neutral by design (the
+    /// practice language, level rules, and reply-language lock are supplied
+    /// separately per-profile), matching the Python original's own
+    /// constraint against hard-coding a language here.
+    private static let defaultBasePromptTemplate = """
+    You are {child_name}'s friendly learning companion, {avatar_name}.
+    - Speak in short, simple sentences
+    - Be warm, curious, and encouraging
+    - Ask open-ended questions about their day
+    - Keep replies under 2 sentences when possible
+    - Never use complex vocabulary without explaining it
+    - If they make a mistake, naturally repeat their idea back correctly within your reply; never point out that they were wrong
+    - Never break character
+    """
+
+    public static func defaultBasePrompt(childName: String, avatarName: String = "Nova") -> String {
+        defaultBasePromptTemplate
+            .replacingOccurrences(of: "{child_name}", with: childName)
+            .replacingOccurrences(of: "{avatar_name}", with: avatarName)
+    }
+
     public func build() -> String {
         var parts = [basePrompt]
 
