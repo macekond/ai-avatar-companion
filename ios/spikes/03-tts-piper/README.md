@@ -232,8 +232,11 @@ barge-in). This also surfaced and fixed a real latent bug: the espeak voice name
 to `"en-us"` at load time, but ljspeech's own config specifies `"en"` — different Piper voices
 name their espeak voice differently. Fixed by calling `espeakPhonemizer.setVoice(piperConfig.espeakVoice)`
 from the loaded config immediately before each synthesis, instead of hardcoding a guess once at
-startup. Kokoro's `af_alloy` hasn't had the equivalent lineage check yet — same Phase 8 diligence
-gap, called out in the top-level `ios/README.md`.
+startup. Checked Kokoro's licensing too, for the same reason: Kokoro-82M (and its voicepacks,
+`af_alloy` included) is Apache-2.0, and its model card states training data was "exclusively
+permissive/non-copyrighted audio" (public domain, Apache/MIT-licensed, or synthetic from closed
+providers) — a blanket model-level policy, not Piper's per-voice fine-tune-from-arbitrary-dataset
+situation. No lessac-style issue there; `af_alloy` needs no further check.
 
 **Net effect**: neither TTS backend is blocked anymore. Both Piper (English) and Kokoro
 (Japanese) are wired into the live reply flow with real-file verification; `AVSpeechSynthesizer`
