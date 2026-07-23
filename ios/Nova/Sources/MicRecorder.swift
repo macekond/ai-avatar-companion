@@ -1,5 +1,6 @@
 import AVFoundation
 import NovaCore
+import os
 
 /// Session-scoped microphone capture — port of `_MicRecorder` in
 /// `app/server.py` (lines 206-267). The Python original keeps one
@@ -12,9 +13,21 @@ import NovaCore
 @MainActor
 final class MicRecorder {
     private let engine = AVAudioEngine()
-    private var isCapturing = false
-    private var capturedSampleCount = 0
-    private var capturedSamples: [Float] = []
+
+    private struct CaptureState {
+        var isCapturing = false
+        var samples: [Float] = []
+        var sampleCount = 0
+    }
+    /// Guards `CaptureState`. `@MainActor` on this class does NOT make that
+    /// state safe to touch from the tap closure below: `AVAudioEngine`'s tap
+    /// runs on CoreAudio's own real-time thread regardless of this class's
+    /// actor annotation, so reading/writing `isCapturing`/`samples` there
+    /// without synchronization is a genuine data race with `pttStart()`/
+    /// `pttStop()` on the main actor — not just a style concern, an actual
+    /// one this compiled and ran without ever surfacing since Swift's
+    /// non-strict-concurrency mode doesn't catch it at compile time.
+    private let stateLock = OSAllocatedUnfairLock(initialState: CaptureState())
 
     /// Starts the persistent tap for the session. Safe to call once; PTT
     /// start/stop below control capture, not this.
@@ -34,7 +47,9 @@ final class MicRecorder {
         let converter = AVAudioConverter(from: inputFormat, to: targetFormat)
 
         inputNode.installTap(onBus: 0, bufferSize: 1024, format: inputFormat) { [weak self] buffer, _ in
-            guard let self, self.isCapturing, let converter else { return }
+            guard let self, let converter else { return }
+            guard self.stateLock.withLock({ $0.isCapturing }) else { return }
+
             let outputCapacity = AVAudioFrameCount(
                 Double(buffer.frameLength) * targetFormat.sampleRate / inputFormat.sampleRate
             ) + 16
@@ -48,9 +63,9 @@ final class MicRecorder {
             guard error == nil, let channelData = converted.floatChannelData else { return }
 
             let frameLength = Int(converted.frameLength)
-            Task { @MainActor in
-                self.capturedSamples.append(contentsOf: UnsafeBufferPointer(start: channelData[0], count: frameLength))
-                self.capturedSampleCount += frameLength
+            self.stateLock.withLock { state in
+                state.samples.append(contentsOf: UnsafeBufferPointer(start: channelData[0], count: frameLength))
+                state.sampleCount += frameLength
             }
         }
 
@@ -64,17 +79,21 @@ final class MicRecorder {
     }
 
     func pttStart() {
-        capturedSamples.removeAll(keepingCapacity: true)
-        capturedSampleCount = 0
-        isCapturing = true
+        stateLock.withLock { state in
+            state.samples.removeAll(keepingCapacity: true)
+            state.sampleCount = 0
+            state.isCapturing = true
+        }
     }
 
     /// Ends capture and returns whether enough audio was captured to bother
     /// transcribing (`STTConstants.hasEnoughAudio`) plus the raw samples —
     /// mirrors the Python `_MicRecorder.stop()` -> STT `MIN_DURATION_S` gate.
     func pttStop() -> (hasAudio: Bool, samples: [Float]) {
-        isCapturing = false
-        let samples = capturedSamples
-        return (STTConstants.hasEnoughAudio(sampleCount: capturedSampleCount), samples)
+        let (count, samples) = stateLock.withLock { state -> (Int, [Float]) in
+            state.isCapturing = false
+            return (state.sampleCount, state.samples)
+        }
+        return (STTConstants.hasEnoughAudio(sampleCount: count), samples)
     }
 }
