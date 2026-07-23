@@ -12,7 +12,7 @@ import Foundation
 /// both `0xFFFFFFFF` sentinels, with the real 64-bit sizes carried in a
 /// ZIP64 extended-information extra field (tag `0x0001`) instead. A reader
 /// that only trusts the 32-bit fields throws on the first entry.
-public enum StoredZipError: Error {
+public enum StoredZipError: Error, Equatable {
     case truncated
     case unsupportedCompression
     case missingZip64Size

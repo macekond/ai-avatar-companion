@@ -57,6 +57,36 @@ private func makeStoredZip(entries: [(name: String, data: Data)]) -> Data {
     return body
 }
 
+/// A single-entry ZIP64 local file header: 32-bit compressed/uncompressed
+/// size fields set to the `0xFFFFFFFF` sentinel, with the real 64-bit sizes
+/// carried in a tag-`0x0001` extended-info extra field instead — the exact
+/// shape the real `voices-v1.0.bin` turned out to use, which a first-pass
+/// STORED-only reader (trusting only the 32-bit fields) threw on.
+private func makeZip64Entry(name: String, data: Data) -> Data {
+    let nameBytes = Array(name.utf8)
+    var extra = Data()
+    withUnsafeBytes(of: UInt16(0x0001).littleEndian) { extra.append(contentsOf: $0) }  // tag
+    withUnsafeBytes(of: UInt16(16).littleEndian) { extra.append(contentsOf: $0) }       // field size
+    withUnsafeBytes(of: UInt64(data.count).littleEndian) { extra.append(contentsOf: $0) }  // uncompressed size
+    withUnsafeBytes(of: UInt64(data.count).littleEndian) { extra.append(contentsOf: $0) }  // compressed size
+
+    var local = Data()
+    local.append(contentsOf: [0x50, 0x4B, 0x03, 0x04])
+    local.append(contentsOf: [45, 0])   // version needed (ZIP64 requires >= 4.5)
+    local.append(contentsOf: [0, 0])
+    local.append(contentsOf: [0, 0])    // compression = stored
+    local.append(contentsOf: [0, 0, 0, 0])
+    local.append(contentsOf: [0, 0, 0, 0])
+    local.append(contentsOf: [0xFF, 0xFF, 0xFF, 0xFF])  // compressed size sentinel
+    local.append(contentsOf: [0xFF, 0xFF, 0xFF, 0xFF])  // uncompressed size sentinel
+    withUnsafeBytes(of: UInt16(nameBytes.count).littleEndian) { local.append(contentsOf: $0) }
+    withUnsafeBytes(of: UInt16(extra.count).littleEndian) { local.append(contentsOf: $0) }
+    local.append(contentsOf: nameBytes)
+    local.append(extra)
+    local.append(data)
+    return local
+}
+
 final class NpyArrayTests: XCTestCase {
     func test_parsesShapeAndFloatData() throws {
         let bytes = makeNpyBytes(shape: [2, 3], values: [1, 2, 3, 4, 5, 6])
@@ -92,6 +122,42 @@ final class StoredZipReaderTests: XCTestCase {
     func test_emptyArchive() throws {
         let entries = try readStoredZipEntries(Data())
         XCTAssertTrue(entries.isEmpty)
+    }
+
+    func test_zip64SentinelSizes_readRealSizeFromExtraField() throws {
+        // Regression test for a real bug: the actual voices-v1.0.bin file
+        // uses ZIP64 (32-bit size fields are 0xFFFFFFFF sentinels), which a
+        // reader trusting only those fields throws StoredZipError.truncated
+        // on for the very first entry — caught only by testing against the
+        // real file, not synthetic non-ZIP64 fixtures like the ones above.
+        // Nothing exercised this shape until this test.
+        let payload = Data([10, 20, 30, 40, 50])
+        let zip = makeZip64Entry(name: "af_test.npy", data: payload)
+        let entries = try readStoredZipEntries(zip)
+        XCTAssertEqual(entries["af_test.npy"], payload)
+    }
+
+    func test_zip64_missingExtraField_throwsMissingZip64Size() {
+        // A 0xFFFFFFFF sentinel with no tag-0x0001 extra field to back it up
+        // is malformed input — must throw a specific error, not silently
+        // misread garbage as the entry's size.
+        var local = Data()
+        local.append(contentsOf: [0x50, 0x4B, 0x03, 0x04])          // signature (4)
+        local.append(contentsOf: [45, 0])                            // version needed (2)
+        local.append(contentsOf: [0, 0])                             // flags (2)
+        local.append(contentsOf: [0, 0])                             // compression = stored (2)
+        local.append(contentsOf: [0, 0, 0, 0])                       // mod time/date (4)
+        local.append(contentsOf: [0, 0, 0, 0])                       // crc32 (4)
+        local.append(contentsOf: [0xFF, 0xFF, 0xFF, 0xFF])           // compressed size sentinel
+        local.append(contentsOf: [0xFF, 0xFF, 0xFF, 0xFF])           // uncompressed size sentinel
+        let name = Array("x.npy".utf8)
+        withUnsafeBytes(of: UInt16(name.count).littleEndian) { local.append(contentsOf: $0) }
+        local.append(contentsOf: [0, 0])  // no extra field at all
+        local.append(contentsOf: name)
+
+        XCTAssertThrowsError(try readStoredZipEntries(local)) { error in
+            XCTAssertEqual(error as? StoredZipError, .missingZip64Size)
+        }
     }
 }
 
