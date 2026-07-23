@@ -26,7 +26,9 @@ reimplementation of the same protocol and pipeline behaviors, hosting the existi
   `Network.framework`) implements the real protocol end-to-end: onboarding, profile
   switch/delete, PTT → `WhisperEngine` (whisper.cpp) → `LlamaEngine` (llama.cpp + Metal) →
   per-sentence TTS with live amplitude streaming, furigana annotation via
-  `OpenJTalkMorphemeAnalyzer`, `replay` (re-speak a stored line), and barge-in (`stop_speak`).
+  `OpenJTalkMorphemeAnalyzer`, `replay` (re-speak a stored line), `set_level`/`set_language`
+  (validated against `Levels`, with a `settings` resend on language change per
+  `app/server.py`'s `_send_settings`), and barge-in (`stop_speak`).
   TTS is dispatched by language: `en` goes through `EspeakPhonemizer` (espeak-ng) →
   `PiperPhonemeIds` → `PiperEngine`; `ja` goes through open_jtalk → `JapanesePhonemizer` →
   `KokoroEngine`/`KokoroPlayer`. Both fall back to `SystemTTSEngine` (`AVSpeechSynthesizer`) when

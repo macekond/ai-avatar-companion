@@ -252,6 +252,30 @@ public final class NovaWebSocketServer: ObservableObject {
         broadcast(.setupStatus(phase: "ready", detail: ""))
     }
 
+    /// Port of app/server.py's `_send_settings`: the Settings-panel state
+    /// (language, levels + voices for that language, current selections) for
+    /// the connection's active profile. Sent alongside every `init`.
+    ///
+    /// `voices` is a single hardcoded entry per language — this app has no
+    /// per-language voice catalog yet (Piper/Kokoro are each wired to one
+    /// voice; see ios/spikes/03-tts-piper/README.md), unlike the desktop
+    /// app's `_voices_for()` which lists every downloadable voice.
+    private func sendSettings(for connection: NWConnection) {
+        let id = ObjectIdentifier(connection)
+        guard let profile = memories[id]?.profile else { return }
+        let voices: [VoiceOption] = profile.language == "ja"
+            ? [VoiceOption(id: "af_alloy", label: "Alloy")]
+            : [VoiceOption(id: "ljspeech", label: "LJSpeech")]
+        send(.settings(
+            language: profile.language,
+            languages: Levels.languages,
+            levels: Levels.levelsFor(profile.language),
+            level: profile.level,
+            voices: voices,
+            voice: profile.voice.isEmpty ? voices.first?.id ?? "" : profile.voice
+        ), on: connection)
+    }
+
     private func broadcast(_ message: ServerMessage) {
         for connection in connections.values {
             send(message, on: connection)
@@ -380,6 +404,7 @@ public final class NovaWebSocketServer: ObservableObject {
             send(.profiles(list: manager.listProfiles(), active: manager.slug), on: connection)
             send(.memoryLoaded(name: memory.profile.name, age: memory.profile.age, language: memory.profile.language, level: memory.profile.level), on: connection)
             send(.initMessage(level: memory.profile.level, language: memory.profile.language), on: connection)
+            sendSettings(for: connection)
             // app/server.py sends this right after connect too (line 771) —
             // without it the state label never leaves its static HTML
             // placeholder text, since applyState() only fires on a `state`
@@ -425,6 +450,32 @@ public final class NovaWebSocketServer: ObservableObject {
             if !trimmed.isEmpty {
                 replay(trimmed, for: connection)
             }
+        case .setLevel(let level):
+            // Port of app/server.py's `set_level`: reject a level outside
+            // the active profile's language taxonomy (a CEFR level for a
+            // Japanese profile would blank the prompt), else persist it.
+            let id = ObjectIdentifier(connection)
+            guard var memory = memories[id] else { break }
+            let language = memory.profile.language
+            guard Levels.levelsFor(language).contains(level) else { break }
+            memory.profile.level = level
+            memories[id] = memory
+            memoryManagers[id]?.save(memory)
+        case .setLanguage(let language):
+            // Port of app/server.py's `set_language`: reject an unknown
+            // language, else reset level + voice to that language's
+            // defaults (a level/voice picked for one language is
+            // meaningless in another) and resend `settings` so the UI's
+            // panel reflects the new language's level/voice catalog.
+            let id = ObjectIdentifier(connection)
+            guard var memory = memories[id] else { break }
+            guard Levels.languages.contains(language) else { break }
+            memory.profile.language = language
+            memory.profile.level = Levels.defaultLevel(for: language)
+            memory.profile.voice = ""
+            memories[id] = memory
+            memoryManagers[id]?.save(memory)
+            sendSettings(for: connection)
         case .switchProfile(let slug, let language, let level):
             switchProfile(slug: slug, language: language, level: level, for: connection)
         case .deleteProfile(let slug):
@@ -467,6 +518,7 @@ public final class NovaWebSocketServer: ObservableObject {
                     send(.profiles(list: fallbackManager.listProfiles(), active: fallbackManager.slug), on: connection)
                     send(.memoryLoaded(name: fallback.profile.name, age: fallback.profile.age, language: fallback.profile.language, level: fallback.profile.level), on: connection)
                     send(.initMessage(level: fallback.profile.level, language: fallback.profile.language), on: connection)
+                    sendSettings(for: connection)
                 } else if let activeManager = memoryManagers[id] {
                     send(.profiles(list: activeManager.listProfiles(), active: activeManager.slug), on: connection)
                 }
@@ -547,6 +599,7 @@ public final class NovaWebSocketServer: ObservableObject {
             send(.profiles(list: manager.listProfiles(), active: manager.slug), on: connection)
             send(.memoryLoaded(name: memory.profile.name, age: memory.profile.age, language: memory.profile.language, level: memory.profile.level), on: connection)
             send(.initMessage(level: memory.profile.level, language: memory.profile.language), on: connection)
+            sendSettings(for: connection)
             send(.state((stateMachines[id] ?? SessionStateMachine()).state), on: connection)
         }
     }
@@ -579,6 +632,7 @@ public final class NovaWebSocketServer: ObservableObject {
         send(.profiles(list: manager.listProfiles(), active: manager.slug), on: connection)
         send(.memoryLoaded(name: memory.profile.name, age: memory.profile.age, language: memory.profile.language, level: memory.profile.level), on: connection)
         send(.initMessage(level: memory.profile.level, language: memory.profile.language), on: connection)
+        sendSettings(for: connection)
     }
 
     /// Onboarding counterpart to `transcribeAndContinue` — same off-main-actor

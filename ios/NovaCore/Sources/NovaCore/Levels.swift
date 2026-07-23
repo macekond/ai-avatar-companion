@@ -12,7 +12,13 @@ public enum Levels {
         "ja": ["N5", "N4", "N3", "N2", "N1"],
     ]
 
-    public static let languages: [String] = Array(levelsByLanguage.keys)
+    /// Explicit literal order (not `Array(levelsByLanguage.keys)`): Python's
+    /// `LANGUAGES = list(LEVELS_BY_LANG.keys())` in `app/levels.py` is stable
+    /// only because Python dicts preserve insertion order — Swift
+    /// `Dictionary` has no such guarantee, so deriving this from
+    /// `levelsByLanguage.keys` would make the UI's language order unstable
+    /// across runs.
+    public static let languages: [String] = ["en", "ja"]
 
     /// The level a profile falls back to when its language is (re)set — the
     /// easiest band, so a switch never leaves a profile on an out-of-taxonomy level.

@@ -2,6 +2,16 @@ import XCTest
 @testable import NovaCore
 
 final class LevelsTests: XCTestCase {
+    func test_languages_isStableOrder_englishFirst() {
+        // `app/levels.py`'s LANGUAGES = list(LEVELS_BY_LANG.keys()) works
+        // correctly on desktop because Python dicts preserve insertion
+        // order — Swift Dictionary has no such guarantee, so `languages`
+        // must be an explicit literal list, not derived from
+        // levelsByLanguage.keys, or the UI's language order becomes
+        // unstable across runs.
+        XCTAssertEqual(Levels.languages, ["en", "ja"])
+    }
+
     func test_levelsFor_english() {
         XCTAssertEqual(Levels.levelsFor("en"), ["Pre A", "A", "B", "C1", "C2"])
     }
