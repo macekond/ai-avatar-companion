@@ -350,12 +350,21 @@ public final class NovaWebSocketServer: ObservableObject {
     /// per-language voice catalog yet (Piper/Kokoro are each wired to one
     /// voice; see ios/spikes/03-tts-piper/README.md), unlike the desktop
     /// app's `_voices_for()` which lists every downloadable voice.
+    /// This app's only voice per language — Piper (`ljspeech`) for English,
+    /// Kokoro (`af_alloy`) for Japanese. Real multi-voice support (like
+    /// desktop's `_voices_for`/per-voice on-demand download) doesn't exist
+    /// yet; a single-entry catalog is the honest reflection of that, not a
+    /// placeholder to expand later without further model-download work.
+    private func voiceCatalog(for language: String) -> [VoiceOption] {
+        language == "ja"
+            ? [VoiceOption(id: "af_alloy", label: "Alloy")]
+            : [VoiceOption(id: "ljspeech", label: "LJSpeech")]
+    }
+
     private func sendSettings(for connection: NWConnection) {
         let id = ObjectIdentifier(connection)
         guard let profile = memories[id]?.profile else { return }
-        let voices: [VoiceOption] = profile.language == "ja"
-            ? [VoiceOption(id: "af_alloy", label: "Alloy")]
-            : [VoiceOption(id: "ljspeech", label: "LJSpeech")]
+        let voices = voiceCatalog(for: profile.language)
         send(.settings(
             language: profile.language,
             languages: Levels.languages,
@@ -600,6 +609,42 @@ public final class NovaWebSocketServer: ObservableObject {
             memories[id] = memory
             memoryManagers[id]?.save(memory)
             sendSettings(for: connection)
+        case .setVoice(let voice):
+            // Port of app/server.py's `set_voice`: validate against the
+            // ACTIVE language's catalog, silently ignore otherwise. This
+            // app has exactly one voice per language (no per-voice download
+            // to wait on), so `loading`/`downloading` collapses to an
+            // immediate `ready` — still sent as two messages to match the
+            // wire shape main.js already expects.
+            let id = ObjectIdentifier(connection)
+            guard var memory = memories[id] else { break }
+            guard voiceCatalog(for: memory.profile.language).contains(where: { $0.id == voice }) else { break }
+            send(.voiceStatus(state: "loading", voice: voice), on: connection)
+            memory.profile.voice = voice
+            memories[id] = memory
+            memoryManagers[id]?.save(memory)
+            send(.voiceStatus(state: "ready", voice: voice), on: connection)
+        case .previewVoice(let voice):
+            // Port of app/server.py's `preview_voice`: speak a fixed sample
+            // line in the requested voice, active profile voice untouched.
+            // An unknown voice id is ignored silently, same as set_voice.
+            // Since this app has only one voice per language, "any voice
+            // id" only ever resolves to that language's own voice — this
+            // still exercises the full protocol round-trip for when a real
+            // multi-voice catalog exists.
+            guard let language = ["en", "ja"].first(where: { voiceCatalog(for: $0).contains { $0.id == voice } }) else { break }
+            send(.previewStatus(state: "loading", voice: voice), on: connection)
+            let sample = systemText("preview_sample", language: language, [:])
+            // "ready" is sent only once playback actually finishes (matches
+            // desktop's `await asyncio.to_thread(tts.preview, ...)` blocking
+            // until done, then sending ready) — not right after starting it.
+            speak(sample, language: language) { [weak self] amplitude in
+                self?.send(.amplitude(value: amplitude), on: connection)
+            } onFinish: { [weak self] in
+                guard let self else { return }
+                self.send(.amplitude(value: 0.0), on: connection)
+                self.send(.previewStatus(state: "ready", voice: voice), on: connection)
+            }
         case .switchProfile(let slug, let language, let level):
             switchProfile(slug: slug, language: language, level: level, for: connection)
         case .deleteProfile(let slug):

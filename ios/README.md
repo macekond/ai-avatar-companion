@@ -31,7 +31,9 @@ reimplementation of the same protocol and pipeline behaviors, hosting the existi
   per-sentence TTS with live amplitude streaming, furigana annotation via
   `OpenJTalkMorphemeAnalyzer`, `replay` (re-speak a stored line), `set_level`/`set_language`
   (validated against `Levels`, with a `settings` resend on language change per
-  `app/server.py`'s `_send_settings`), barge-in (`stop_speak`), and post-turn memory extraction
+  `app/server.py`'s `_send_settings`), `set_voice`/`preview_voice` (validated against a
+  single-entry-per-language voice catalog — this app has exactly one voice per language, no
+  multi-voice download infrastructure yet), barge-in (`stop_speak`), and post-turn memory extraction
   (`MemoryExtractor.swift` — a small focused LlamaEngine call after each reply pulls a topic
   keyword and any grammar problem into the profile's saved memory, guarded by `GenerationGuard`
   against a mid-extraction profile swap; port of `app/memory_extractor.py`, scoped down to not
