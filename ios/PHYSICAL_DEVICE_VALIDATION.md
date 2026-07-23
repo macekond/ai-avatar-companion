@@ -55,6 +55,43 @@ device run is: build, run one conversation turn, read the log.
   the plan calls this out as the real risk on *lower-RAM* devices specifically, so a pass on a
   Pro-tier phone doesn't clear this — retest on the lowest device tier Nova intends to support.
 
+## Preliminary memory-budget risk analysis (Simulator numbers + real file sizes, not a device run)
+
+This can't substitute for a real measurement, but it's arithmetic against real numbers rather than
+a guess, and it points at a specific, likely real risk worth watching for on the actual run.
+
+**Real cumulative Simulator footprint measured this session** (via `Diagnostics.log("engine_loaded", ...)`,
+loading in order): whisper 596MB → llama (interim SmolLM2-135M) 709MB → open_jtalk 709MB (dictionary
+load is small) → Kokoro 1383MB → Piper 1494MB. That's **~1.5GB with every engine loaded**, using the
+135M-parameter placeholder LLM the plan itself flags as "NOT one of the real candidates" (`llm.gguf`'s
+own doc comment in `NovaWebSocketServer.swift`) — small enough (105MB on disk) to verify the
+download/load mechanism without exhausting this environment's disk, not a stand-in for real quality
+or real memory pressure.
+
+**The real candidates are Llama-3.2-3B-Instruct or Qwen2.5-3B-Instruct**, both ~3B parameters. A
+Q4_K_M-quantized GGUF for a 3B model is commonly ~1.8-2.2GB on disk (roughly `3.2e9 params ×
+~4.6 bits/param ÷ 8`, consistent with the 135M interim model's own ratio: 105MB on disk for 135M
+params scales to ~2.2GB for 3B at the same bits-per-param). Runtime footprint (weights + KV cache +
+Metal buffers) typically runs somewhat *above* the on-disk GGUF size, not below it.
+
+**Rough extrapolation**: swap the ~100MB interim LLM's Simulator contribution for a ~2-2.5GB real
+one and the same load order gives a cumulative footprint in the **~3.2-3.7GB range** — before
+accounting for Simulator vs. real-device differences (real Metal buffer allocation, real KV cache
+growth over a long conversation, real audio-engine buffers) in either direction.
+
+**Why this matters concretely**: iOS's per-app jetsam foreground memory limit varies by device RAM
+tier — roughly ~1-1.6GB on 2-3GB-RAM devices, ~2-2.5GB on 4GB-RAM devices (iPhone 12/13/14 base
+tier), and higher (~3-4GB+) only on 6GB+-RAM Pro-tier devices. A ~3.2-3.7GB cumulative estimate
+would plausibly **exceed budget on anything but the highest-RAM current iPhones** — which is
+exactly the "must coexist with STT/TTS engines during a live turn" risk the original port plan
+already flagged as this app's single biggest memory risk, now with real numbers behind the concern
+instead of just a plan-stage hunch.
+
+**What this means for the physical-device run**: don't just test on whichever device is on hand.
+Test on the *lowest RAM tier* Nova intends to support specifically, with the *real* 3B LLM (not
+the SmolLM2-135M interim one) — that combination is where this estimate suggests jetsam
+termination becomes a real possibility, not just a device-badge-independent pass/fail check.
+
 ## Recording the result
 
 Once run, append the actual numbers (device model, iOS version, each metric above) to this file
