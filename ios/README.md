@@ -37,9 +37,11 @@ reimplementation of the same protocol and pipeline behaviors, hosting the existi
   against a mid-extraction profile swap; port of `app/memory_extractor.py`, scoped down to not
   yet track partial-speech-before-barge-in), conversation history (`TranscriptStore` — replayed
   as `conversation_turn`/`conversation_correction` on every connect/profile-switch, reset via
-  `conversation_reset`, deleted alongside a deleted profile), and appearance (`AppearanceStore` —
+  `conversation_reset`, deleted alongside a deleted profile), appearance (`AppearanceStore` —
   refreshed by `avatar_loaded`'s `key`, fed into every reply's prompt so Nova can answer "what do
-  you look like?" in character).
+  you look like?" in character), and the spoken greeting itself (`sendGreeting`, port of
+  `_send_greeting` — "Welcome back!", naming the most recently-discussed topic if any; fires once
+  per profile-session on `start`, matching `has_greeted`).
   TTS is dispatched by language: `en` goes through `EspeakPhonemizer` (espeak-ng) →
   `PiperPhonemeIds` → `PiperEngine`; `ja` goes through open_jtalk → `JapanesePhonemizer` →
   `KokoroEngine`/`KokoroPlayer`. Both fall back to `SystemTTSEngine` (`AVSpeechSynthesizer`) when

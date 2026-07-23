@@ -50,6 +50,9 @@ public final class NovaWebSocketServer: ObservableObject {
     /// connect/profile-switch so the panel survives a reload.
     private var transcriptStores: [ObjectIdentifier: TranscriptStore] = [:]
     private var convTurnIds: [ObjectIdentifier: Int] = [:]
+
+    /// Port of app/server.py's `has_greeted` — see the `.start` case.
+    private var hasGreeted: [ObjectIdentifier: Bool] = [:]
     private static func transcriptsDir() -> URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         return base.appendingPathComponent("transcripts")
@@ -451,6 +454,7 @@ public final class NovaWebSocketServer: ObservableObject {
         onboardingNames.removeValue(forKey: id)
         transcriptStores.removeValue(forKey: id)
         convTurnIds.removeValue(forKey: id)
+        hasGreeted.removeValue(forKey: id)
     }
 
     private func receiveLoop(_ connection: NWConnection) {
@@ -524,6 +528,15 @@ public final class NovaWebSocketServer: ObservableObject {
             return
         case .start:
             machine.start()
+            let id = ObjectIdentifier(connection)
+            // Port of app/server.py's `has_greeted` — the spoken greeting
+            // fires once per profile-session (reset on every profile
+            // switch, see `switchProfile`), triggered by the child (or a
+            // parent) tapping "Say hi to Nova!" while in `awaiting_start`.
+            if hasGreeted[id] != true {
+                hasGreeted[id] = true
+                sendGreeting(for: connection)
+            }
         case .pttStart:
             machine.pttStart()
             recorder.pttStart()
@@ -595,6 +608,7 @@ public final class NovaWebSocketServer: ObservableObject {
             // have at least one child profile to fall back to).
             let id = ObjectIdentifier(connection)
             generationGuard(for: connection).advance()
+            hasGreeted.removeValue(forKey: id)
             let safeSlug = nameToSlug(slug, fallback: "")
             let isActiveProfile = !safeSlug.isEmpty && memoryManagers[id]?.slug == safeSlug
             // Delete through the connection's own live manager instance when
@@ -727,6 +741,7 @@ public final class NovaWebSocketServer: ObservableObject {
     private func switchProfile(slug rawSlug: String, language: String?, level: String?, for connection: NWConnection) {
         let id = ObjectIdentifier(connection)
         generationGuard(for: connection).advance()
+        hasGreeted.removeValue(forKey: id)
         let safeSlug = nameToSlug(rawSlug, fallback: "child")
         let manager = MemoryManager(profilesDir: Self.profilesDir(), slug: safeSlug)
 
@@ -908,6 +923,25 @@ public final class NovaWebSocketServer: ObservableObject {
                 }
             }
         }
+    }
+
+    /// Port of app/server.py's `_send_greeting` — the spoken "Welcome back!"
+    /// (or, for a returning profile with a recent topic, one that names it)
+    /// a child hears the moment they tap "Say hi to Nova!". Picks the most
+    /// recently-mentioned topic the same way desktop does (sort by
+    /// `lastMentioned` descending, take the first).
+    private func sendGreeting(for connection: NWConnection) {
+        let id = ObjectIdentifier(connection)
+        guard let profile = memories[id]?.profile else { return }
+        let language = profile.language
+        let ageNote = ageSuffix(profile.age, language: language)
+        let text: String
+        if let recentTopic = memories[id]?.topics.max(by: { $0.lastMentioned < $1.lastMentioned })?.keyword {
+            text = systemText("greeting_returning_topic", language: language, ["name": profile.name, "age_suffix": ageNote, "topic": recentTopic])
+        } else {
+            text = systemText("greeting_returning", language: language, ["name": profile.name, "age_suffix": ageNote])
+        }
+        replay(text, for: connection)
     }
 
     /// Re-speaks `text` outside the normal reply flow — port of
