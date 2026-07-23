@@ -43,6 +43,24 @@ public final class NovaWebSocketServer: ObservableObject {
     private var memoryManagers: [ObjectIdentifier: MemoryManager] = [:]
     private var memories: [ObjectIdentifier: ChildMemory] = [:]
 
+    /// Guards `replyAndContinue`'s fire-and-forget LLM generation task
+    /// against landing after the connection's active profile has moved on
+    /// (a `switch_profile`/`delete_profile` mid-generation) — port of the
+    /// object-identity check `app/server.py`'s `_apply_extracted_memory`
+    /// uses for the same "async work outliving its validity window"
+    /// problem (see `_swap_profile`'s doc comment in the root CLAUDE.md).
+    /// Advanced on every profile change; a stale token's `speakSentences`
+    /// call becomes a silent no-op instead of speaking/displaying an old
+    /// profile's reply under the new profile's session.
+    private var generationGuards: [ObjectIdentifier: GenerationGuard] = [:]
+    private func generationGuard(for connection: NWConnection) -> GenerationGuard {
+        let id = ObjectIdentifier(connection)
+        if let existing = generationGuards[id] { return existing }
+        let newGuard = GenerationGuard()
+        generationGuards[id] = newGuard
+        return newGuard
+    }
+
     /// Two-turn spoken onboarding (name, then age) for a brand-new profile —
     /// port of `_run_onboarding` in app/server.py. `nil` for a connection
     /// means onboarding isn't in progress (either finished, or not needed
@@ -359,6 +377,7 @@ public final class NovaWebSocketServer: ObservableObject {
         let id = ObjectIdentifier(connection)
         connections.removeValue(forKey: id)
         stateMachines.removeValue(forKey: id)
+        generationGuards.removeValue(forKey: id)
     }
 
     private func receiveLoop(_ connection: NWConnection) {
@@ -494,6 +513,7 @@ public final class NovaWebSocketServer: ObservableObject {
             // app/server.py's delete_profile guard (a parent must always
             // have at least one child profile to fall back to).
             let id = ObjectIdentifier(connection)
+            generationGuard(for: connection).advance()
             let safeSlug = nameToSlug(slug, fallback: "")
             let isActiveProfile = !safeSlug.isEmpty && memoryManagers[id]?.slug == safeSlug
             // Delete through the connection's own live manager instance when
@@ -622,6 +642,7 @@ public final class NovaWebSocketServer: ObservableObject {
     /// the profiles directory.
     private func switchProfile(slug rawSlug: String, language: String?, level: String?, for connection: NWConnection) {
         let id = ObjectIdentifier(connection)
+        generationGuard(for: connection).advance()
         let safeSlug = nameToSlug(rawSlug, fallback: "child")
         let manager = MemoryManager(profilesDir: Self.profilesDir(), slug: safeSlug)
 
@@ -708,14 +729,17 @@ public final class NovaWebSocketServer: ObservableObject {
         builder.memory = memories[ObjectIdentifier(connection)]
         let systemPrompt = builder.build()
         let prompt = "\(systemPrompt)\n\nChild: \(userMessage)\nNova:"
+        let generationToken = generationGuard(for: connection).currentToken()
 
         Task.detached {
             var sentences: [String] = []
             try? engine.generate(prompt: prompt) { sentence in sentences.append(sentence) }
             await MainActor.run { [weak self] in
                 guard let self else { return }
-                self.speechInterrupted = false
-                self.speakSentences(sentences, index: 0, language: language, connection: connection)
+                self.generationGuard(for: connection).apply(generationToken) {
+                    self.speechInterrupted = false
+                    self.speakSentences(sentences, index: 0, language: language, connection: connection)
+                }
             }
         }
     }
