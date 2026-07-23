@@ -53,6 +53,12 @@ public final class NovaWebSocketServer: ObservableObject {
 
     /// Port of app/server.py's `has_greeted` — see the `.start` case.
     private var hasGreeted: [ObjectIdentifier: Bool] = [:]
+
+    /// Port of `LLMPipeline`'s rolling `_history` (NovaCore, TDD'd) — this
+    /// session's short-term conversational memory, cleared on every profile
+    /// swap (matching `clear_history()`) so a new profile never inherits
+    /// the previous child's in-session context.
+    private var conversationHistories: [ObjectIdentifier: ConversationHistory] = [:]
     private static func transcriptsDir() -> URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         return base.appendingPathComponent("transcripts")
@@ -464,6 +470,7 @@ public final class NovaWebSocketServer: ObservableObject {
         transcriptStores.removeValue(forKey: id)
         convTurnIds.removeValue(forKey: id)
         hasGreeted.removeValue(forKey: id)
+        conversationHistories.removeValue(forKey: id)
     }
 
     private func receiveLoop(_ connection: NWConnection) {
@@ -654,6 +661,7 @@ public final class NovaWebSocketServer: ObservableObject {
             let id = ObjectIdentifier(connection)
             generationGuard(for: connection).advance()
             hasGreeted.removeValue(forKey: id)
+            conversationHistories.removeValue(forKey: id)
             let safeSlug = nameToSlug(slug, fallback: "")
             let isActiveProfile = !safeSlug.isEmpty && memoryManagers[id]?.slug == safeSlug
             // Delete through the connection's own live manager instance when
@@ -787,6 +795,7 @@ public final class NovaWebSocketServer: ObservableObject {
         let id = ObjectIdentifier(connection)
         generationGuard(for: connection).advance()
         hasGreeted.removeValue(forKey: id)
+        conversationHistories.removeValue(forKey: id)
         let safeSlug = nameToSlug(rawSlug, fallback: "child")
         let manager = MemoryManager(profilesDir: Self.profilesDir(), slug: safeSlug)
 
@@ -874,7 +883,13 @@ public final class NovaWebSocketServer: ObservableObject {
         builder.memory = memories[ObjectIdentifier(connection)]
         builder.appearance = currentAppearance
         let systemPrompt = builder.build()
-        let prompt = "\(systemPrompt)\n\nChild: \(userMessage)\nNova:"
+        // Port of app/pipeline/llm.py's rolling `_history`: prior exchanges
+        // (this session only — cross-session context is `ChildMemory`'s job)
+        // formatted ahead of the new turn's cue, so Nova can refer back to
+        // what was just said instead of starting fresh every single turn.
+        let historyText = conversationHistories[ObjectIdentifier(connection)]?.formatted() ?? ""
+        let historyBlock = historyText.isEmpty ? "" : "\(historyText)\n"
+        let prompt = "\(systemPrompt)\n\n\(historyBlock)Child: \(userMessage)\nNova:"
         let generationToken = generationGuard(for: connection).currentToken()
 
         Task.detached {
@@ -887,6 +902,12 @@ public final class NovaWebSocketServer: ObservableObject {
                     self.speakSentences(sentences, index: 0, language: language, connection: connection)
                     let turnId = self.recordTurn(transcript: userMessage, replySentences: sentences, language: language, connection: connection)
                     self.extractMemory(transcript: userMessage, replySentences: sentences, engine: engine, connection: connection, token: generationToken, turnId: turnId)
+                    if !sentences.isEmpty {
+                        let id = ObjectIdentifier(connection)
+                        var history = self.conversationHistories[id] ?? ConversationHistory()
+                        history.append(you: userMessage, nova: sentences.joined(separator: " "))
+                        self.conversationHistories[id] = history
+                    }
                 }
             }
         }

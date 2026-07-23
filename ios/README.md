@@ -37,9 +37,14 @@ reimplementation of the same protocol and pipeline behaviors, hosting the existi
   (`MemoryExtractor.swift` — a small focused LlamaEngine call after each reply pulls a topic
   keyword and any grammar problem into the profile's saved memory, guarded by `GenerationGuard`
   against a mid-extraction profile swap; port of `app/memory_extractor.py`, scoped down to not
-  yet track partial-speech-before-barge-in), conversation history (`TranscriptStore` — replayed
-  as `conversation_turn`/`conversation_correction` on every connect/profile-switch, reset via
-  `conversation_reset`, deleted alongside a deleted profile), appearance (`AppearanceStore` —
+  yet track partial-speech-before-barge-in), a rolling in-session conversation history
+  (`ConversationHistory`, NovaCore — port of `LLMPipeline`'s `_history`: prior exchanges this
+  session are formatted into every reply's prompt so Nova can refer back to what was just said,
+  not just what's in `ChildMemory`'s cross-session topics/problems; trimmed to the last 6
+  exchanges, cleared on every profile swap), a display/disk conversation-history panel
+  (`TranscriptStore` — replayed as `conversation_turn`/`conversation_correction` on every
+  connect/profile-switch, reset via `conversation_reset`, deleted alongside a deleted profile),
+  appearance (`AppearanceStore` —
   refreshed by `avatar_loaded`'s `key`, fed into every reply's prompt so Nova can answer "what do
   you look like?" in character), and the spoken greeting itself (`sendGreeting`, port of
   `_send_greeting` — "Welcome back!", naming the most recently-discussed topic if any; fires once
