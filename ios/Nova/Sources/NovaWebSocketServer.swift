@@ -374,10 +374,23 @@ public final class NovaWebSocketServer: ObservableObject {
     }
 
     private func drop(_ connection: NWConnection) {
+        // Every per-connection dictionary must be cleaned up here — this app
+        // only ever has one *active* WKWebView client, but the WebView can
+        // reconnect many times over a long session (reload, backgrounding
+        // recovery), and each old NWConnection's ObjectIdentifier stays a
+        // valid dictionary key forever otherwise: an unbounded leak, not
+        // just an unused-memory nuisance, since a stale entry surviving here
+        // is exactly the kind of "state that should have moved on" bug this
+        // codebase's other invariants (GenerationGuard, the delete-tombstone
+        // pattern) exist to prevent elsewhere.
         let id = ObjectIdentifier(connection)
         connections.removeValue(forKey: id)
         stateMachines.removeValue(forKey: id)
         generationGuards.removeValue(forKey: id)
+        memoryManagers.removeValue(forKey: id)
+        memories.removeValue(forKey: id)
+        onboardingSteps.removeValue(forKey: id)
+        onboardingNames.removeValue(forKey: id)
     }
 
     private func receiveLoop(_ connection: NWConnection) {
