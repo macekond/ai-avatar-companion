@@ -35,8 +35,11 @@ reimplementation of the same protocol and pipeline behaviors, hosting the existi
   (`MemoryExtractor.swift` — a small focused LlamaEngine call after each reply pulls a topic
   keyword and any grammar problem into the profile's saved memory, guarded by `GenerationGuard`
   against a mid-extraction profile swap; port of `app/memory_extractor.py`, scoped down to not
-  yet track partial-speech-before-barge-in or send `conversation_correction`/persist a
-  transcript store, neither of which has an iOS port yet).
+  yet track partial-speech-before-barge-in), conversation history (`TranscriptStore` — replayed
+  as `conversation_turn`/`conversation_correction` on every connect/profile-switch, reset via
+  `conversation_reset`, deleted alongside a deleted profile), and appearance (`AppearanceStore` —
+  refreshed by `avatar_loaded`'s `key`, fed into every reply's prompt so Nova can answer "what do
+  you look like?" in character).
   TTS is dispatched by language: `en` goes through `EspeakPhonemizer` (espeak-ng) →
   `PiperPhonemeIds` → `PiperEngine`; `ja` goes through open_jtalk → `JapanesePhonemizer` →
   `KokoroEngine`/`KokoroPlayer`. Both fall back to `SystemTTSEngine` (`AVSpeechSynthesizer`) when

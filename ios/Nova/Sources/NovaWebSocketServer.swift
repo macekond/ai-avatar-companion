@@ -43,6 +43,46 @@ public final class NovaWebSocketServer: ObservableObject {
     private var memoryManagers: [ObjectIdentifier: MemoryManager] = [:]
     private var memories: [ObjectIdentifier: ChildMemory] = [:]
 
+    /// Conversation history (`TranscriptStore`, NovaCore) per connection —
+    /// port of app/server.py's `transcript_store`/`conv_turn_n`. Persisted
+    /// separately from `ChildMemory` (raw child↔Nova text + corrections,
+    /// vs. extracted topics/problems), replayed to the UI on every
+    /// connect/profile-switch so the panel survives a reload.
+    private var transcriptStores: [ObjectIdentifier: TranscriptStore] = [:]
+    private var convTurnIds: [ObjectIdentifier: Int] = [:]
+    private static func transcriptsDir() -> URL {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        return base.appendingPathComponent("transcripts")
+    }
+
+    /// Port of `_load_transcript`: resets the UI's history panel, then
+    /// replays every stored turn (+ corrections) for `slug` — `conv_turn_n`
+    /// (here `convTurnIds`) continues past the last stored id so a live
+    /// turn never collides with a replayed one.
+    private func loadTranscript(slug: String, for connection: NWConnection) {
+        let id = ObjectIdentifier(connection)
+        send(.conversationReset, on: connection)
+        let store = TranscriptStore(transcriptsDir: Self.transcriptsDir(), slug: slug)
+        transcriptStores[id] = store
+        let language = memories[id]?.profile.language ?? "en"
+        let formatter = furiganaFormatter()
+        for turn in store.load() {
+            send(.conversationTurn(
+                id: turn.id, you: turn.you, nova: turn.nova,
+                youHtml: formatter.annotateFor(turn.you, language: language),
+                novaHtml: formatter.annotateFor(turn.nova, language: language)
+            ), on: connection)
+            for correction in turn.corrections {
+                send(.conversationCorrection(
+                    id: turn.id, kind: correction.kind, wrong: correction.wrong, right: correction.right,
+                    wrongHtml: formatter.annotateFor(correction.wrong, language: language),
+                    rightHtml: formatter.annotateFor(correction.right, language: language)
+                ), on: connection)
+            }
+        }
+        convTurnIds[id] = store.lastId()
+    }
+
     /// Guards `replyAndContinue`'s fire-and-forget LLM generation task
     /// against landing after the connection's active profile has moved on
     /// (a `switch_profile`/`delete_profile` mid-generation) — port of the
@@ -162,6 +202,18 @@ public final class NovaWebSocketServer: ObservableObject {
     /// callback still fires and would otherwise keep the reply going.
     private var speechInterrupted = false
 
+    /// Port of `app/appearance.py`'s `AppearanceStore` — resolves the
+    /// current avatar's appearance description (curated for the two
+    /// bundled VRMs; the derived-from-region-colours cache path isn't
+    /// exercised by either, so `cacheDir` need not exist yet). Refreshed by
+    /// `avatarLoaded`'s `key`, fed into every reply's `PromptBuilder`.
+    private lazy var appearanceStore = AppearanceStore(cacheDir: Self.appearanceCacheDir())
+    private var currentAppearance: String?
+    private static func appearanceCacheDir() -> URL {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        return base.appendingPathComponent("appearance_cache")
+    }
+
     /// Base personality prompt — placeholder until Config (config.yaml's
     /// `personality.system_prompt`) is ported; PromptBuilder's own load-bearing
     /// assembly order (teaching frame -> level -> memory -> appearance ->
@@ -170,6 +222,12 @@ public final class NovaWebSocketServer: ObservableObject {
 
     public init(port: UInt16) {
         self.port = port
+        // Matches app/server.py's `_apply_appearance(DEFAULT_AVATAR_KEY)`
+        // right after construction — a sane default before any
+        // `avatarLoaded` has arrived (in practice it always does, first,
+        // per protocol, but a reply generated before then should still get
+        // an appearance line rather than silently omitting that prompt block).
+        currentAppearance = appearanceStore.get(key: defaultAvatarKey)?.description
     }
 
     /// Where a downloaded model would live under Application Support,
@@ -391,6 +449,8 @@ public final class NovaWebSocketServer: ObservableObject {
         memories.removeValue(forKey: id)
         onboardingSteps.removeValue(forKey: id)
         onboardingNames.removeValue(forKey: id)
+        transcriptStores.removeValue(forKey: id)
+        convTurnIds.removeValue(forKey: id)
     }
 
     private func receiveLoop(_ connection: NWConnection) {
@@ -430,7 +490,7 @@ public final class NovaWebSocketServer: ObservableObject {
     /// plumbing end-to-end (Phase 2) before any native inference is wired up.
     private func dispatch(_ message: ClientMessage, machine: inout SessionStateMachine, connection: NWConnection) {
         switch message {
-        case .avatarLoaded:
+        case .avatarLoaded(let key):
             // main.js sends this immediately on socket open and waits for
             // `init` to hide its "Connecting…" overlay (see ws.onopen /
             // markServerReady in ui/src/main.js). A connection that lands
@@ -438,6 +498,13 @@ public final class NovaWebSocketServer: ObservableObject {
             // app/server.py sending `setup_state` right away rather than
             // making a late-joining client wait for the next progress tick.
             send(.setupStatus(phase: setupPhase, detail: ""), on: connection)
+            // Port of app/server.py's `_apply_appearance`: refresh the
+            // appearance description PromptBuilder feeds the LLM (a
+            // load-bearing block in its prompt assembly order) so Nova can
+            // answer "what do you look like?" in character. Global, not
+            // per-connection, matching desktop's single shared `llm`
+            // pipeline — this app only ever has one active WKWebView client.
+            currentAppearance = appearanceStore.get(key: key)?.description
             let (memory, isNewProfile) = loadOrCreateDefaultProfile(for: connection)
             if isNewProfile {
                 startOnboarding(for: connection)
@@ -448,6 +515,7 @@ public final class NovaWebSocketServer: ObservableObject {
             send(.memoryLoaded(name: memory.profile.name, age: memory.profile.age, language: memory.profile.language, level: memory.profile.level), on: connection)
             send(.initMessage(level: memory.profile.level, language: memory.profile.language), on: connection)
             sendSettings(for: connection)
+            loadTranscript(slug: manager.slug, for: connection)
             // app/server.py sends this right after connect too (line 771) —
             // without it the state label never leaves its static HTML
             // placeholder text, since applyState() only fires on a `state`
@@ -541,6 +609,7 @@ public final class NovaWebSocketServer: ObservableObject {
                 send(.profileError(message: "Can't remove the only child."), on: connection)
             } else {
                 _ = manager.deleteProfile(slug: slug)
+                TranscriptStore(transcriptsDir: Self.transcriptsDir(), slug: slug).delete()
                 if isActiveProfile {
                     // The active profile is gone — fall back to another
                     // remaining profile (or create a fresh default if
@@ -563,6 +632,7 @@ public final class NovaWebSocketServer: ObservableObject {
                     send(.memoryLoaded(name: fallback.profile.name, age: fallback.profile.age, language: fallback.profile.language, level: fallback.profile.level), on: connection)
                     send(.initMessage(level: fallback.profile.level, language: fallback.profile.language), on: connection)
                     sendSettings(for: connection)
+                    loadTranscript(slug: fallbackManager.slug, for: connection)
                 } else if let activeManager = memoryManagers[id] {
                     send(.profiles(list: activeManager.listProfiles(), active: activeManager.slug), on: connection)
                 }
@@ -644,6 +714,7 @@ public final class NovaWebSocketServer: ObservableObject {
             send(.memoryLoaded(name: memory.profile.name, age: memory.profile.age, language: memory.profile.language, level: memory.profile.level), on: connection)
             send(.initMessage(level: memory.profile.level, language: memory.profile.language), on: connection)
             sendSettings(for: connection)
+            loadTranscript(slug: manager.slug, for: connection)
             send(.state((stateMachines[id] ?? SessionStateMachine()).state), on: connection)
         }
     }
@@ -678,6 +749,7 @@ public final class NovaWebSocketServer: ObservableObject {
         send(.memoryLoaded(name: memory.profile.name, age: memory.profile.age, language: memory.profile.language, level: memory.profile.level), on: connection)
         send(.initMessage(level: memory.profile.level, language: memory.profile.language), on: connection)
         sendSettings(for: connection)
+        loadTranscript(slug: manager.slug, for: connection)
     }
 
     /// Onboarding counterpart to `transcribeAndContinue` — same off-main-actor
@@ -740,6 +812,7 @@ public final class NovaWebSocketServer: ObservableObject {
         let language = profile?.language ?? "en"
         var builder = PromptBuilder(basePrompt: Self.placeholderBasePrompt, language: language, level: profile?.level ?? "A")
         builder.memory = memories[ObjectIdentifier(connection)]
+        builder.appearance = currentAppearance
         let systemPrompt = builder.build()
         let prompt = "\(systemPrompt)\n\nChild: \(userMessage)\nNova:"
         let generationToken = generationGuard(for: connection).currentToken()
@@ -752,28 +825,54 @@ public final class NovaWebSocketServer: ObservableObject {
                 self.generationGuard(for: connection).apply(generationToken) {
                     self.speechInterrupted = false
                     self.speakSentences(sentences, index: 0, language: language, connection: connection)
-                    self.extractMemory(transcript: userMessage, replySentences: sentences, engine: engine, connection: connection, token: generationToken)
+                    let turnId = self.recordTurn(transcript: userMessage, replySentences: sentences, language: language, connection: connection)
+                    self.extractMemory(transcript: userMessage, replySentences: sentences, engine: engine, connection: connection, token: generationToken, turnId: turnId)
                 }
             }
         }
     }
 
+    /// Port of app/server.py's per-turn `conv_turn_n`/`transcript_store`
+    /// bookkeeping: assigns the next turn id, sends `conversation_turn`, and
+    /// appends it to the connection's `TranscriptStore` (display-only
+    /// history — never fed back into the LLM prompt, unlike `ChildMemory`).
+    /// Returns the assigned id so `extractMemory` can attach a correction to
+    /// the same turn.
+    @discardableResult
+    private func recordTurn(transcript: String, replySentences: [String], language: String, connection: NWConnection) -> Int? {
+        guard !replySentences.isEmpty else { return nil }
+        let id = ObjectIdentifier(connection)
+        guard let store = transcriptStores[id] else { return nil }
+        let turnId = (convTurnIds[id] ?? 0) + 1
+        convTurnIds[id] = turnId
+        let fullReply = replySentences.joined(separator: " ")
+        let formatter = furiganaFormatter()
+        send(.conversationTurn(
+            id: turnId, you: transcript, nova: fullReply,
+            youHtml: formatter.annotateFor(transcript, language: language),
+            novaHtml: formatter.annotateFor(fullReply, language: language)
+        ), on: connection)
+        store.appendTurn(id: turnId, you: transcript, nova: fullReply)
+        return turnId
+    }
+
     /// Port of `app/memory_extractor.py`'s post-turn extraction: a small
     /// focused LLM call (fire-and-forget, after the reply itself) pulls a
-    /// topic keyword and any grammar problem out of the exchange and saves
-    /// them onto the profile's memory — the actual mechanism behind Nova
-    /// "remembering" what a child talked about across sessions.
+    /// topic keyword and any grammar problem out of the exchange, saves them
+    /// onto the profile's memory, and (if a problem was found) sends a
+    /// `conversation_correction` + appends it to the transcript so the
+    /// history panel can highlight what was gently fixed — the actual
+    /// mechanism behind Nova "remembering" what a child talked about across
+    /// sessions.
     ///
     /// Scoped down from the desktop original: extracts from the *full*
     /// generated reply rather than tracking exactly which sentences were
     /// spoken before a possible `stop_speak` barge-in (that needs threading
     /// a partial-speech accumulator through `speakSentences`' recursion —
-    /// not done here); also doesn't yet send `conversation_correction` or
-    /// persist a `transcript_store` turn, since neither has an iOS port yet.
-    /// Silent on any failure (no engine, empty reply) — matches the "never
-    /// blocks the conversation" guarantee `MemoryExtractor.extract` provides
-    /// on desktop.
-    private func extractMemory(transcript: String, replySentences: [String], engine: LlamaEngine, connection: NWConnection, token: GenerationGuard.Token) {
+    /// not done here). Silent on any failure (no engine, empty reply) —
+    /// matches the "never blocks the conversation" guarantee
+    /// `MemoryExtractor.extract` provides on desktop.
+    private func extractMemory(transcript: String, replySentences: [String], engine: LlamaEngine, connection: NWConnection, token: GenerationGuard.Token, turnId: Int?) {
         guard !replySentences.isEmpty else { return }
         let fullReply = replySentences.joined(separator: " ")
         Task.detached { [weak self] in
@@ -793,6 +892,16 @@ public final class NovaWebSocketServer: ObservableObject {
                     }
                     if let problem = result.parseProblem() {
                         manager.update(&memory, problemType: problem.type, example: problem.example, correction: problem.correction)
+                        if let turnId, let store = self.transcriptStores[id] {
+                            let language = memory.profile.language
+                            let formatter = self.furiganaFormatter()
+                            self.send(.conversationCorrection(
+                                id: turnId, kind: problem.type, wrong: problem.example, right: problem.correction,
+                                wrongHtml: formatter.annotateFor(problem.example, language: language),
+                                rightHtml: formatter.annotateFor(problem.correction, language: language)
+                            ), on: connection)
+                            store.appendCorrection(id: turnId, kind: problem.type, wrong: problem.example, right: problem.correction)
+                        }
                     }
                     self.memories[id] = memory
                     manager.save(memory)
