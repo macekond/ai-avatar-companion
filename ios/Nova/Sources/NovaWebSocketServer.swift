@@ -95,12 +95,18 @@ public final class NovaWebSocketServer: ObservableObject {
         ModelSpec(filename: "llm.gguf", urlString: "https://huggingface.co/QuantFactory/SmolLM2-135M-Instruct-GGUF/resolve/main/SmolLM2-135M-Instruct.Q4_K_M.gguf"),
         ModelSpec(filename: "kokoro-v1.0.onnx", urlString: "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx"),
         ModelSpec(filename: "voices-v1.0.bin", urlString: "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin"),
-        // "amy" is a placeholder voice for wiring/verification, same status
-        // as the interim LLM model above — Phase 8's license re-verification
-        // pass (this file's `VENDORED.md`-style diligence) hasn't been done
-        // for a specific shipping voice choice yet.
-        ModelSpec(filename: "piper-en.onnx", urlString: "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/amy/medium/en_US-amy-medium.onnx"),
-        ModelSpec(filename: "piper-en.onnx.json", urlString: "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/amy/medium/en_US-amy-medium.onnx.json"),
+        // ljspeech: trained on the public-domain LJSpeech dataset (per its
+        // Hugging Face MODEL_CARD) — NOT fine-tuned from lessac, unlike
+        // several other rhasspy/piper-voices English voices (amy, joe,
+        // jenny_dioco all say "Finetuned from U.S. English lessac voice").
+        // `en_US-lessac` was already flagged in the root CLAUDE.md as a
+        // research-only voice removed from the desktop app on licensing
+        // grounds; picking a voice derived from the same underlying data
+        // for this iOS wiring would quietly reintroduce that same problem.
+        // ljspeech/norman/kristin (LibriVox, public domain) are all safe
+        // alternatives; ljspeech was chosen arbitrarily among those three.
+        ModelSpec(filename: "piper-en.onnx", urlString: "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/ljspeech/medium/en_US-ljspeech-medium.onnx"),
+        ModelSpec(filename: "piper-en.onnx.json", urlString: "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/ljspeech/medium/en_US-ljspeech-medium.onnx.json"),
     ]
     private var setupPhase = "ready"
 
@@ -117,10 +123,6 @@ public final class NovaWebSocketServer: ObservableObject {
     private var piperEngine: PiperEngine?
     private var piperConfig: PiperConfig?
     private let piperPlayer = KokoroPlayer()
-    /// espeak-ng voice name Piper's `en_US-amy-medium` config specifies
-    /// (`espeak.voice` in its `.onnx.json`) — this app has one hardcoded
-    /// English voice, same as Kokoro's `af_alloy`, no picker yet.
-    private static let piperEspeakVoiceName = "en-us"
 
     /// Real once both the Kokoro ONNX model and voices archive exist on disk
     /// (Phase 9 on-demand download — not bundled). See
@@ -195,11 +197,11 @@ public final class NovaWebSocketServer: ObservableObject {
             }.value
         }
         if espeakPhonemizer == nil, let dataDir = Self.espeakDataDirectory() {
-            espeakPhonemizer = await Task.detached {
-                guard let phonemizer = try? EspeakPhonemizer(dataDir: dataDir) else { return nil }
-                try? phonemizer.setVoice(Self.piperEspeakVoiceName)
-                return phonemizer
-            }.value
+            // Voice is set per-synthesis from the loaded PiperConfig's own
+            // `espeak.voice` field (see `speak(_:language:...)`) rather than
+            // here — different Piper voices specify different espeak voice
+            // names (e.g. ljspeech's config says "en", not "en-us").
+            espeakPhonemizer = await Task.detached { try? EspeakPhonemizer(dataDir: dataDir) }.value
         }
         if piperEngine == nil, let modelPath = Self.modelPath("piper-en.onnx") {
             piperEngine = await Task.detached { try? PiperEngine(modelPath: modelPath) }.value
@@ -748,6 +750,7 @@ public final class NovaWebSocketServer: ObservableObject {
             Task.detached { [weak self] in
                 guard let self else { return }
                 do {
+                    try espeakPhonemizer.setVoice(piperConfig.espeakVoice)
                     let clauses = espeakPhonemizer.phonemize(text)
                     let allPhonemes = clauses.map { $0.phonemes + $0.terminator }.joined()
                     let ids = PiperPhonemeIds.phonemesToIds(allPhonemes, idMap: piperConfig.phonemeIdMap)

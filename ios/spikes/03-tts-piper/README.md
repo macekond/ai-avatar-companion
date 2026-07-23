@@ -199,7 +199,7 @@ unmapped — fixed by decomposing and iterating by `unicodeScalars` instead, mat
 voice's `.onnx.json` (`espeak.voice`, `phoneme_id_map`, `inference` scales, sample rate).
 `PiperEngine.swift` mirrors `KokoroEngine`'s direct-onnxruntime-C-API pattern with Piper's
 different tensor shapes (`input`/`input_lengths`/`scales`, optional `sid`) — confirmed against
-the real `en_US-amy-medium.onnx` model's actual input/output tensor names via `onnxruntime.InferenceSession`
+the real Piper model's actual input/output tensor names via `onnxruntime.InferenceSession`
 in Python before writing the Swift side, not guessed.
 
 **Wired into the live reply flow and verified against real files, not just unit tests**: this
@@ -210,16 +210,30 @@ verification opportunity, not staged. Implemented `replay` (`app/server.py`'s "r
 line" feature — `_speak_interruptible`: `state:speaking` -> `sentence` -> TTS with live,
 barge-in-able amplitude -> `state:idle`, no transcript/memory) in `NovaWebSocketServer`, since
 it's the real protocol feature that happens to be the cleanest way to exercise TTS directly
-without needing a live mic/STT/LLM turn. Copied `en_US-amy-medium.onnx`(+`.json`) and the
+without needing a live mic/STT/LLM turn. Copied a real Piper voice `.onnx`(+`.json`) and the
 compiled `espeak-ng-data` into a running Simulator app's container, drove a real `avatar_loaded`
--> `replay` over a live WebSocket connection, and confirmed: real audio played (83 amplitude
-messages over ~4s at the expected 20Hz cadence, with values up to 0.99 — `AVSpeechSynthesizer`'s
-sine-wave fallback caps at 0.6, so this couldn't be the fallback path; no espeak/Piper errors in
+-> `replay` over a live WebSocket connection, and confirmed: real audio played (80-100+ amplitude
+messages per utterance at the expected 20Hz cadence, with peak values above `AVSpeechSynthesizer`'s
+sine-wave fallback's hard 0.6 cap, so this couldn't be the fallback path; no espeak/Piper errors in
 the device log); and `stop_speak` sent mid-utterance correctly cut playback short (state reached
-`idle` well before the ~8s sentence would have finished naturally, matching the same barge-in
-guarantee already verified for Kokoro/AVSpeechSynthesizer). `en_US-amy-medium` is a placeholder
-voice choice for this verification, same status as the interim LLM model — Phase 8's license
-re-verification pass hasn't targeted a specific shipping English voice yet.
+`idle` well before the sentence would have finished naturally, matching the same barge-in
+guarantee already verified for Kokoro/AVSpeechSynthesizer).
+
+**Voice choice, corrected after a licensing check**: the first pick for this verification,
+`en_US-amy-medium`, turned out — per its Hugging Face `MODEL_CARD` — to be "Finetuned from
+U.S. English lessac voice." `en_US-lessac` is the exact voice already flagged in the root
+`CLAUDE.md` as research-only and removed from the desktop app; shipping a voice fine-tuned from
+the same underlying data would quietly reintroduce that problem. Checked model cards for every
+other voice already cached in this environment: `joe` and `en_GB-jenny_dioco` are *also*
+fine-tuned from lessac, while `ljspeech`, `norman`, and `kristin` are trained from clean
+public-domain sources (LJSpeech, LibriVox). Switched to `en_US-ljspeech-medium` — arbitrary
+among the three safe options — and re-verified the full pipeline against it (real audio, correct
+barge-in). This also surfaced and fixed a real latent bug: the espeak voice name was hardcoded
+to `"en-us"` at load time, but ljspeech's own config specifies `"en"` — different Piper voices
+name their espeak voice differently. Fixed by calling `espeakPhonemizer.setVoice(piperConfig.espeakVoice)`
+from the loaded config immediately before each synthesis, instead of hardcoding a guess once at
+startup. Kokoro's `af_alloy` hasn't had the equivalent lineage check yet — same Phase 8 diligence
+gap, called out in the top-level `ios/README.md`.
 
 **Net effect**: neither TTS backend is blocked anymore. Both Piper (English) and Kokoro
 (Japanese) are wired into the live reply flow with real-file verification; `AVSpeechSynthesizer`

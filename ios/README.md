@@ -39,8 +39,9 @@ reimplementation of the same protocol and pipeline behaviors, hosting the existi
 
 **Not done yet**: a production-ready model CDN (interim `modelSpecs` point straight at
 HuggingFace/GitHub, not a CDN the app controls); a per-profile voice picker (Piper hardcoded to
-`en_US-amy-medium`, Kokoro to `af_alloy`); license re-verification for the specific shipping
-voices (Phase 8's diligence pass, same as the VRM/model license checks already done elsewhere).
+`en_US-ljspeech-medium`, Kokoro to `af_alloy`); Kokoro's `af_alloy` still needs the same
+license-lineage check `en_US-ljspeech-medium` already got (see
+`ios/spikes/03-tts-piper/README.md`) before shipping.
 Nothing has been measured on a **physical** iPhone; simulator numbers for latency, memory, and
 thermal behavior are not representative of the real thing, so Phase 0's actual go/no-go question
 (can whisper.cpp + llama.cpp + Kokoro/Piper/open_jtalk coexist fast enough on real hardware) is
