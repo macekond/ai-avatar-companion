@@ -5,10 +5,10 @@ import AVFoundation
 /// Piper/Kokoro aren't available. `AVSpeechSynthesizer` is iOS's built-in
 /// on-device TTS (supports English and Japanese out of the box), exactly
 /// filling the role `say` fills on macOS: zero extra dependencies, always
-/// available. Piper/Kokoro (the real target engines — see
-/// ios/spikes/03-tts-piper and 04-tts-kokoro-openjtalk) need a genuine
-/// espeak-ng/onnxruntime-mobile cross-compile that hasn't been done yet;
-/// this engine is what actually produces audio in the meantime.
+/// available. Piper and Kokoro (see ios/spikes/03-tts-piper and
+/// 04-tts-kokoro-openjtalk) are both wired into the live reply flow now —
+/// this engine is the fallback for when either's model/data files aren't
+/// loaded yet, or synthesis throws, not the default path anymore.
 ///
 /// `AVSpeechSynthesizer` gives no waveform access, same limitation the
 /// Python `_SystemTTSBackend` docstring notes for `say` — so amplitude is
