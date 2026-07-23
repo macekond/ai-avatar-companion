@@ -47,8 +47,12 @@ Nothing has been measured on a **physical** iPhone; simulator numbers for latenc
 thermal behavior are not representative of the real thing, so Phase 0's actual go/no-go question
 (can whisper.cpp + llama.cpp + Kokoro/Piper/open_jtalk coexist fast enough on real hardware) is
 still open. `ios/spikes/` holds the per-component spike write-ups with the real-model/real-device
-verification status for each
-engine.
+verification status for each engine. `ios/PHYSICAL_DEVICE_VALIDATION.md` is a one-command
+checklist for that last step: `DiagnosticsLogging.swift` instruments exactly the latency/memory
+numbers Phase 0's thresholds need, at exactly the points that matter (STT latency, LLM
+first-token + tokens/sec, TTS latency per engine, cumulative memory as each engine loads) —
+verified firing correctly in Simulator, so a physical-device run is build, do one conversation
+turn, read the log against the checklist's thresholds, not open-ended investigation.
 
 ## Environment requirements
 

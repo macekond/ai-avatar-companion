@@ -75,9 +75,18 @@ final class WhisperEngine: @unchecked Sendable {
             return pieces.joined(separator: " ").trimmingCharacters(in: .whitespaces)
         }
 
-        if let language {
-            return try language.withCString { try runFull(languagePointer: $0) }
+        let (text, elapsedMs): (String, Int) = try Diagnostics.measureMs {
+            if let language {
+                return try language.withCString { try runFull(languagePointer: $0) }
+            }
+            return try runFull(languagePointer: nil)
         }
-        return try runFull(languagePointer: nil)
+        // Phase 0 Spike 1's go/no-go: <1.5s for a 3s utterance.
+        let audioSeconds = Double(samples.count) / 16000.0
+        Diagnostics.log("stt_latency", [
+            "ms": String(elapsedMs), "audio_s": String(format: "%.2f", audioSeconds),
+            "memory_mb": String(Diagnostics.memoryFootprintMB()),
+        ])
+        return text
     }
 }

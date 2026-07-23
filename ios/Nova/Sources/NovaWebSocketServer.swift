@@ -174,11 +174,19 @@ public final class NovaWebSocketServer: ObservableObject {
     /// construction on the main actor stalled ping/receive handling long
     /// enough that a connected client's socket timed out and closed).
     private func loadAvailableEngines() async {
+        // Logs the memory footprint after each engine loads — Phase 0's
+        // riskiest open question is whether all engines coexist within a
+        // real device's memory budget (the LLM alone was flagged as
+        // "the single biggest memory risk in the app" in the port plan),
+        // so a running total here is exactly what a physical-device run
+        // needs to answer it.
         if whisperEngine == nil, let modelPath = Self.modelPath("ggml-small.bin") {
             whisperEngine = await Task.detached { try? WhisperEngine(modelPath: modelPath) }.value
+            Diagnostics.log("engine_loaded", ["engine": "whisper", "memory_mb": String(Diagnostics.memoryFootprintMB())])
         }
         if llamaEngine == nil, let modelPath = Self.modelPath("llm.gguf") {
             llamaEngine = await Task.detached { try? LlamaEngine(modelPath: modelPath) }.value
+            Diagnostics.log("engine_loaded", ["engine": "llama", "memory_mb": String(Diagnostics.memoryFootprintMB())])
         }
         if morphemeAnalyzer is UnavailableMorphemeAnalyzer, let dictDir = Self.dictionaryDirectory() {
             let loaded: OpenJTalkMorphemeAnalyzer? = await Task.detached {
@@ -186,10 +194,12 @@ public final class NovaWebSocketServer: ObservableObject {
             }.value
             if let loaded {
                 morphemeAnalyzer = loaded
+                Diagnostics.log("engine_loaded", ["engine": "openjtalk", "memory_mb": String(Diagnostics.memoryFootprintMB())])
             }
         }
         if kokoroEngine == nil, let modelPath = Self.modelPath("kokoro-v1.0.onnx") {
             kokoroEngine = await Task.detached { try? KokoroEngine(modelPath: modelPath) }.value
+            Diagnostics.log("engine_loaded", ["engine": "kokoro", "memory_mb": String(Diagnostics.memoryFootprintMB())])
         }
         if kokoroVoiceStore == nil, let voicesPath = Self.modelPath("voices-v1.0.bin") {
             kokoroVoiceStore = await Task.detached {
@@ -205,6 +215,7 @@ public final class NovaWebSocketServer: ObservableObject {
         }
         if piperEngine == nil, let modelPath = Self.modelPath("piper-en.onnx") {
             piperEngine = await Task.detached { try? PiperEngine(modelPath: modelPath) }.value
+            Diagnostics.log("engine_loaded", ["engine": "piper", "memory_mb": String(Diagnostics.memoryFootprintMB())])
         }
         if piperConfig == nil, let configPath = Self.modelPath("piper-en.onnx.json") {
             piperConfig = await Task.detached {
@@ -788,7 +799,8 @@ public final class NovaWebSocketServer: ObservableObject {
                     let phonemes = JapanesePhonemizer.phonemize(hiragana: hiragana)
                     let tokenCount = KokoroTokenizer.tokenize(phonemes).count
                     let style = try kokoroVoiceStore.styleVector(voice: Self.kokoroVoiceName, tokenCount: tokenCount)
-                    let samples = try kokoroEngine.synthesize(phonemes: phonemes, style: style)
+                    let (samples, elapsedMs) = try Diagnostics.measureMs { try kokoroEngine.synthesize(phonemes: phonemes, style: style) }
+                    Diagnostics.log("tts_latency", ["engine": "kokoro", "ms": String(elapsedMs), "memory_mb": String(Diagnostics.memoryFootprintMB())])
                     await MainActor.run {
                         self.kokoroPlayer.play(samples: samples, sampleRate: KokoroEngine.sampleRate, onAmplitude: onAmplitude, onFinish: onFinish)
                     }
@@ -808,7 +820,10 @@ public final class NovaWebSocketServer: ObservableObject {
                     let clauses = espeakPhonemizer.phonemize(text)
                     let allPhonemes = clauses.map { $0.phonemes + $0.terminator }.joined()
                     let ids = PiperPhonemeIds.phonemesToIds(allPhonemes, idMap: piperConfig.phonemeIdMap)
-                    let samples = try piperEngine.synthesize(phonemeIds: ids, config: piperConfig)
+                    // Phase 0 Spike 3's go/no-go: <300-500ms end-to-end for a
+                    // ~1-sentence utterance.
+                    let (samples, elapsedMs) = try Diagnostics.measureMs { try piperEngine.synthesize(phonemeIds: ids, config: piperConfig) }
+                    Diagnostics.log("tts_latency", ["engine": "piper", "ms": String(elapsedMs), "memory_mb": String(Diagnostics.memoryFootprintMB())])
                     await MainActor.run {
                         self.piperPlayer.play(samples: samples, sampleRate: piperConfig.sampleRate, onAmplitude: onAmplitude, onFinish: onFinish)
                     }

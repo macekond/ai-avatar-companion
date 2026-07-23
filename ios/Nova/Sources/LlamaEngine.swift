@@ -45,6 +45,9 @@ final class LlamaEngine: @unchecked Sendable {
         final class Box {
             var segmenter: SentenceSegmenter
             let onSentence: (String) -> Void
+            let start = DispatchTime.now()
+            var firstTokenMs: Int?
+            var tokenCount = 0
             init(segmenter: SentenceSegmenter, onSentence: @escaping (String) -> Void) {
                 self.segmenter = segmenter
                 self.onSentence = onSentence
@@ -57,6 +60,10 @@ final class LlamaEngine: @unchecked Sendable {
             nova_llama_generate(handle, cPrompt, maxTokens, { cPiece, context in
                 guard let context, let cPiece else { return }
                 let box = Unmanaged<Box>.fromOpaque(context).takeUnretainedValue()
+                if box.firstTokenMs == nil {
+                    box.firstTokenMs = Int((DispatchTime.now().uptimeNanoseconds - box.start.uptimeNanoseconds) / 1_000_000)
+                }
+                box.tokenCount += 1
                 let piece = String(cString: cPiece)
                 for sentence in box.segmenter.feed(piece) {
                     box.onSentence(sentence)
@@ -67,5 +74,14 @@ final class LlamaEngine: @unchecked Sendable {
 
         let remainder = box.segmenter.flush()
         if !remainder.isEmpty { onSentence(remainder) }
+
+        // Phase 0 Spike 2's go/no-go: <1s first-token, >=15 tok/s sustained.
+        let totalMs = Int((DispatchTime.now().uptimeNanoseconds - box.start.uptimeNanoseconds) / 1_000_000)
+        let tokensPerSec = totalMs > 0 ? Double(box.tokenCount) * 1000.0 / Double(totalMs) : 0
+        Diagnostics.log("llm_generation", [
+            "first_token_ms": String(box.firstTokenMs ?? -1), "total_ms": String(totalMs),
+            "tokens": String(box.tokenCount), "tokens_per_sec": String(format: "%.1f", tokensPerSec),
+            "memory_mb": String(Diagnostics.memoryFootprintMB()),
+        ])
     }
 }
