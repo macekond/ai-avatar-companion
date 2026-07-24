@@ -89,15 +89,36 @@ int nova_llama_generate(
     llama_sampler_chain_add(sampler, llama_sampler_init_temp(0.7f));
     llama_sampler_chain_add(sampler, llama_sampler_init_dist(0));
 
-    llama_batch batch = llama_batch_get_one(tokens.data(), static_cast<int32_t>(tokens.size()));
+    // llama_decode's own GGML_ASSERT(n_tokens_all <= cparams.n_batch) aborts
+    // the process (not a recoverable error return) if a single batch exceeds
+    // n_batch (512, set at load time above). Nova's real system prompt
+    // (personality + level instructions + memory block + appearance +
+    // LANGUAGE_LOCK, see PromptBuilder) routinely exceeds 512 tokens once
+    // memory/history are populated — feeding it as one llama_decode call, as
+    // this used to, crashes on real conversations even though every prompt
+    // used in earlier testing happened to be short enough to hide it. Fixed
+    // by decoding the initial prompt in chunks of at most n_batch tokens,
+    // matching llama.cpp's own examples (e.g. simple-chat.cpp).
+    const int32_t nBatch = static_cast<int32_t>(llama_n_batch(engine->ctx));
+    int32_t nPast = 0;
+    bool promptDecodeFailed = false;
+    while (nPast < nTokens) {
+        int32_t chunkSize = std::min(nBatch, nTokens - nPast);
+        llama_batch chunk = llama_batch_get_one(tokens.data() + nPast, chunkSize);
+        if (llama_decode(engine->ctx, chunk) != 0) {
+            promptDecodeFailed = true;
+            break;
+        }
+        nPast += chunkSize;
+    }
+    if (promptDecodeFailed) {
+        llama_sampler_free(sampler);
+        return -3;
+    }
+
     llama_token nextToken = 0;
 
     for (int generated = 0; generated < maxTokens; generated++) {
-        if (llama_decode(engine->ctx, batch) != 0) {
-            llama_sampler_free(sampler);
-            return -3;
-        }
-
         llama_token newToken = llama_sampler_sample(sampler, engine->ctx, -1);
         if (llama_vocab_is_eog(engine->vocab, newToken)) break;
 
@@ -109,7 +130,10 @@ int nova_llama_generate(
         onToken(piece.c_str(), context);
 
         nextToken = newToken;
-        batch = llama_batch_get_one(&nextToken, 1);
+        llama_batch batch = llama_batch_get_one(&nextToken, 1);
+        if (llama_decode(engine->ctx, batch) != 0) {
+            break;
+        }
     }
 
     llama_sampler_free(sampler);
