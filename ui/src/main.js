@@ -14,6 +14,16 @@ import * as THREE from 'three'
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'
 import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm'
 
+// This same bundle is hosted by both the Tauri desktop shell and the iOS app
+// (over NovaSchemeHandler's custom `nova-app://` scheme, chosen specifically
+// because file:// origins are CORS-opaque in WKWebView — see ios/README.md).
+// That scheme is the one reliable signal for "this is the iOS host": style
+// rules scoped under body.ios-native (see style.css) give the settings panel
+// an iOS-native look without touching the desktop app at all.
+if (location.protocol === 'nova-app:') {
+  document.body.classList.add('ios-native')
+}
+
 // ── Constants ─────────────────────────────────────────────────────────────
 const WS_URL       = 'ws://localhost:8765'
 const MODEL_PATH   = '/avatar/VIPEHero_2707.vrm'
@@ -27,6 +37,12 @@ const STATE_LABELS = {
   speaking:       '',       // sentence bubble takes over
   didnt_catch:    "I didn't hear you — try again?",
 }
+
+// Body classes applyState() toggles for background tint (see body.listening
+// etc. in style.css) — kept to just these, and removed/added individually,
+// so applyState never clobbers unrelated body classes like 'ios-native' or
+// 'transcript-docked'.
+const STATE_TINT_CLASSES = ['listening', 'thinking', 'didnt_catch']
 
 // ── DOM refs ──────────────────────────────────────────────────────────────
 const canvasEl   = document.getElementById('canvas')
@@ -203,8 +219,15 @@ function applyState(newState) {
   state = newState
   updateReplayLast()
 
-  // Background tint via body class
-  document.body.className = newState === 'idle' || newState === 'speaking' ? '' : newState
+  // Background tint via body class. Must not overwrite the whole className
+  // (this used to be `document.body.className = ...`) — that wiped out
+  // every other body class on every single state message, including
+  // 'transcript-docked' (silently un-docking the transcript panel the next
+  // time a state update arrived while it was open) and 'ios-native' (the
+  // iOS app's settings-panel styling, which never survived past the first
+  // state message once a WebSocket connection was live).
+  for (const c of STATE_TINT_CLASSES) document.body.classList.remove(c)
+  if (newState !== 'idle' && newState !== 'speaking') document.body.classList.add(newState)
 
   // State label
   labelEl.textContent = STATE_LABELS[newState] ?? ''
