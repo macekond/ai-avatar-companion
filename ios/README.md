@@ -130,3 +130,23 @@ git submodule update --init --recursive
 brew install xcodegen
 cd ios && xcodegen generate
 ```
+
+## Build and run
+
+Easiest: `open ios/Nova.xcodeproj`, pick the `Nova` scheme + a simulator (or a plugged-in
+iPhone), hit ⌘R — normal Xcode debugging (breakpoints, console) works as usual.
+
+For a scripted build/install/launch without opening Xcode (useful for a quick verify loop, or
+for scripting a WebSocket test client against a freshly launched app):
+
+```
+ios/scripts/run-simulator.sh                              # boots the default simulator, builds, installs, launches
+ios/scripts/run-simulator.sh "iPhone 17"                  # pick a specific simulator by name
+ios/scripts/run-simulator.sh "iPhone 17" --screenshot out.png
+```
+
+This assumes the native XCFrameworks under `NativeCores/*/build-apple/` already exist — see
+`ios/scripts/build-*.sh` and each spike's README if they're missing. STT/LLM/TTS engines stay
+inert until their model files land in the app's Application Support directory (Phase 9's
+on-demand download); the script prints the simulator app container path so you can inspect or
+seed that directory directly instead of waiting on a real download.
