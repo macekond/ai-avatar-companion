@@ -109,14 +109,19 @@ ios/
 NativeCores/
   whisper.cpp/                   vendored as a git submodule (github.com/ggml-org/whisper.cpp)
   llama.cpp/                     vendored as a git submodule (github.com/ggml-org/llama.cpp)
-  piper-phonemize/                not yet vendored — see 03-tts-piper/README.md
-  openjtalk/                     not yet vendored — see 04-tts-kokoro-openjtalk/README.md
+  espeak-ng/                     vendored plain source (upstream master, v1.53.0) — CMake-based
+                                  cross-compile; see 03-tts-piper/README.md
+  open_jtalk/                    vendored plain source, extracted from pyopenjtalk's sdist (not
+                                  a submodule — see its own VENDORED.md); see
+                                  04-tts-kokoro-openjtalk/README.md
+  onnxruntime/                   only fetch-onnxruntime.sh + .gitignore; the xcframework itself
+                                  is downloaded, not vendored — see ios/scripts/fetch-onnxruntime.sh
 ```
 
-`whisper.cpp` and `llama.cpp` are vendored now because the target libraries are already decided.
-`piper-phonemize` and `open_jtalk` are intentionally left empty: whether an existing iOS port
-exists, and which fork/version to build against, is itself part of what Spikes 3 and 4 need to
-investigate first — vendoring a guess would just be noise.
+All four native libraries are now vendored and cross-compile cleanly to iOS — see each spike's
+README for the concrete build steps and verification evidence. Only the compiled build products
+(`build-apple/*.xcframework`, dictionary/voice data) are gitignored; the library sources and
+build scripts are committed.
 
 ## After cloning
 

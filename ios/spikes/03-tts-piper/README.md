@@ -132,12 +132,10 @@ and ran inference — produced 39,000 samples (1.625s at 24kHz, a plausible dura
 phrase) with max amplitude 0.78 (no clipping) and RMS 0.095 (a healthy speech-level signal, not
 noise or silence) — exactly the statistical signature of real, correctly-scaled speech audio.
 
-**Still needed**: wiring real Japanese phonemes into this pipeline (Kokoro's IPA-style vocab
-needs a `misaki`-equivalent JA phoneme mapper — a different, not-yet-ported step from
-open_jtalk's kana readings used for furigana), and playback/amplitude integration into
-`NovaWebSocketServer`'s live reply flow (currently only `AVSpeechSynthesizer` is wired in there).
-Piper (English) remains separately blocked on **espeak-ng's autotools cross-compile**, still
-unresolved. `AVSpeechSynthesizer` remains what actually produces audio in the live app today.
+**Still needed at this point in the spike**: wiring real Japanese phonemes into this pipeline, and
+playback/amplitude integration into `NovaWebSocketServer`'s live reply flow. Both are resolved by
+the updates below — see "Kokoro wired into the live reply flow for Japanese" and "espeak-ng
+cross-compiled" further down.
 
 ## Update: Kokoro wired into the live reply flow for Japanese
 
