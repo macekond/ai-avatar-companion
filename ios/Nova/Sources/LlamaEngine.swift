@@ -48,6 +48,11 @@ final class LlamaEngine: @unchecked Sendable {
             let start = DispatchTime.now()
             var firstTokenMs: Int?
             var tokenCount = 0
+            /// Set once a hallucinated "Child:"/"Nova:" continuation turn is
+            /// detected (see HallucinatedTurn.swift) — the trampoline checks
+            /// this to tell the C loop to stop generating instead of
+            /// grinding on to maxTokens every single reply.
+            var shouldStop = false
             init(segmenter: SentenceSegmenter, onSentence: @escaping (String) -> Void) {
                 self.segmenter = segmenter
                 self.onSentence = onSentence
@@ -58,7 +63,7 @@ final class LlamaEngine: @unchecked Sendable {
 
         let status = prompt.withCString { cPrompt in
             nova_llama_generate(handle, cPrompt, maxTokens, { cPiece, context in
-                guard let context, let cPiece else { return }
+                guard let context, let cPiece else { return 0 }
                 let box = Unmanaged<Box>.fromOpaque(context).takeUnretainedValue()
                 if box.firstTokenMs == nil {
                     box.firstTokenMs = Int((DispatchTime.now().uptimeNanoseconds - box.start.uptimeNanoseconds) / 1_000_000)
@@ -66,14 +71,24 @@ final class LlamaEngine: @unchecked Sendable {
                 box.tokenCount += 1
                 let piece = String(cString: cPiece)
                 for sentence in box.segmenter.feed(piece) {
+                    if looksLikeHallucinatedTurn(sentence) {
+                        box.shouldStop = true
+                        break
+                    }
                     box.onSentence(sentence)
                 }
+                return box.shouldStop ? 0 : 1
             }, boxPointer)
         }
         guard status == 0 else { throw EngineError.generationFailed(status) }
 
+        // If generation was stopped early because a hallucinated turn was
+        // detected, whatever's left in the segmenter's buffer is either
+        // empty or the start of that same fake turn — never flush it.
         let remainder = box.segmenter.flush()
-        if !remainder.isEmpty { onSentence(remainder) }
+        if !remainder.isEmpty && !box.shouldStop && !looksLikeHallucinatedTurn(remainder) {
+            onSentence(remainder)
+        }
 
         // Phase 0 Spike 2's go/no-go: <1s first-token, >=15 tok/s sustained.
         let totalMs = Int((DispatchTime.now().uptimeNanoseconds - box.start.uptimeNanoseconds) / 1_000_000)

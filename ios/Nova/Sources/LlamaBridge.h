@@ -27,11 +27,17 @@ void nova_llama_free(NovaLlamaHandle handle);
 /// piece (UTF-8, NUL-terminated, valid only for the duration of the call).
 /// `context` is passed through unchanged to `onToken` — used by the Swift
 /// caller to smuggle a closure across the C boundary. Returns 0 on success.
+///
+/// `onToken` returns 1 to keep generating, 0 to stop early — this is a raw
+/// text-completion call (no chat template/stop tokens of its own), so the
+/// Swift side uses this to halt as soon as the model starts hallucinating a
+/// fake continuation turn (e.g. emitting its own "Child:"/"Nova:" cue),
+/// rather than grinding on to maxTokens every time.
 int nova_llama_generate(
     NovaLlamaHandle handle,
     const char *prompt,
     int maxTokens,
-    void (*onToken)(const char *piece, void *context),
+    int (*onToken)(const char *piece, void *context),
     void *context
 );
 

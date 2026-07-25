@@ -69,7 +69,7 @@ int nova_llama_generate(
     NovaLlamaHandle handle,
     const char *prompt,
     int maxTokens,
-    void (*onToken)(const char *piece, void *context),
+    int (*onToken)(const char *piece, void *context),
     void *context
 ) {
     if (!handle) return -1;
@@ -127,7 +127,7 @@ int nova_llama_generate(
         if (pieceLength < 0) break;
 
         std::string piece(buffer, pieceLength);
-        onToken(piece.c_str(), context);
+        if (!onToken(piece.c_str(), context)) break;
 
         nextToken = newToken;
         llama_batch batch = llama_batch_get_one(&nextToken, 1);
