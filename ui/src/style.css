@@ -577,6 +577,50 @@ body.didnt_catch { background: radial-gradient(ellipse at 50% 30%, #fff4ee 0%, #
 }
 .replay-btn:hover { opacity: 1; }
 
+/* ── Touch push-to-talk (iOS only — see body.ios-native rules in main.js's
+   scheme check). Desktop has no use for it (holding Space already works,
+   and there's no touchscreen to tap); `display: none` here regardless of
+   the element's own [hidden] state keeps it off the desktop Tauri app,
+   the same scoping pattern as the settings-panel reskin below. */
+#ptt-btn { display: none; }
+body.ios-native #ptt-btn:not([hidden]) {
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 12px;
+  padding: 16px 32px;
+  border: none;
+  border-radius: 999px;
+  background: linear-gradient(180deg, #6bc7ff 0%, #3a9fe8 100%);
+  color: #fff;
+  font: inherit;
+  font-size: 1.1rem;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  cursor: pointer;
+  box-shadow: 0 6px 20px rgba(40, 110, 180, 0.35);
+  transition: transform 0.1s ease, box-shadow 0.1s ease, background 0.1s ease;
+  /* Holding down a button shouldn't select its text or show a callout. */
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  touch-action: none;
+}
+/* Pressed state — the child's thumb is down and Nova is actively listening. */
+body.ios-native #ptt-btn.active {
+  transform: scale(0.96);
+  background: linear-gradient(180deg, #ff8a72 0%, #ff6a4a 100%);
+  box-shadow: 0 3px 10px rgba(200, 80, 50, 0.4);
+}
+body.ios-native #ptt-btn.listening {
+  animation: ptt-pulse 1s ease-in-out infinite;
+}
+@keyframes ptt-pulse {
+  0%, 100% { box-shadow: 0 3px 10px rgba(200, 80, 50, 0.4); }
+  50%      { box-shadow: 0 3px 22px rgba(200, 80, 50, 0.65); }
+}
+
 /* ── iOS-native settings panel (scoped to body.ios-native, set by main.js
    only when hosted over the iOS app's nova-app:// scheme — see the comment
    there). Everything above stays exactly as the desktop Tauri app renders

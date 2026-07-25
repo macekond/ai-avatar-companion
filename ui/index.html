@@ -90,6 +90,12 @@
       👋 Say hi to Nova!
     </button>
     <button id="replay-last" hidden aria-label="Hear what Nova said again">🔊 Say it again</button>
+    <!-- Touch push-to-talk — the iOS equivalent of holding Space (see
+         body.ios-native rules in style.css; hidden on desktop, which keeps
+         using the keyboard). Hold-down starts listening, release stops it,
+         same as the Space key; also doubles as a tap-to-interrupt control
+         while Nova is thinking/speaking. -->
+    <button id="ptt-btn" hidden type="button" aria-label="Hold to talk">🎤 Hold to talk</button>
   </div>
 
   <!-- Transcript flash (what the app heard) -->
