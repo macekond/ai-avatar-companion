@@ -333,14 +333,31 @@ public final class NovaWebSocketServer: ObservableObject {
     /// (lines ~1412-1468), just without the multi-watcher plumbing since
     /// this app only ever has one local WKWebView client.
     private func downloadMissingModelsThenLoad() async {
-        await modelDownloader.downloadMissing(Self.modelSpecs) { [weak self] fraction in
+        let allSucceeded = await modelDownloader.downloadMissing(Self.modelSpecs) { [weak self] fraction, received, expected in
             guard let self else { return }
             let percent = Int(fraction * 100)
-            self.broadcast(.setupStatus(phase: "downloading_models", detail: "\(percent)%"))
+            let detail = expected > 0
+                ? "\(percent)% · \(Self.formatMB(received)) / \(Self.formatMB(expected)) MB"
+                : "\(percent)%"
+            self.broadcast(.setupStatus(phase: "downloading_models", detail: detail))
         }
         await loadAvailableEngines()
+        // A silently-failed download used to still flip to "ready" here —
+        // the app would look fully loaded while a required engine (usually
+        // whisper or llama, the two gating this whole path — see `start()`)
+        // stayed permanently nil, so PTT/replies just quietly did nothing.
+        // Surface it as a real, distinct failure state instead.
+        guard allSucceeded, whisperEngine != nil, llamaEngine != nil else {
+            setupPhase = "download_failed"
+            broadcast(.setupStatus(phase: "download_failed", detail: ""))
+            return
+        }
         setupPhase = "ready"
         broadcast(.setupStatus(phase: "ready", detail: ""))
+    }
+
+    private static func formatMB(_ bytes: Int64) -> String {
+        String(bytes / 1_000_000)
     }
 
     /// Port of app/server.py's `_send_settings`: the Settings-panel state
