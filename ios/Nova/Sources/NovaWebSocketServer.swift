@@ -22,6 +22,23 @@ private struct UnavailableMorphemeAnalyzer: MorphemeAnalyzing {
 /// Protocol decoding/state-machine logic lives in `NovaCore` so it stays
 /// testable without a live network stack; see `ProtocolMessages` and
 /// `SessionStateMachine`.
+///
+/// **Single-connection assumption.** Most mutable state here is correctly
+/// scoped per connection (`[ObjectIdentifier: ...]` dictionaries — see
+/// `drop(_:)`), because a stale value from one session must never leak into
+/// another's. A handful of properties are deliberately *not* per-connection
+/// — `setupPhase`, `speechInterrupted`, `currentAppearance`, `ttsEngine`,
+/// `piperPlayer`, `kokoroPlayer` — because this app only ever hosts one
+/// local WKWebView connection at a time (same assumption `MicRecorder`
+/// documents for itself). That assumption isn't enforced anywhere: if a
+/// WKWebView reload ever created a new `NWConnection` before the old one's
+/// `.failed`/`.cancelled` fired and `drop(_:)` ran, both would briefly
+/// coexist in `connections`, and e.g. a `stop_speak` from the dying
+/// connection would cut off audio for the live one. Not attacker-exploitable
+/// (there's no remote party to race), but real if this app ever grows a
+/// second concurrent client — enforce (reject a second connection) or
+/// re-scope these properties per-connection before that happens, rather than
+/// relying on this comment alone.
 @MainActor
 public final class NovaWebSocketServer: ObservableObject {
     public enum ServerError: Error {
@@ -665,13 +682,24 @@ public final class NovaWebSocketServer: ObservableObject {
             // would leave the live one un-tombstoned and able to resurrect
             // the file on its next save() (the same bug class the tombstone
             // pattern exists to prevent).
-            let manager = isActiveProfile ? memoryManagers[id]! : MemoryManager(profilesDir: Self.profilesDir(), slug: slug)
+            let manager = isActiveProfile ? memoryManagers[id]! : MemoryManager(profilesDir: Self.profilesDir(), slug: safeSlug)
+
+            // safeSlug (never the raw, untrusted `slug`) is what reaches
+            // every filesystem-touching call below — a raw slug like
+            // "../../../../Library/SomethingElse" used to reach
+            // TranscriptStore unsanitized (it builds its path directly from
+            // whatever slug it's given, unlike MemoryManager, which
+            // re-sanitizes internally). Also mirrors app/server.py's
+            // delete_profile guard: an empty or unknown slug is silently
+            // ignored (`continue`), not turned into a deletion of whatever
+            // an unsanitized path happens to resolve to.
+            guard !safeSlug.isEmpty, manager.listProfiles().contains(safeSlug) else { break }
 
             if manager.listProfiles().count <= 1 {
                 send(.profileError(message: "Can't remove the only child."), on: connection)
             } else {
-                _ = manager.deleteProfile(slug: slug)
-                TranscriptStore(transcriptsDir: Self.transcriptsDir(), slug: slug).delete()
+                _ = manager.deleteProfile(slug: safeSlug)
+                TranscriptStore(transcriptsDir: Self.transcriptsDir(), slug: safeSlug).delete()
                 if isActiveProfile {
                     // The active profile is gone — fall back to another
                     // remaining profile (or create a fresh default if
@@ -1064,8 +1092,23 @@ public final class NovaWebSocketServer: ObservableObject {
     /// documented contract (an already-resolved kana reading, not raw
     /// orthographic text). Falls back to a morpheme's surface when it has no
     /// reading (matches `FuriganaFormatter`'s same fallback).
-    private func japaneseReading(for text: String) throws -> String {
-        let morphemes = try morphemeAnalyzer.analyze(text)
+    ///
+    /// `analyzer` is passed in explicitly rather than read from
+    /// `self.morphemeAnalyzer` — this must be `nonisolated` so `speak`'s
+    /// Japanese branch can actually run open_jtalk's blocking native call
+    /// off the main actor. A non-`nonisolated` method on this `@MainActor`
+    /// class still executes its body on the main actor even when called with
+    /// `await` from inside `Task.detached`, which silently defeated that
+    /// detached wrapper here — the same failure mode
+    /// `loadAvailableEngines`'s doc comment warns about ("engine construction
+    /// on the main actor stalled ping/receive handling long enough that a
+    /// connected client's socket timed out"), just reintroduced per-reply
+    /// instead of at load time. Reading `self.morphemeAnalyzer` directly from
+    /// a `nonisolated` method isn't safe (it's main-actor-isolated mutable
+    /// state), so the caller captures it synchronously on the main actor
+    /// first and passes it through.
+    private nonisolated func japaneseReading(for text: String, analyzer: MorphemeAnalyzing) throws -> String {
+        let morphemes = try analyzer.analyze(text)
         return morphemes.map { katakanaToHiragana($0.readingKatakana ?? $0.surface) }.joined()
     }
 
@@ -1078,10 +1121,15 @@ public final class NovaWebSocketServer: ObservableObject {
     /// guarantee `_SystemTTSBackend` provides on desktop.
     private func speak(_ text: String, language: String, onAmplitude: @escaping (Double) -> Void, onFinish: @escaping () -> Void) {
         if language == "ja", let kokoroEngine, let kokoroVoiceStore, !(morphemeAnalyzer is UnavailableMorphemeAnalyzer) {
+            // Captured here (synchronously, still on the main actor) rather
+            // than read inside the detached task — see japaneseReading's doc
+            // comment on why a nonisolated method can't safely read
+            // self.morphemeAnalyzer directly.
+            let analyzer = morphemeAnalyzer
             Task.detached { [weak self] in
                 guard let self else { return }
                 do {
-                    let hiragana = try await self.japaneseReading(for: text)
+                    let hiragana = try self.japaneseReading(for: text, analyzer: analyzer)
                     let phonemes = JapanesePhonemizer.phonemize(hiragana: hiragana)
                     let tokenCount = KokoroTokenizer.tokenize(phonemes).count
                     let style = try kokoroVoiceStore.styleVector(voice: Self.kokoroVoiceName, tokenCount: tokenCount)

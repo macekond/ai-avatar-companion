@@ -30,9 +30,16 @@ final class NovaSchemeHandler: NSObject, WKURLSchemeHandler {
         // "nova-app://local/assets/foo.js" -> "assets/foo.js"; empty path
         // (bare "nova-app://local") -> "index.html".
         let relativePath = url.path.isEmpty || url.path == "/" ? "index.html" : String(url.path.dropFirst())
-        let fileURL = wwwRoot.appendingPathComponent(relativePath)
+        let fileURL = wwwRoot.appendingPathComponent(relativePath).standardizedFileURL
 
-        guard let data = try? Data(contentsOf: fileURL) else {
+        // Defense in depth: only the bundled JS ever requests through this
+        // scheme today (same-origin, not attacker-controlled), but a
+        // relativePath containing "../" would otherwise resolve outside
+        // wwwRoot with no check at all. Reject anything that escapes it
+        // rather than trusting the request path never will.
+        guard fileURL.path.hasPrefix(wwwRoot.standardizedFileURL.path + "/"),
+              let data = try? Data(contentsOf: fileURL)
+        else {
             urlSchemeTask.didFailWithError(URLError(.fileDoesNotExist))
             return
         }
