@@ -691,7 +691,7 @@ public final class NovaWebSocketServer: ObservableObject {
                 self.send(.previewStatus(state: "ready", voice: voice), on: connection)
             }
         case .switchProfile(let slug, let language, let level):
-            switchProfile(slug: slug, language: language, level: level, for: connection)
+            switchProfile(slug: slug, language: language, level: level, machine: &machine, for: connection)
         case .deleteProfile(let slug):
             // Refuses to delete the last remaining profile — mirrors
             // app/server.py's delete_profile guard (a parent must always
@@ -730,7 +730,14 @@ public final class NovaWebSocketServer: ObservableObject {
                     // The active profile is gone — fall back to another
                     // remaining profile (or create a fresh default if
                     // somehow none exist) rather than leaving this
-                    // connection pointed at a deleted one.
+                    // connection pointed at a deleted one. app/server.py
+                    // does this same fallback via `_swap_profile`, which
+                    // resets state to awaiting_start for exactly this
+                    // reason — mirrored here rather than leaving whatever
+                    // state the connection was in before the deletion
+                    // (e.g. still "listening"/"speaking") incorrectly
+                    // carried over into the fallback profile's session.
+                    machine = SessionStateMachine()
                     memories.removeValue(forKey: id)
                     memoryManagers.removeValue(forKey: id)
                     let remaining = manager.listProfiles()
@@ -851,7 +858,21 @@ public final class NovaWebSocketServer: ObservableObject {
     /// path in app/server.py) creates a new one. Re-sanitizes the slug the
     /// same way `MemoryManager` itself does, so a crafted slug can't escape
     /// the profiles directory.
-    private func switchProfile(slug rawSlug: String, language: String?, level: String?, for connection: NWConnection) {
+    ///
+    /// `machine` is `dispatch`'s own `inout` parameter, not a fresh
+    /// `stateMachines[id]` lookup — this used to write straight to
+    /// `stateMachines[id]` instead, which `handle()`'s post-dispatch
+    /// `stateMachines[id] = machine` then immediately clobbered with
+    /// whatever `machine` held from *before* the switch (`dispatch` sends
+    /// `machine.state` unconditionally at the end of its switch too), so a
+    /// switch silently reverted itself: the client was told the outgoing
+    /// profile's stale state, and the persisted machine was never actually
+    /// reset. The Python original explicitly sends `state: awaiting_start`
+    /// after `_swap_profile` for exactly this reason ("parks back in
+    /// awaiting_start rather than auto-greeting, consistent with the initial
+    /// connect") — mutating the same `inout` the caller already sends from
+    /// achieves the same thing without a second explicit send.
+    private func switchProfile(slug rawSlug: String, language: String?, level: String?, machine: inout SessionStateMachine, for connection: NWConnection) {
         let id = ObjectIdentifier(connection)
         generationGuard(for: connection).advance()
         hasGreeted.removeValue(forKey: id)
@@ -872,7 +893,7 @@ public final class NovaWebSocketServer: ObservableObject {
 
         memoryManagers[id] = manager
         memories[id] = memory
-        stateMachines[id] = SessionStateMachine()
+        machine = SessionStateMachine()
 
         send(.profiles(list: manager.listProfiles(), active: manager.slug), on: connection)
         send(.memoryLoaded(name: memory.profile.name, age: memory.profile.age, language: memory.profile.language, level: memory.profile.level), on: connection)
