@@ -132,7 +132,7 @@ public final class NovaWebSocketServer: ObservableObject {
     /// means onboarding isn't in progress (either finished, or not needed
     /// because the profile already existed). `onboardingNames` holds the
     /// name collected in step 1 until step 2 completes the profile.
-    private enum OnboardingStep {
+    private enum OnboardingStep: Equatable {
         case askingName
         case askingAge
     }
@@ -613,8 +613,8 @@ public final class NovaWebSocketServer: ObservableObject {
                 } else {
                     // Runs synchronously (unlike transcribeForOnboarding's
                     // async completion), so it returns *before* this dispatch
-                    // call does. On the .askingAge step it writes the
-                    // freshly-completed machine straight into
+                    // call does. On the .askingAge step specifically it
+                    // writes the freshly-completed machine straight into
                     // stateMachines[id] (see continueOnboarding) — but
                     // handle() still holds its own pre-dispatch snapshot in
                     // `machine` and unconditionally overwrites
@@ -622,9 +622,17 @@ public final class NovaWebSocketServer: ObservableObject {
                     // clobber bug switchProfile hit below; resync `machine`
                     // from what continueOnboarding just wrote so that
                     // overwrite persists the right value instead of reverting
-                    // it back to stale "listening".
+                    // it back to stale "listening". Gated on .askingAge only
+                    // — continueOnboarding's .askingName branch never touches
+                    // stateMachines[id], so resyncing unconditionally would
+                    // instead overwrite `machine` (correctly "listening" from
+                    // pttStart() above) with whatever *older* value happened
+                    // to still be sitting in the dictionary from before this
+                    // handle() call even started.
                     continueOnboarding(transcript: nil, step: step, connection: connection)
-                    machine = stateMachines[ObjectIdentifier(connection)] ?? machine
+                    if step == .askingAge {
+                        machine = stateMachines[ObjectIdentifier(connection)] ?? machine
+                    }
                 }
                 return
             }
