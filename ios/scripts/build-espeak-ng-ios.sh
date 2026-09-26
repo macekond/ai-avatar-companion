@@ -118,6 +118,15 @@ combine_and_link() {
         -o "${base_dir}/${output_lib}"
 
     rm -rf "${temp_dir}"
+
+    # App Store validation rejects an archive missing a dSYM for any
+    # embedded dynamic framework with debug info expected — this hand-linked
+    # dylib never had one (unlike whisper.cpp/llama.cpp's own
+    # build-xcframework.sh, which generates dSYMs as standard practice).
+    # dsymutil against the exact final binary guarantees the dSYM's UUID
+    # matches what Apple's validator checks for, even though there isn't
+    # much DWARF info to recover from a vendored C library's Release build.
+    xcrun dsymutil "${base_dir}/${output_lib}" -o "${base_dir}/${build_dir}/${FRAMEWORK_NAME}.framework.dSYM"
 }
 
 echo "Assembling frameworks..."
@@ -131,7 +140,9 @@ mkdir -p build-apple
 rm -rf build-apple/${FRAMEWORK_NAME}.xcframework
 xcrun xcodebuild -create-xcframework \
     -framework "$(pwd)/build-ios-device/framework/${FRAMEWORK_NAME}.framework" \
+    -debug-symbols "$(pwd)/build-ios-device/${FRAMEWORK_NAME}.framework.dSYM" \
     -framework "$(pwd)/build-ios-sim/framework/${FRAMEWORK_NAME}.framework" \
+    -debug-symbols "$(pwd)/build-ios-sim/${FRAMEWORK_NAME}.framework.dSYM" \
     -output "$(pwd)/build-apple/${FRAMEWORK_NAME}.xcframework"
 
 echo "Copying compiled dictionary/voice data (from the device build; identical across archs)..."
