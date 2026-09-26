@@ -40,7 +40,17 @@ final class MicRecorder {
         // established. `.playAndRecord` is required for both directions to
         // coexist; `.defaultToSpeaker` keeps replies on the speaker instead of
         // the earpiece, which is `.playAndRecord`'s default output route.
-        try session.setCategory(.playAndRecord, mode: .measurement, options: [.defaultToSpeaker])
+        //
+        // Mode is `.default`, not `.measurement`: `.measurement` is meant for
+        // calibration/analysis and specifically disables the normal output
+        // loudness processing iOS applies to spoken playback — every TTS
+        // reply shares this same session (see above), so every reply played
+        // noticeably quieter than it should, worst on the very first line
+        // (reported: "the voice is too quiet at the beginning"). `.default`
+        // keeps normal output loudness; whisper.cpp's STT accuracy doesn't
+        // depend on measurement-grade flat-response input, so there's no
+        // real tradeoff on the capture side.
+        try session.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker])
         try session.setActive(true)
 
         let inputNode = engine.inputNode

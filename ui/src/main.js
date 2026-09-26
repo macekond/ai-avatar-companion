@@ -627,24 +627,39 @@ function pttBlocked() {
 // #ptt-btn below; there's no hardware Space key to hold on a phone, and
 // "Hold SPACE to talk!" as the only affordance left iOS with no way to
 // start a turn at all).
+// Safety net for "hold to talk" getting stuck showing Listening… forever
+// (reported on-device after a successful first turn) — whatever the actual
+// cause turns out to be client-side (a missed pointerup because iOS's own
+// long-press/callout gesture recognizer grabbed the touch, a pointer that
+// left the button's hit area, ...) or server-side, this guarantees the
+// session always recovers within a bounded time instead of needing a
+// force-quit. Cleared the moment a real stop (natural or watchdog-triggered)
+// happens; re-armed only when a turn actually starts listening.
+let pttWatchdogTimer = null
+const PTT_MAX_LISTEN_MS = 20000
+
 function startPTT() {
   if (pttBlocked()) return
-  if (state === 'awaiting_start') {
-    // First interaction: server accepts a plain ptt_start too (it flips its
-    // has_greeted flag and skips the greeting since the child is initiating).
-    pttActive = true
-    wsSend({ type: 'ptt_start' })
-  } else if (state === 'idle' && !pttActive) {
-    pttActive = true
-    wsSend({ type: 'ptt_start' })
-  } else if (state === 'speaking' || state === 'thinking') {
+  if (state === 'speaking' || state === 'thinking') {
     // Barge-in: starting PTT while the avatar is speaking or thinking
-    // interrupts and hands control back to the child immediately.
+    // interrupts and hands control back to the child immediately — this
+    // isn't itself the start of a new recording, so no watchdog here.
     wsSend({ type: 'stop_speak' })
+    return
   }
+  if (state !== 'awaiting_start' && !(state === 'idle' && !pttActive)) return
+  // First interaction (awaiting_start): server accepts a plain ptt_start too
+  // (it flips its has_greeted flag and skips the greeting since the child is
+  // initiating).
+  pttActive = true
+  wsSend({ type: 'ptt_start' })
+  clearTimeout(pttWatchdogTimer)
+  pttWatchdogTimer = setTimeout(stopPTT, PTT_MAX_LISTEN_MS)
 }
 function stopPTT() {
   if (pttBlocked()) return
+  clearTimeout(pttWatchdogTimer)
+  pttWatchdogTimer = null
   if (pttActive) {
     pttActive = false
     wsSend({ type: 'ptt_stop' })
@@ -669,6 +684,13 @@ window.addEventListener('keyup', (e) => {
 const pttBtnEl = document.getElementById('ptt-btn')
 pttBtnEl.addEventListener('pointerdown', (e) => {
   e.preventDefault()
+  // Explicitly capture the pointer to this element for the rest of the
+  // gesture — without this, a `.active`-state CSS transform (scale + shadow)
+  // repainting mid-hold, or iOS's own long-press/callout gesture recognizer,
+  // can end up "owning" the touch instead, and this button then never sees
+  // its matching pointerup at all. `setPointerCapture` is what guarantees
+  // pointerup/pointercancel still fire here regardless.
+  try { pttBtnEl.setPointerCapture(e.pointerId) } catch { /* unsupported: falls back to normal hit-testing */ }
   pttBtnEl.classList.add('active')
   startPTT()
 })

@@ -591,8 +591,17 @@ public final class NovaWebSocketServer: ObservableObject {
             let (hasAudio, samples) = recorder.pttStop()
             if let step = onboardingSteps[ObjectIdentifier(connection)] {
                 // Onboarding has its own explicit state sends (matching the
-                // Python original) rather than routing through the general
-                // session state machine.
+                // Python original's _one_ptt_turn) rather than routing
+                // through the general session state machine — which is
+                // exactly why this needs its own "thinking" send here: the
+                // machine's internal state was left at "listening" by
+                // .pttStart above and nothing else in this branch ever
+                // advances it, so without this the client stayed on
+                // "listening" for the entire whisper transcription (visible
+                // on-device as a hang after answering the first onboarding
+                // question), and the *next* PTT press silently no-op'd
+                // client-side since its own state-gating never saw "idle".
+                send(.state(.thinking), on: connection)
                 if hasAudio, let engine = whisperEngine {
                     transcribeForOnboarding(samples: samples, engine: engine, step: step, connection: connection)
                 } else {
@@ -822,7 +831,18 @@ public final class NovaWebSocketServer: ObservableObject {
             send(.initMessage(level: memory.profile.level, language: memory.profile.language), on: connection)
             sendSettings(for: connection)
             loadTranscript(slug: manager.slug, for: connection)
-            send(.state((stateMachines[id] ?? SessionStateMachine()).state), on: connection)
+            // completeOnboarding() (NovaCore, TDD'd) unconditionally resets
+            // to .idle rather than reading the machine's *current* state —
+            // onboarding never routed through it (see .pttStop's onboarding
+            // branch), so it was sitting untouched at .listening since the
+            // very first .pttStart of this onboarding flow. Reading that
+            // stale value directly used to leave the client stuck showing
+            // "Listening…" forever, silently blocking every subsequent PTT
+            // press (its own state-gating never saw the "idle" it needed).
+            var freshMachine = stateMachines[id] ?? SessionStateMachine()
+            freshMachine.completeOnboarding()
+            stateMachines[id] = freshMachine
+            send(.state(freshMachine.state), on: connection)
         }
     }
 
