@@ -25,6 +25,21 @@ public struct SessionStateMachine {
         state = .idle
     }
 
+    /// Onboarding (name + age) never routes its own PTT turns through this
+    /// machine — it has its own explicit speaking/idle sends, since those
+    /// two questions aren't a normal conversation turn. That means whatever
+    /// state this machine was left at when onboarding began (in practice
+    /// always `.listening`, from the `.pttStart` of the question that
+    /// triggered it) is still sitting here, untouched, once onboarding
+    /// finishes — unconditionally reset to `.idle` rather than trusting
+    /// (and forwarding to the client) whatever stale value happens to be
+    /// here. A real bug shipped from skipping this: the client was sent
+    /// "listening" as onboarding's final state and could never start
+    /// another recording, since its own gating waits for "idle".
+    public mutating func completeOnboarding() {
+        state = .idle
+    }
+
     public mutating func pttStart() {
         state = .listening
     }

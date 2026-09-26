@@ -831,16 +831,16 @@ public final class NovaWebSocketServer: ObservableObject {
             send(.initMessage(level: memory.profile.level, language: memory.profile.language), on: connection)
             sendSettings(for: connection)
             loadTranscript(slug: manager.slug, for: connection)
-            // Must not read the general session state machine's *current*
-            // state here: onboarding never routed through it (see .pttStop's
-            // onboarding branch), so it's been sitting untouched at
-            // .listening since the very first .pttStart of this onboarding
-            // flow — sending that stale value left the client stuck showing
+            // completeOnboarding() (NovaCore, TDD'd) unconditionally resets
+            // to .idle rather than reading the machine's *current* state —
+            // onboarding never routed through it (see .pttStop's onboarding
+            // branch), so it was sitting untouched at .listening since the
+            // very first .pttStart of this onboarding flow. Reading that
+            // stale value directly used to leave the client stuck showing
             // "Listening…" forever, silently blocking every subsequent PTT
-            // press (its own state-gating never saw the "idle" it was
-            // waiting for). Reset it explicitly instead of trusting it.
+            // press (its own state-gating never saw the "idle" it needed).
             var freshMachine = stateMachines[id] ?? SessionStateMachine()
-            freshMachine.start()
+            freshMachine.completeOnboarding()
             stateMachines[id] = freshMachine
             send(.state(freshMachine.state), on: connection)
         }
