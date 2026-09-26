@@ -45,7 +45,7 @@ public struct NpyArray {
         let floatCount = payload.count / MemoryLayout<Float>.size
         var floats = [Float](repeating: 0, count: floatCount)
         floats.withUnsafeMutableBytes { dest in
-            payload.copyBytes(to: dest, count: dest.count)
+            _ = payload.copyBytes(to: dest, count: dest.count)
         }
         // numpy stores little-endian float32; the copy above is already
         // little-endian on this platform (all supported Apple hardware is),
