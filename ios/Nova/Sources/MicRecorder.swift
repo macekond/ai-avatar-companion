@@ -33,7 +33,14 @@ final class MicRecorder {
     /// start/stop below control capture, not this.
     func start() throws {
         let session = AVAudioSession.sharedInstance()
-        try session.setCategory(.record, mode: .measurement, options: [])
+        // `.record` is capture-only and silently drops every TTS reply played
+        // through the app's other `AVAudioEngine`s (KokoroPlayer, PiperEngine,
+        // SystemTTSEngine) since they never touch this shared session
+        // themselves — they just play into whatever category this call last
+        // established. `.playAndRecord` is required for both directions to
+        // coexist; `.defaultToSpeaker` keeps replies on the speaker instead of
+        // the earpiece, which is `.playAndRecord`'s default output route.
+        try session.setCategory(.playAndRecord, mode: .measurement, options: [.defaultToSpeaker])
         try session.setActive(true)
 
         let inputNode = engine.inputNode
