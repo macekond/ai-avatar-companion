@@ -87,6 +87,15 @@ targets:
         # the bundle ("Missing Info.plist value... CFBundleIconName").
         CFBundleIconName: AppIcon
         NSMicrophoneUsageDescription: "Nova listens while you hold the talk button so it can hear your practice conversation."
+        # Declares the export-compliance answer up front so App Store Connect
+        # stops asking it on every single upload. Accurate as of this
+        # writing: the app only uses standard OS-provided HTTPS (URLSession,
+        # for on-demand model downloads — see ModelDownloader.swift) and an
+        # unencrypted local loopback WebSocket (NovaWebSocketServer.swift) —
+        # no custom/proprietary cryptography anywhere. If that ever changes
+        # (e.g. a custom encryption scheme is added), this must be revisited;
+        # it's a real legal declaration, not just build config.
+        ITSAppUsesNonExemptEncryption: false
   NovaTests:
     type: bundle.unit-test
     platform: iOS
