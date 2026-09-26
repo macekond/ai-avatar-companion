@@ -75,6 +75,20 @@ targets:
         SWIFT_OBJC_BRIDGING_HEADER: Nova/Sources/Nova-Bridging-Header.h
         CLANG_CXX_LANGUAGE_STANDARD: "c++17"
         HEADER_SEARCH_PATHS: "../NativeCores/onnxruntime/build-apple/Headers ../NativeCores/espeak-ng/build-apple/Headers"
+        # Not a literal team ID (this is a public repo) — XcodeGen substitutes
+        # ${DEVELOPMENT_TEAM} from the shell environment at `xcodegen
+        # generate` time. This ONLY works reliably if the var is exported
+        # PERMANENTLY in your shell profile (~/.zshrc), not just once in a
+        # terminal session — XcodeGen has no fallback-value syntax
+        # (${VAR:-default} is passed through completely unsubstituted, not
+        # partially), so if it's unset when you run `xcodegen generate`, the
+        # literal broken string "${DEVELOPMENT_TEAM}" gets written into the
+        # project, which breaks Xcode's own build entirely (not just
+        # archiving) — this exact failure mode already happened once and was
+        # fixed by removing this key; re-adding it only makes sense paired
+        # with the permanent-export habit described in ios/README.md.
+        DEVELOPMENT_TEAM: ${DEVELOPMENT_TEAM}
+        CODE_SIGN_STYLE: Automatic
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
     info:
       path: Nova/GeneratedInfo.plist
