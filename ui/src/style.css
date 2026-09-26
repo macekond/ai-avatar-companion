@@ -576,3 +576,239 @@ body.didnt_catch { background: radial-gradient(ellipse at 50% 30%, #fff4ee 0%, #
   vertical-align: middle;
 }
 .replay-btn:hover { opacity: 1; }
+
+/* ── Touch push-to-talk (iOS only — see body.ios-native rules in main.js's
+   scheme check). Desktop has no use for it (holding Space already works,
+   and there's no touchscreen to tap); `display: none` here regardless of
+   the element's own [hidden] state keeps it off the desktop Tauri app,
+   the same scoping pattern as the settings-panel reskin below. */
+#ptt-btn { display: none; }
+body.ios-native #ptt-btn:not([hidden]) {
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 12px;
+  padding: 16px 32px;
+  border: none;
+  border-radius: 999px;
+  background: linear-gradient(180deg, #6bc7ff 0%, #3a9fe8 100%);
+  color: #fff;
+  font: inherit;
+  font-size: 1.1rem;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  cursor: pointer;
+  box-shadow: 0 6px 20px rgba(40, 110, 180, 0.35);
+  transition: transform 0.1s ease, box-shadow 0.1s ease, background 0.1s ease;
+  /* Holding down a button shouldn't select its text or show a callout. */
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  touch-action: none;
+}
+/* Pressed state — the child's thumb is down and Nova is actively listening. */
+body.ios-native #ptt-btn.active {
+  transform: scale(0.96);
+  background: linear-gradient(180deg, #ff8a72 0%, #ff6a4a 100%);
+  box-shadow: 0 3px 10px rgba(200, 80, 50, 0.4);
+}
+body.ios-native #ptt-btn.listening {
+  animation: ptt-pulse 1s ease-in-out infinite;
+}
+@keyframes ptt-pulse {
+  0%, 100% { box-shadow: 0 3px 10px rgba(200, 80, 50, 0.4); }
+  50%      { box-shadow: 0 3px 22px rgba(200, 80, 50, 0.65); }
+}
+
+/* ── iOS-native settings panel (scoped to body.ios-native, set by main.js
+   only when hosted over the iOS app's nova-app:// scheme — see the comment
+   there). Everything above stays exactly as the desktop Tauri app renders
+   it; these rules only ever apply on iOS. Follows the iOS grouped-table-view
+   convention (Settings.app): white inset sections, full-width tappable rows
+   with hairline dividers instead of pill chips, a trailing checkmark for the
+   selected row instead of an inverted-fill chip, and a text "Done" button
+   instead of a floating ✕. Structure/classes/JS are untouched — this is a
+   pure CSS reskin of the same #settings-panel markup. */
+body.ios-native #settings-panel {
+  /* Keep the panel below the active-kid/transcript pill row (same 64px gap
+     the desktop layout uses) rather than hugging the safe area directly —
+     hugging it put the panel's own header underneath those pills, which sit
+     at a higher z-index. */
+  top: calc(env(safe-area-inset-top, 0px) + 64px);
+  right: calc(env(safe-area-inset-right, 0px) + 16px);
+  width: 320px;
+  max-width: calc(100vw - 24px);
+  max-height: calc(100vh - env(safe-area-inset-top, 0px) - 80px);
+  padding: 0;
+  border-radius: 14px;
+  background: rgba(242, 242, 247, 0.96);
+  font-family: -apple-system, 'SF Pro Text', system-ui, sans-serif;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.18);
+}
+
+body.ios-native .settings-header {
+  padding: 14px 16px 12px;
+  margin-bottom: 0;
+  font-size: 1rem;
+  font-weight: 600;
+  color: #000;
+  border-bottom: 1px solid rgba(60, 60, 67, 0.15);
+}
+/* "Done" reads as the standard iOS sheet-dismiss action, in the system
+   accent blue, instead of a plain ✕ glyph. */
+body.ios-native #settings-close {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: #007aff;
+}
+body.ios-native #settings-close:hover { color: #0060df; }
+
+body.ios-native .settings-section {
+  margin: 16px 16px 0;
+}
+body.ios-native .settings-section:first-of-type { margin-top: 12px; }
+body.ios-native .settings-section:last-child { margin-bottom: 16px; }
+body.ios-native .settings-section h3 {
+  margin: 0 0 6px 4px;
+  font-size: 0.72rem;
+  color: #6d6d72;
+}
+
+/* The chip grids become a single-column grouped list (one white "card" per
+   section), each chip a full-width row with a hairline divider — the
+   Settings.app look, instead of a wrapping row of pills. */
+body.ios-native #profile-selector,
+body.ios-native #voice-selector,
+body.ios-native #level-selector,
+body.ios-native #language-selector {
+  flex-wrap: nowrap;
+  flex-direction: column;
+  gap: 0;
+  background: #fff;
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+body.ios-native .chip {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  padding: 11px 14px;
+  border: none;
+  border-bottom: 1px solid rgba(60, 60, 67, 0.1);
+  border-radius: 0;
+  background: transparent;
+  color: #000;
+  font-size: 0.95rem;
+  font-weight: 400;
+  letter-spacing: normal;
+  text-align: left;
+}
+body.ios-native #profile-selector .chip:last-child,
+body.ios-native #voice-selector .chip:last-child,
+body.ios-native #level-selector .chip:last-child,
+body.ios-native #language-selector .chip:last-child,
+body.ios-native .voice-item:last-child .chip {
+  border-bottom: none;
+}
+/* No hover state on a touch device; a brief active-state flash reads as the
+   native row-tap highlight instead. */
+body.ios-native .chip:hover {
+  background: transparent;
+  border-color: rgba(60, 60, 67, 0.1);
+  color: #000;
+}
+body.ios-native .chip:active { background: rgba(60, 60, 67, 0.08); }
+
+/* Selection is a trailing checkmark in the accent color, not an inverted
+   fill — matching how Settings.app marks the current choice in a list. */
+body.ios-native .chip.active {
+  background: transparent;
+  color: #000;
+  transform: none;
+  font-weight: 600;
+}
+body.ios-native .chip.active::after {
+  content: '✓';
+  margin-left: auto;
+  padding-left: 10px;
+  color: #007aff;
+  font-weight: 700;
+}
+
+body.ios-native .voice-item { padding: 0; }
+body.ios-native .voice-item .voice-chip { border-bottom: none; }
+body.ios-native .voice-item:not(:last-child) {
+  border-bottom: 1px solid rgba(60, 60, 67, 0.1);
+}
+body.ios-native .voice-preview {
+  margin-right: 10px;
+  border: none;
+  background: transparent;
+  color: #007aff;
+  font-size: 0.8rem;
+}
+body.ios-native .voice-preview:hover { background: transparent; color: #0060df; }
+
+/* Destructive action reads as red text on a plain row (iOS convention),
+   not a filled red pill. */
+body.ios-native .detail-danger {
+  border-top: none;
+  padding-top: 0;
+}
+body.ios-native .chip.danger {
+  justify-content: center;
+  background: #fff;
+  border-radius: 10px;
+  color: #ff3b30;
+  font-weight: 400;
+}
+body.ios-native .chip.danger:hover,
+body.ios-native .chip.danger:active { background: rgba(60, 60, 67, 0.05); color: #ff3b30; }
+
+/* Back nav reads as the standard iOS "‹ Back" text button. */
+body.ios-native #kid-detail-back {
+  margin: 12px 16px 0;
+  padding: 0;
+  color: #007aff;
+  font-weight: 400;
+  font-size: 0.95rem;
+}
+body.ios-native #kid-detail-back::before { content: '‹ '; font-weight: 600; }
+body.ios-native #kid-detail-back:hover { background: transparent; color: #0060df; }
+
+/* Modal dialog reskinned as a native iOS alert: centered card, hairline
+   button divider, blue action text instead of filled pill buttons. */
+body.ios-native #modal {
+  width: 270px;
+  border-radius: 14px;
+  padding: 20px 16px 0;
+  background: rgba(242, 242, 247, 0.96);
+  font-family: -apple-system, 'SF Pro Text', system-ui, sans-serif;
+}
+body.ios-native #modal-message { text-align: center; font-weight: 600; color: #000; }
+body.ios-native #modal-input {
+  border-radius: 8px;
+  border-color: rgba(60, 60, 67, 0.2);
+  text-align: center;
+}
+body.ios-native #modal-actions {
+  margin: 16px -16px 0;
+  border-top: 1px solid rgba(60, 60, 67, 0.15);
+}
+body.ios-native #modal-actions .chip {
+  flex: 1;
+  justify-content: center;
+  padding: 12px 0;
+  border-bottom: none;
+  border-radius: 0;
+  color: #007aff;
+  font-weight: 400;
+}
+body.ios-native #modal-cancel { border-right: 1px solid rgba(60, 60, 67, 0.15); }
+body.ios-native #modal-actions .chip.active {
+  font-weight: 600;
+  background: transparent;
+}
+body.ios-native #modal-actions .chip.active::after { content: none; }

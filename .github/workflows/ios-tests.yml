@@ -1,0 +1,38 @@
+name: iOS (NovaCore)
+
+# Runs `swift test` for ios/NovaCore — the TDD-tested, device-independent
+# logic layer (levels, memory/profile, protocol messages, phonemizers,
+# tokenizers, etc.). No simulator or native library build needed, so this
+# is fast and has no external dependencies to fetch/compile.
+#
+# Deliberately NOT covered here: building the `Nova` app target itself.
+# That needs whisper.cpp/llama.cpp/espeak-ng cross-compiled to iOS
+# xcframeworks first (open_jtalk and onnxruntime similarly) — real,
+# multi-minute native builds this repo doesn't yet have a single CI-ready
+# entrypoint for (see ios/scripts/build-llama-ios-only.sh and
+# ios/scripts/build-espeak-ng-ios.sh for the two that exist; whisper.cpp and
+# open_jtalk still only have manual/upstream build paths). Left as a
+# follow-up rather than adding a slow, undocumented CI job for it now.
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "ios/NovaCore/**"
+      - ".github/workflows/ios-tests.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ios-tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  novacore-tests:
+    name: swift test (NovaCore)
+    runs-on: macos-15
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Run NovaCore test suite
+        working-directory: ios/NovaCore
+        run: swift test

@@ -14,6 +14,16 @@ import * as THREE from 'three'
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'
 import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm'
 
+// This same bundle is hosted by both the Tauri desktop shell and the iOS app
+// (over NovaSchemeHandler's custom `nova-app://` scheme, chosen specifically
+// because file:// origins are CORS-opaque in WKWebView — see ios/README.md).
+// That scheme is the one reliable signal for "this is the iOS host": style
+// rules scoped under body.ios-native (see style.css) give the settings panel
+// an iOS-native look without touching the desktop app at all.
+if (location.protocol === 'nova-app:') {
+  document.body.classList.add('ios-native')
+}
+
 // ── Constants ─────────────────────────────────────────────────────────────
 const WS_URL       = 'ws://localhost:8765'
 const MODEL_PATH   = '/avatar/VIPEHero_2707.vrm'
@@ -27,6 +37,17 @@ const STATE_LABELS = {
   speaking:       '',       // sentence bubble takes over
   didnt_catch:    "I didn't hear you — try again?",
 }
+// iOS has no Space key — #ptt-btn (see index.html/style.css) is the only
+// affordance there, so its own label already says what to do; overriding
+// just the 'idle' text avoids a leftover desktop-only instruction that
+// doesn't apply and would otherwise sit right above the mic button.
+const STATE_LABELS_IOS = { ...STATE_LABELS, idle: '' }
+
+// Body classes applyState() toggles for background tint (see body.listening
+// etc. in style.css) — kept to just these, and removed/added individually,
+// so applyState never clobbers unrelated body classes like 'ios-native' or
+// 'transcript-docked'.
+const STATE_TINT_CLASSES = ['listening', 'thinking', 'didnt_catch']
 
 // ── DOM refs ──────────────────────────────────────────────────────────────
 const canvasEl   = document.getElementById('canvas')
@@ -203,14 +224,29 @@ function applyState(newState) {
   state = newState
   updateReplayLast()
 
-  // Background tint via body class
-  document.body.className = newState === 'idle' || newState === 'speaking' ? '' : newState
+  // Background tint via body class. Must not overwrite the whole className
+  // (this used to be `document.body.className = ...`) — that wiped out
+  // every other body class on every single state message, including
+  // 'transcript-docked' (silently un-docking the transcript panel the next
+  // time a state update arrived while it was open) and 'ios-native' (the
+  // iOS app's settings-panel styling, which never survived past the first
+  // state message once a WebSocket connection was live).
+  for (const c of STATE_TINT_CLASSES) document.body.classList.remove(c)
+  if (newState !== 'idle' && newState !== 'speaking') document.body.classList.add(newState)
 
   // State label
-  labelEl.textContent = STATE_LABELS[newState] ?? ''
+  const labels = document.body.classList.contains('ios-native') ? STATE_LABELS_IOS : STATE_LABELS
+  labelEl.textContent = labels[newState] ?? ''
 
   // Start-button: visible only while parked in awaiting_start.
   startBtnEl.hidden = newState !== 'awaiting_start'
+
+  // Touch mic button (iOS — hidden via CSS on desktop regardless of this):
+  // the complement of start-btn while idle/listening, and still available
+  // during thinking/speaking as the touch equivalent of pressing Space to
+  // barge in.
+  pttBtnEl.hidden = newState === 'awaiting_start'
+  pttBtnEl.classList.toggle('listening', newState === 'listening')
 
   if (!vrm) return
   if (didntCatchTimer) { clearTimeout(didntCatchTimer); didntCatchTimer = null }
@@ -516,6 +552,11 @@ function connectWS() {
         if (msg.language) setActiveLanguage(msg.language)
         renderVoiceSelector(msg.voices, msg.voice)
         renderLevelSelector(msg.levels, msg.level, msg.language || activeLanguage)
+        // Cached so re-opening the *same* kid's detail view can render
+        // instantly instead of flashing "Loading…" forever — the server
+        // only pushes 'settings' once per connect/switch/language-change,
+        // not on every panel open. See openKidDetail's use of this.
+        lastSettingsMsg = msg
         break
       case 'voice_status':
         updateVoiceStatus(msg.state, msg.voice)
@@ -564,10 +605,12 @@ function pttBlocked() {
   return !modalOverlayEl.hidden
 }
 
-window.addEventListener('keydown', (e) => {
-  if (e.code !== 'Space' || e.repeat) return
+// Shared by the Space key (desktop) and the touch mic button (iOS — see
+// #ptt-btn below; there's no hardware Space key to hold on a phone, and
+// "Hold SPACE to talk!" as the only affordance left iOS with no way to
+// start a turn at all).
+function startPTT() {
   if (pttBlocked()) return
-  e.preventDefault()
   if (state === 'awaiting_start') {
     // First interaction: server accepts a plain ptt_start too (it flips its
     // has_greeted flag and skips the greeting since the child is initiating).
@@ -577,20 +620,46 @@ window.addEventListener('keydown', (e) => {
     pttActive = true
     wsSend({ type: 'ptt_start' })
   } else if (state === 'speaking' || state === 'thinking') {
-    // Barge-in: pressing Space while the avatar is speaking or thinking
+    // Barge-in: starting PTT while the avatar is speaking or thinking
     // interrupts and hands control back to the child immediately.
     wsSend({ type: 'stop_speak' })
   }
-})
-
-window.addEventListener('keyup', (e) => {
-  if (e.code !== 'Space') return
+}
+function stopPTT() {
   if (pttBlocked()) return
-  e.preventDefault()
   if (pttActive) {
     pttActive = false
     wsSend({ type: 'ptt_stop' })
   }
+}
+
+window.addEventListener('keydown', (e) => {
+  if (e.code !== 'Space' || e.repeat) return
+  e.preventDefault()
+  startPTT()
+})
+
+window.addEventListener('keyup', (e) => {
+  if (e.code !== 'Space') return
+  e.preventDefault()
+  stopPTT()
+})
+
+// ── Touch push-to-talk (iOS — see body.ios-native rules in style.css) ─────
+// Pointer events unify touch/mouse and fire reliably in WKWebView, unlike
+// touchstart/touchend which need { passive: false } gymnastics to preventDefault.
+const pttBtnEl = document.getElementById('ptt-btn')
+pttBtnEl.addEventListener('pointerdown', (e) => {
+  e.preventDefault()
+  pttBtnEl.classList.add('active')
+  startPTT()
+})
+;['pointerup', 'pointercancel', 'pointerleave'].forEach(evt => {
+  pttBtnEl.addEventListener(evt, (e) => {
+    e.preventDefault()
+    pttBtnEl.classList.remove('active')
+    stopPTT()
+  })
 })
 
 // ── Settings panel (opened via the active-kid pill) ───────────────
@@ -1087,6 +1156,13 @@ activeKidEl.addEventListener('click', () => {
   openKidDetail(knownActive)
 })
 
+// Most recent 'settings' message from the server — used by openKidDetail to
+// render the active kid's detail view instantly on reopen, rather than
+// showing "Loading…" and waiting for a 'settings' message that isn't coming
+// (the server only sends one on connect/switch_profile/set_language, not on
+// every panel open).
+let lastSettingsMsg = null
+
 // Latest server-known profile list + active slug — the detail view uses this
 // (a) to size the "Remove this kid" button (hidden when only one kid remains,
 // since the app always needs an active profile to fall back to) and (b) to
@@ -1188,7 +1264,20 @@ function resetKidDetailToLoading() {
 
 function openKidDetail(slug) {
   currentDetailSlug = slug
-  resetKidDetailToLoading()
+  // Reopening the kid who's already active isn't a switch — nothing server-
+  // side is about to change, so replay the last 'settings' message instead
+  // of blanking to "Loading…" and waiting for a fresh one the server has no
+  // reason to send. A genuine switch (slug !== knownActive, handled by the
+  // profile-selector click above sending switch_profile first) still needs
+  // the loading state, since the new kid's settings really are stale until
+  // the server's response arrives.
+  if (slug === knownActive && lastSettingsMsg) {
+    setActiveLanguage(lastSettingsMsg.language)
+    renderVoiceSelector(lastSettingsMsg.voices, lastSettingsMsg.voice)
+    renderLevelSelector(lastSettingsMsg.levels, lastSettingsMsg.level, lastSettingsMsg.language || activeLanguage)
+  } else {
+    resetKidDetailToLoading()
+  }
   kidsViewEl.hidden = true
   kidDetailViewEl.hidden = false
   settingsTitleEl.textContent = displayName(slug)
