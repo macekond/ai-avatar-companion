@@ -48,4 +48,24 @@ final class DownloadProgressTests: XCTestCase {
         progress.recordBytes(received: 0, expected: 0, fileIndex: 0)
         XCTAssertEqual(progress.fractionComplete, 0.0, accuracy: 0.001)
     }
+
+    // The UI wants "210 MB / 500 MB", not just a bare percentage — a
+    // multi-GB download that appears to sit at "0%" for a long time (small
+    // fraction, rounds to zero) reads as hung even when real bytes are
+    // moving; showing actual MB makes progress visible immediately.
+    func test_totalBytes_sumAcrossFiles() {
+        var progress = DownloadProgress(totalFiles: 2)
+        progress.recordBytes(received: 50, expected: 100, fileIndex: 0)
+        progress.recordBytes(received: 30, expected: 200, fileIndex: 1)
+        XCTAssertEqual(progress.totalReceivedBytes, 80)
+        XCTAssertEqual(progress.totalExpectedBytes, 300)
+    }
+
+    func test_totalBytes_updatesOnRepeatedCallsForSameFile() {
+        var progress = DownloadProgress(totalFiles: 1)
+        progress.recordBytes(received: 10, expected: 100, fileIndex: 0)
+        progress.recordBytes(received: 60, expected: 100, fileIndex: 0)
+        XCTAssertEqual(progress.totalReceivedBytes, 60)
+        XCTAssertEqual(progress.totalExpectedBytes, 100)
+    }
 }

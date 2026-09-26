@@ -352,8 +352,9 @@ const SETUP_MESSAGES = {
   },
   downloading_models: {
     title: 'Getting Nova’s voice ready…',
-    body: 'The first run downloads about 600 MB of voice models. '
-      + 'This only happens once.',
+    body: 'The first run downloads about 1 GB of voice models. '
+      + 'This only happens once — the progress below shows exactly '
+      + 'how far along it is.',
     spinner: true,
   },
   loading_models: {
@@ -365,6 +366,18 @@ const SETUP_MESSAGES = {
     title: 'Almost there…',
     body: 'Warming up so replies come fast.',
     spinner: true,
+  },
+  // Every download failure used to be swallowed silently server-side, so
+  // this state never used to exist at all — the app just sat on a spinner
+  // forever (or worse, quietly flipped to "ready" with a permanently-broken
+  // engine). Now a real failure is a real, visible state with something the
+  // child's parent can actually act on.
+  download_failed: {
+    title: "Nova couldn't finish downloading",
+    body: "Check your internet connection, then close and reopen the app "
+      + 'to try again. If it keeps failing, the download server itself '
+      + 'may be temporarily unavailable.',
+    spinner: false,
   },
 }
 
@@ -440,7 +453,12 @@ function showSetupOverlay(phase, detail) {
   setupOverlayEl.querySelector('.setup-spinner').style.display = info.spinner ? '' : 'none'
   setupTitleEl.innerHTML = info.title
   setupBodyEl.innerHTML = info.body
-  const showDetail = Boolean(detail && phase === 'ollama_missing')
+  // Used to be gated to phase === 'ollama_missing' only, which meant the
+  // server's own "42% · 210 / 500 MB" detail string for downloading_models
+  // was computed and sent every time but never actually shown — the spinner
+  // was the only thing visible, indistinguishable from a hang. Any phase
+  // that bothers to send a detail string wants it displayed.
+  const showDetail = Boolean(detail)
   setupDetailEl.textContent = showDetail ? detail : ''
   setupDetailEl.style.display = showDetail ? '' : 'none'
   if (!document.getElementById('setup-spin-style')) {
