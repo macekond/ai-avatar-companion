@@ -52,18 +52,6 @@ targets:
         SWIFT_OBJC_BRIDGING_HEADER: Nova/Sources/Nova-Bridging-Header.h
         CLANG_CXX_LANGUAGE_STANDARD: "c++17"
         HEADER_SEARCH_PATHS: "../NativeCores/onnxruntime/build-apple/Headers ../NativeCores/espeak-ng/build-apple/Headers"
-        # Real distribution signing (TestFlight/App Store), not the
-        # Simulator-only "Sign to Run Locally" identity used everywhere else
-        # in this repo so far. Deliberately NOT a literal team ID here (this
-        # repo is public) — XcodeGen substitutes ${DEVELOPMENT_TEAM} from the
-        # shell environment at `xcodegen generate` time. Export it yourself
-        # before generating: `export DEVELOPMENT_TEAM=<your team ID>` — see
-        # ios/README.md. Automatic signing still needs Xcode signed into an
-        # Apple ID with access to that team on the machine that actually
-        # archives — that account/credential step can't happen inside an
-        # unattended build regardless of where the team ID comes from.
-        DEVELOPMENT_TEAM: ${DEVELOPMENT_TEAM}
-        CODE_SIGN_STYLE: Automatic
     info:
       path: Nova/GeneratedInfo.plist
       properties:

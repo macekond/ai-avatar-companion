@@ -88,16 +88,19 @@ turn, read the log against the checklist's thresholds, not open-ended investigat
   in the way a device has it, no real thermal/jetsam behavior) is enough to verify the app
   actually renders and the protocol wiring works, which is what's been done so far — not enough
   to answer Phase 0's real questions.
-- **A `DEVELOPMENT_TEAM` env var — only if you're archiving for a real device or TestFlight.**
-  `project.yml` reads it as `${DEVELOPMENT_TEAM}` (XcodeGen's env-var substitution) rather than
-  committing a literal team ID to this public repo. Export your Apple Developer Team ID before
-  generating: `export DEVELOPMENT_TEAM=<your team ID>` (find it at
-  [developer.apple.com/account](https://developer.apple.com/account) under Membership, or in
-  Xcode → Settings → Accounts). Simulator builds ignore this entirely — they always use Xcode's
-  local "Sign to Run Locally" identity — so this is only needed once you're archiving with
-  `-destination generic/platform=iOS`. If it's unset, `xcodegen generate` writes the literal
-  placeholder string into the (gitignored) `.xcodeproj`, which is harmless for Simulator but will
-  fail signing on a real archive — export the var and re-run `xcodegen generate` first.
+- **A Development Team — only if you're archiving for a real device or TestFlight.** `project.yml`
+  deliberately carries no signing config at all (no `DEVELOPMENT_TEAM`/`CODE_SIGN_STYLE`) — this
+  is a public repo, and an earlier attempt at baking in an env-var placeholder for this turned out
+  to break Xcode's own IDE build (Xcode resolves signing before it'll build for *anything*,
+  Simulator included, unlike a headless `xcodebuild` invocation, which doesn't and made the
+  breakage easy to miss). Simulator builds need no signing config at all — Xcode always falls back
+  to its local "Sign to Run Locally" identity. For a real-device/TestFlight archive, set your
+  Development Team once in Xcode's Signing & Capabilities tab for the `Nova` target (find your
+  Team ID at [developer.apple.com/account](https://developer.apple.com/account) under Membership),
+  or pass it as a one-off `xcodebuild` override —
+  `DEVELOPMENT_TEAM=<team ID> CODE_SIGN_STYLE=Automatic` — so nothing team-specific ever needs to
+  live in `project.yml`. Either way, re-running `xcodegen generate` regenerates the project from
+  scratch and drops any signing config not present in `project.yml`, so redo it after regenerating.
 
 ## Layout
 
