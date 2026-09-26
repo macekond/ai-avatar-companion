@@ -48,10 +48,19 @@ final class SystemTTSEngine: NSObject, AVSpeechSynthesizerDelegate {
         // 160wpm (vs. macOS `say`'s ~175wpm default) — easier for a learner.
         utterance.rate = AVSpeechUtteranceDefaultSpeechRate * 0.9
 
+        // `Timer.scheduledTimer`'s closure is `@Sendable` at the type level
+        // (so it can't directly touch `elapsed`/`onAmplitude`, both
+        // main-actor-isolated state, without the compiler flagging a
+        // cross-actor data race) even though it only ever actually fires on
+        // the main run loop here, since `speak()` itself runs on the main
+        // actor. Hop back onto the actor explicitly instead, same pattern as
+        // the `nonisolated` delegate callbacks below.
         amplitudeTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
-            guard let self else { return }
-            self.elapsed += 0.05
-            self.onAmplitude?(abs(sin(self.elapsed * 8.0)) * 0.6)
+            Task { @MainActor in
+                guard let self else { return }
+                self.elapsed += 0.05
+                self.onAmplitude?(abs(sin(self.elapsed * 8.0)) * 0.6)
+            }
         }
         synthesizer.speak(utterance)
     }
