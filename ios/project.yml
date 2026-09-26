@@ -32,6 +32,14 @@ targets:
       - name: Build ui/ frontend
         script: |
           set -e
+          # Xcode's Run Script phases use a minimal PATH, not the interactive
+          # shell's — npm/node installed via nvm, a user-local prefix
+          # (~/.local/bin), or Homebrew are invisible here even though a
+          # Terminal-run `xcodebuild` finds them fine, which is why this step
+          # can fail ("PhaseScriptExecution failed with a nonzero exit code")
+          # in Xcode's own build while the exact same project builds cleanly
+          # from the command line. Prepend the common install locations.
+          export PATH="$HOME/.local/bin:$HOME/.nvm/versions/node/$(ls "$HOME/.nvm/versions/node" 2>/dev/null | sort -V | tail -1)/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
           npm --prefix "$SRCROOT/../ui" install
           # --base=./ (not the shared vite.config.js, which the desktop Tauri
           # build also uses): Vite's default absolute "/assets/..." paths
