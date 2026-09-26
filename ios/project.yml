@@ -1,6 +1,6 @@
 name: Nova
 options:
-  bundleIdPrefix: com.novaapp
+  bundleIdPrefix: cz.macek
   deploymentTarget:
     iOS: "17.0"
 packages:
@@ -52,7 +52,7 @@ targets:
         basedOnDependencyAnalysis: false
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.novaapp.nova
+        PRODUCT_BUNDLE_IDENTIFIER: cz.macek.nova
         MARKETING_VERSION: "0.1.0"
         CURRENT_PROJECT_VERSION: "1"
         SWIFT_VERSION: "5.9"

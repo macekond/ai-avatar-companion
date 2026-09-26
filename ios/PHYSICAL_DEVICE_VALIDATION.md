@@ -26,7 +26,7 @@ device run is: build, run one conversation turn, read the log.
 3. Do one full conversation turn (hold-to-talk, speak, wait for the reply) in English, then one
    in Japanese.
 4. Open Console.app, select the device, filter by process `Nova` and subsystem
-   `com.novaapp.nova`, category `diagnostics` (or `xcrun devicectl device log` if scripting this).
+   `cz.macek.nova`, category `diagnostics` (or `xcrun devicectl device log` if scripting this).
 5. Read off each `event=` line below against its threshold from the original port plan.
 
 ## Go/no-go thresholds (from the Phase 0 plan)

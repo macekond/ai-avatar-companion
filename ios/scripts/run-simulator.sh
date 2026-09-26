@@ -18,7 +18,7 @@ set -e
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 DEVICE_NAME="${1:-iPhone 17 Pro}"
-BUNDLE_ID="com.novaapp.nova"
+BUNDLE_ID="cz.macek.nova"
 SCHEME="Nova"
 
 SCREENSHOT_PATH=""

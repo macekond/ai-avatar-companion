@@ -10,7 +10,7 @@ import os
 /// child speech — same "audio never leaves the device" boundary the
 /// desktop app's telemetry docstring describes.
 enum Diagnostics {
-    private static let logger = Logger(subsystem: "com.novaapp.nova", category: "diagnostics")
+    private static let logger = Logger(subsystem: "cz.macek.nova", category: "diagnostics")
 
     static func log(_ event: String, _ fields: [String: String]) {
         let pairs = fields.map { "\($0.key)=\($0.value)" }.joined(separator: " ")
