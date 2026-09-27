@@ -70,13 +70,37 @@ public struct VoiceOption: Codable, Equatable {
     }
 }
 
+/// iOS-only per-kid summary attached to `profiles`/`choose_profile` (I1/I6/I9)
+/// so the client can show a real display name and language per slug instead
+/// of the bare slug itself (which mangles a name like "Zoë" or "Mia Rose",
+/// and carries no language at all). The desktop protocol has no equivalent —
+/// `ui/src/main.js`'s picker there works from the slug list alone.
+public struct KidInfo: Codable, Equatable {
+    public let slug: String
+    public let name: String
+    public let language: String
+
+    public init(slug: String, name: String, language: String) {
+        self.slug = slug
+        self.name = name
+        self.language = language
+    }
+}
+
 public enum ServerMessage: Equatable {
     case initMessage(level: String, language: String)
     case settings(language: String, languages: [String], levels: [String], level: String, voices: [VoiceOption], voice: String)
     case voiceStatus(state: String, voice: String)
     case previewStatus(state: String, voice: String)
-    case profiles(list: [String], active: String)
+    /// `kids` is iOS-only (see `KidInfo`) — nil/omitted keeps the desktop
+    /// wire shape unchanged for a client that doesn't look for it.
+    case profiles(list: [String], active: String, kids: [KidInfo]? = nil)
     case profileError(message: String)
+    /// Sent by the iOS in-process server when no profile is active for a
+    /// connection (fresh install, or every profile deleted) — the desktop
+    /// server never sends this; `ui/src/main.js` only shows the full-screen
+    /// profile picker when it arrives. `kids` is iOS-only, see `KidInfo`.
+    case chooseProfile(list: [String], kids: [KidInfo]? = nil)
     case onboardingStart
     case memoryLoaded(name: String, age: Int?, language: String, level: String)
     case state(SessionState)
@@ -86,16 +110,17 @@ public enum ServerMessage: Equatable {
     case conversationReset
     case conversationTurn(id: Int, you: String, nova: String, youHtml: String?, novaHtml: String?)
     case conversationCorrection(id: Int, kind: String, wrong: String, right: String, wrongHtml: String?, rightHtml: String?)
-    case setupStatus(phase: String, detail: String)
+    /// `progress` (0...1) is iOS-only: the current file's download fraction, drawn as a bar.
+    case setupStatus(phase: String, detail: String, progress: Double? = nil)
 }
 
 extension ServerMessage: Encodable {
     private enum CodingKeys: String, CodingKey {
         case type, level, language, languages, levels, voices, voice
         case state, text, textHtml = "text_html", value
-        case list, active, message
+        case list, active, message, kids
         case name, age
-        case phase, detail
+        case phase, detail, progress
         case id, you, nova, youHtml = "you_html", novaHtml = "nova_html"
         case kind, wrong, right, wrongHtml = "wrong_html", rightHtml = "right_html"
     }
@@ -123,13 +148,18 @@ extension ServerMessage: Encodable {
             try c.encode("preview_status", forKey: .type)
             try c.encode(state, forKey: .state)
             try c.encode(voice, forKey: .voice)
-        case .profiles(let list, let active):
+        case .profiles(let list, let active, let kids):
             try c.encode("profiles", forKey: .type)
             try c.encode(list, forKey: .list)
             try c.encode(active, forKey: .active)
+            try c.encodeIfPresent(kids, forKey: .kids)
         case .profileError(let message):
             try c.encode("profile_error", forKey: .type)
             try c.encode(message, forKey: .message)
+        case .chooseProfile(let list, let kids):
+            try c.encode("choose_profile", forKey: .type)
+            try c.encode(list, forKey: .list)
+            try c.encodeIfPresent(kids, forKey: .kids)
         case .onboardingStart:
             try c.encode("onboarding_start", forKey: .type)
         case .memoryLoaded(let name, let age, let language, let level):
@@ -169,10 +199,11 @@ extension ServerMessage: Encodable {
             try c.encode(right, forKey: .right)
             try c.encodeIfPresent(wrongHtml, forKey: .wrongHtml)
             try c.encodeIfPresent(rightHtml, forKey: .rightHtml)
-        case .setupStatus(let phase, let detail):
+        case .setupStatus(let phase, let detail, let progress):
             try c.encode("setup_status", forKey: .type)
             try c.encode(phase, forKey: .phase)
             try c.encode(detail, forKey: .detail)
+            try c.encodeIfPresent(progress, forKey: .progress)
         }
     }
 }

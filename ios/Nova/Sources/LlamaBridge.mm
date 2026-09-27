@@ -6,6 +6,8 @@
 // what keeps its ggml types out of Swift's module graph.
 #include <llama/llama.h>
 
+#include <algorithm>
+#include <cstring>
 #include <string>
 #include <vector>
 #include <TargetConditionals.h>
@@ -18,6 +20,44 @@ struct NovaLlamaEngine {
     const llama_vocab *vocab = nullptr;
     bool backendInitialized = false;
 };
+
+// Used only when the model reports no built-in chat template (nullptr from
+// llama_model_chat_template) or applying it fails — a plain, model-agnostic
+// approximation good enough to keep the app functional rather than crashing
+// or reverting to a raw unstructured prompt.
+std::string buildChatMLFallback(const std::vector<llama_chat_message> &messages, bool addAssistant) {
+    std::string out;
+    for (const auto &message : messages) {
+        out += "<|im_start|>";
+        out += message.role;
+        out += "\n";
+        out += message.content;
+        out += "<|im_end|>\n";
+    }
+    if (addAssistant) out += "<|im_start|>assistant\n";
+    return out;
+}
+
+std::string applyChatTemplate(const llama_model *model, const std::vector<llama_chat_message> &messages, bool addAssistant) {
+    const char *tmpl = llama_model_chat_template(model, nullptr);
+    if (!tmpl) return buildChatMLFallback(messages, addAssistant);
+
+    // Recommended starting size per llama_chat_apply_template's own doc
+    // comment; grown and retried if the real output doesn't fit.
+    int32_t bufLen = 0;
+    for (const auto &message : messages) bufLen += static_cast<int32_t>(strlen(message.content)) * 2;
+    bufLen = std::max(bufLen, 1024);
+    std::vector<char> buf(bufLen);
+
+    int32_t needed = llama_chat_apply_template(tmpl, messages.data(), messages.size(), addAssistant, buf.data(), bufLen);
+    if (needed < 0) return buildChatMLFallback(messages, addAssistant);
+    if (needed > bufLen) {
+        buf.resize(needed);
+        needed = llama_chat_apply_template(tmpl, messages.data(), messages.size(), addAssistant, buf.data(), needed);
+        if (needed < 0) return buildChatMLFallback(messages, addAssistant);
+    }
+    return std::string(buf.data(), needed);
+}
 
 } // namespace
 
@@ -67,7 +107,8 @@ void nova_llama_free(NovaLlamaHandle handle) {
 
 int nova_llama_generate(
     NovaLlamaHandle handle,
-    const char *prompt,
+    const NovaLlamaMessage *messages,
+    int messageCount,
     int maxTokens,
     int (*onToken)(const char *piece, void *context),
     void *context
@@ -75,7 +116,20 @@ int nova_llama_generate(
     if (!handle) return -1;
     auto *engine = static_cast<NovaLlamaEngine *>(handle);
 
-    std::string promptStr(prompt);
+    // Every previous call's decoded tokens (a prior reply, or the
+    // memory-extractor's own prompt/output run right after it on this same
+    // engine) otherwise stay in the KV cache and get decoded *on top of* by
+    // the next call — that's what let the system prompt leak into replies
+    // and eventually overflowed the 2048-token context. See LlamaBridge.h.
+    llama_memory_clear(llama_get_memory(engine->ctx), true);
+
+    std::vector<llama_chat_message> chatMessages;
+    chatMessages.reserve(messageCount);
+    for (int i = 0; i < messageCount; i++) {
+        chatMessages.push_back({messages[i].role, messages[i].content});
+    }
+    std::string promptStr = applyChatTemplate(engine->model, chatMessages, true);
+
     std::vector<llama_token> tokens(promptStr.size() + 8);
     int32_t nTokens = llama_tokenize(
         engine->vocab, promptStr.c_str(), static_cast<int32_t>(promptStr.size()),
@@ -123,7 +177,9 @@ int nova_llama_generate(
         if (llama_vocab_is_eog(engine->vocab, newToken)) break;
 
         char buffer[64];
-        int32_t pieceLength = llama_token_to_piece(engine->vocab, newToken, buffer, sizeof(buffer), 0, true);
+        // special=false: don't render control/template tokens (e.g. ChatML's
+        // <|im_end|>) as literal text into the spoken/displayed reply.
+        int32_t pieceLength = llama_token_to_piece(engine->vocab, newToken, buffer, sizeof(buffer), 0, false);
         if (pieceLength < 0) break;
 
         std::string piece(buffer, pieceLength);

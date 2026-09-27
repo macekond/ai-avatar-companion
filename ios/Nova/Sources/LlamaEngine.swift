@@ -20,6 +20,14 @@ final class LlamaEngine: @unchecked Sendable {
 
     private let handle: NovaLlamaHandle
 
+    /// The engine (and the KV cache/context it owns) is not thread-safe, but
+    /// `NovaWebSocketServer` fires generation off in detached tasks — a
+    /// reply's task and the memory-extractor's task launched right after it
+    /// can otherwise overlap on this same `ctx`. Held for the full duration
+    /// of `generate` so every caller is serialized regardless of which
+    /// `Task.detached` it runs from.
+    private let generationLock = NSLock()
+
     /// `modelPath` is a GGUF file — not bundled (Phase 9: on-demand
     /// download), resolved by the caller.
     init(modelPath: String) throws {
@@ -33,12 +41,17 @@ final class LlamaEngine: @unchecked Sendable {
         nova_llama_free(handle)
     }
 
-    /// Streams generated text sentence-by-sentence via `onSentence`, using
-    /// `SentenceSegmenter` (NovaCore) so the boundary logic is identical to
-    /// the desktop app's — the same mechanism that lets TTS start on
-    /// sentence 1 before generation finishes (Phase 4's load-bearing
-    /// streaming behavior, `_extract_sentences` in app/pipeline/llm.py).
-    func generate(prompt: String, maxTokens: Int32 = 200, onSentence: @escaping (String) -> Void) throws {
+    /// Streams a reply to `messages` sentence-by-sentence via `onSentence`,
+    /// using `SentenceSegmenter` (NovaCore) so the boundary logic is
+    /// identical to the desktop app's — the same mechanism that lets TTS
+    /// start on sentence 1 before generation finishes (Phase 4's
+    /// load-bearing streaming behavior, `_extract_sentences` in
+    /// app/pipeline/llm.py). `messages` is applied through the model's own
+    /// chat template (see `LlamaBridge`) rather than folded into one raw
+    /// prompt string.
+    func generate(messages: [ChatMessage], maxTokens: Int32 = 200, onSentence: @escaping (String) -> Void) throws {
+        generationLock.lock()
+        defer { generationLock.unlock() }
         // onToken must be a C function pointer (no captures), so the
         // segmenter/onSentence closure is smuggled through `context` as an
         // Unmanaged reference and unpacked inside the trampoline.
@@ -61,8 +74,8 @@ final class LlamaEngine: @unchecked Sendable {
         let box = Box(segmenter: SentenceSegmenter(), onSentence: onSentence)
         let boxPointer = Unmanaged.passUnretained(box).toOpaque()
 
-        let status = prompt.withCString { cPrompt in
-            nova_llama_generate(handle, cPrompt, maxTokens, { cPiece, context in
+        let status = Self.withCMessages(messages) { cMessages, count in
+            nova_llama_generate(handle, cMessages, count, maxTokens, { cPiece, context in
                 guard let context, let cPiece else { return 0 }
                 let box = Unmanaged<Box>.fromOpaque(context).takeUnretainedValue()
                 if box.firstTokenMs == nil {
@@ -98,5 +111,22 @@ final class LlamaEngine: @unchecked Sendable {
             "tokens": String(box.tokenCount), "tokens_per_sec": String(format: "%.1f", tokensPerSec),
             "memory_mb": String(Diagnostics.memoryFootprintMB()),
         ])
+    }
+
+    /// Recursively opens a `withCString` scope per role/content string so
+    /// every pointer in the resulting `NovaLlamaMessage` array stays valid
+    /// for the whole duration of `body`, without any manual alloc/free.
+    private static func withCMessages<R>(
+        _ messages: [ChatMessage], _ index: Int = 0, built: [NovaLlamaMessage] = [],
+        _ body: (UnsafePointer<NovaLlamaMessage>?, Int32) -> R
+    ) -> R {
+        guard index < messages.count else {
+            return built.withUnsafeBufferPointer { body($0.baseAddress, Int32(built.count)) }
+        }
+        return messages[index].role.rawValue.withCString { rolePtr in
+            messages[index].content.withCString { contentPtr in
+                withCMessages(messages, index + 1, built: built + [NovaLlamaMessage(role: rolePtr, content: contentPtr)], body)
+            }
+        }
     }
 }

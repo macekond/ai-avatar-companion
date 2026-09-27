@@ -127,18 +127,6 @@ public final class NovaWebSocketServer: ObservableObject {
         return newGuard
     }
 
-    /// Two-turn spoken onboarding (name, then age) for a brand-new profile —
-    /// port of `_run_onboarding` in app/server.py. `nil` for a connection
-    /// means onboarding isn't in progress (either finished, or not needed
-    /// because the profile already existed). `onboardingNames` holds the
-    /// name collected in step 1 until step 2 completes the profile.
-    private enum OnboardingStep: Equatable {
-        case askingName
-        case askingAge
-    }
-    private var onboardingSteps: [ObjectIdentifier: OnboardingStep] = [:]
-    private var onboardingNames: [ObjectIdentifier: String] = [:]
-
     private static func profilesDir() -> URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         return base.appendingPathComponent("profiles")
@@ -170,13 +158,12 @@ public final class NovaWebSocketServer: ObservableObject {
     /// mirroring these to a CDN the app controls rather than depending on a
     /// live third-party fetch from a shipped App Store app; not done yet.
     /// Filenames match what `Self.modelPath` looks for.
-    /// "llm.gguf" here is SmolLM2-135M (small enough to verify the download
-    /// mechanism itself without exhausting this environment's disk/bandwidth)
-    /// — NOT one of the real candidates (Llama-3.2-3B / Qwen2.5-3B) Spike 2
-    /// still needs to A/B on a physical device.
+    /// The LLM is Qwen2.5-1.5B-Instruct (Apache-2.0, multilingual incl.
+    /// Japanese); it replaced an English-only SmolLM2-135M placeholder saved
+    /// as "llm.gguf", hence the new filename (see `removeStaleModelFile`).
     private static let modelSpecs = [
         ModelSpec(filename: "ggml-small.bin", urlString: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"),
-        ModelSpec(filename: "llm.gguf", urlString: "https://huggingface.co/QuantFactory/SmolLM2-135M-Instruct-GGUF/resolve/main/SmolLM2-135M-Instruct.Q4_K_M.gguf"),
+        ModelSpec(filename: "llm-qwen2.5-1.5b-instruct-q4_k_m.gguf", urlString: "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf"),
         ModelSpec(filename: "kokoro-v1.0.onnx", urlString: "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx"),
         ModelSpec(filename: "voices-v1.0.bin", urlString: "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin"),
         // ljspeech: trained on the public-domain LJSpeech dataset (per its
@@ -217,16 +204,15 @@ public final class NovaWebSocketServer: ObservableObject {
     private var kokoroEngine: KokoroEngine?
     private var kokoroVoiceStore: KokoroVoiceStore?
     private let kokoroPlayer = KokoroPlayer()
-    /// `af_alloy` is the voice this engine's Kokoro integration has actually
-    /// been verified against (see the spike README's real-voice-synthesis
-    /// update) — arbitrary otherwise, no per-profile voice picker yet.
+    /// Kokoro is only used for Japanese here, so this is one of Kokoro's
+    /// native Japanese voices (the English `af_*` voices mangle Japanese).
     /// `nonisolated` because it's read from inside `speak`'s `Task.detached`
     /// Kokoro branch — a plain immutable constant is safe off the main
     /// actor, but static members of a `@MainActor` type are actor-isolated
     /// by default, which Swift 6's strict concurrency checking now enforces
     /// (this compiled as an implicit warning, not an error, under this
     /// project's current language mode, but is a real bug regardless).
-    private static nonisolated let kokoroVoiceName = "af_alloy"
+    private static nonisolated let kokoroVoiceName = "jf_alpha"
 
     /// Set by `stopSpeak` (barge-in) so `speakSentences`'s recursion stops
     /// dead instead of continuing to the next sentence — stopping the active
@@ -268,6 +254,16 @@ public final class NovaWebSocketServer: ObservableObject {
         return FileManager.default.fileExists(atPath: path) ? path : nil
     }
 
+    /// Deletes a device's previously-downloaded `llm.gguf` (the old
+    /// SmolLM2-135M placeholder — see `modelSpecs`'s comment) if present,
+    /// so it doesn't sit around as ~100MB of dead weight once every device
+    /// has moved on to the new filename.
+    private static func removeStaleModelFile() {
+        guard let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { return }
+        let stalePath = dir.appendingPathComponent("models/llm.gguf")
+        try? FileManager.default.removeItem(at: stalePath)
+    }
+
     /// Instantiates whichever engines have their model file already present.
     /// Safe to call again after a download completes to pick up newly
     /// arrived files. Construction (Metal shader compilation for the LLM
@@ -287,7 +283,7 @@ public final class NovaWebSocketServer: ObservableObject {
             whisperEngine = await Task.detached { try? WhisperEngine(modelPath: modelPath) }.value
             Diagnostics.log("engine_loaded", ["engine": "whisper", "memory_mb": String(Diagnostics.memoryFootprintMB())])
         }
-        if llamaEngine == nil, let modelPath = Self.modelPath("llm.gguf") {
+        if llamaEngine == nil, let modelPath = Self.modelPath("llm-qwen2.5-1.5b-instruct-q4_k_m.gguf") {
             llamaEngine = await Task.detached { try? LlamaEngine(modelPath: modelPath) }.value
             Diagnostics.log("engine_loaded", ["engine": "llama", "memory_mb": String(Diagnostics.memoryFootprintMB())])
         }
@@ -356,14 +352,12 @@ public final class NovaWebSocketServer: ObservableObject {
     /// (lines ~1412-1468), just without the multi-watcher plumbing since
     /// this app only ever has one local WKWebView client.
     private func downloadMissingModelsThenLoad() async {
-        let allSucceeded = await modelDownloader.downloadMissing(Self.modelSpecs) { [weak self] fraction, received, expected in
-            guard let self else { return }
-            let percent = Int(fraction * 100)
-            let detail = expected > 0
-                ? "\(percent)% · \(Self.formatMB(received)) / \(Self.formatMB(expected)) MB"
-                : "\(percent)%"
-            self.broadcast(.setupStatus(phase: "downloading_models", detail: detail))
+        let allSucceeded = await modelDownloader.downloadMissing(Self.modelSpecs) { [weak self] progress in
+            self?.broadcast(.setupStatus(phase: "downloading_models", detail: progress.detail, progress: progress.fraction))
         }
+        // Loading a freshly downloaded 1.1 GB LLM takes a while; don't leave a finished bar on screen meanwhile.
+        setupPhase = "loading_models"
+        broadcast(.setupStatus(phase: "loading_models", detail: ""))
         await loadAvailableEngines()
         // A silently-failed download used to still flip to "ready" here —
         // the app would look fully loaded while a required engine (usually
@@ -379,10 +373,6 @@ public final class NovaWebSocketServer: ObservableObject {
         broadcast(.setupStatus(phase: "ready", detail: ""))
     }
 
-    private static func formatMB(_ bytes: Int64) -> String {
-        String(bytes / 1_000_000)
-    }
-
     /// Port of app/server.py's `_send_settings`: the Settings-panel state
     /// (language, levels + voices for that language, current selections) for
     /// the connection's active profile. Sent alongside every `init`.
@@ -392,13 +382,13 @@ public final class NovaWebSocketServer: ObservableObject {
     /// voice; see ios/spikes/03-tts-piper/README.md), unlike the desktop
     /// app's `_voices_for()` which lists every downloadable voice.
     /// This app's only voice per language — Piper (`ljspeech`) for English,
-    /// Kokoro (`af_alloy`) for Japanese. Real multi-voice support (like
+    /// Kokoro (`jf_alpha`) for Japanese. Real multi-voice support (like
     /// desktop's `_voices_for`/per-voice on-demand download) doesn't exist
     /// yet; a single-entry catalog is the honest reflection of that, not a
     /// placeholder to expand later without further model-download work.
     private func voiceCatalog(for language: String) -> [VoiceOption] {
         language == "ja"
-            ? [VoiceOption(id: "af_alloy", label: "Alloy")]
+            ? [VoiceOption(id: "jf_alpha", label: "Alpha")]
             : [VoiceOption(id: "ljspeech", label: "LJSpeech")]
     }
 
@@ -412,8 +402,21 @@ public final class NovaWebSocketServer: ObservableObject {
             levels: Levels.levelsFor(profile.language),
             level: profile.level,
             voices: voices,
-            voice: profile.voice.isEmpty ? voices.first?.id ?? "" : profile.voice
+            // A voice saved before a catalog change (e.g. the old af_alloy) falls back to the default.
+            voice: voices.contains(where: { $0.id == profile.voice }) ? profile.voice : voices.first?.id ?? ""
         ), on: connection)
+    }
+
+    /// Loads each listed profile just far enough to describe it on the wire
+    /// (I1/I6/I9) — a slug alone mangles a display name like "Zoë" or "Mia
+    /// Rose" client-side and carries no language. Falls back to the slug
+    /// itself / "en" for a profile file that won't load rather than dropping
+    /// it from the list the client already has from `list`/`active`.
+    private func kidsInfo(for slugs: [String]) -> [KidInfo] {
+        slugs.map { slug in
+            let profile = MemoryManager(profilesDir: Self.profilesDir(), slug: slug).load()?.profile
+            return KidInfo(slug: slug, name: profile?.name ?? slug, language: profile?.language ?? "en")
+        }
     }
 
     private func broadcast(_ message: ServerMessage) {
@@ -423,6 +426,7 @@ public final class NovaWebSocketServer: ObservableObject {
     }
 
     public func start() throws {
+        Self.removeStaleModelFile()
         try recorder.start()
         setupPhase = "loading_models"
         Task {
@@ -500,8 +504,6 @@ public final class NovaWebSocketServer: ObservableObject {
         generationGuards.removeValue(forKey: id)
         memoryManagers.removeValue(forKey: id)
         memories.removeValue(forKey: id)
-        onboardingSteps.removeValue(forKey: id)
-        onboardingNames.removeValue(forKey: id)
         transcriptStores.removeValue(forKey: id)
         convTurnIds.removeValue(forKey: id)
         hasGreeted.removeValue(forKey: id)
@@ -560,13 +562,17 @@ public final class NovaWebSocketServer: ObservableObject {
             // per-connection, matching desktop's single shared `llm`
             // pipeline — this app only ever has one active WKWebView client.
             currentAppearance = appearanceStore.get(key: key)?.description
-            let (memory, isNewProfile) = loadOrCreateDefaultProfile(for: connection)
-            if isNewProfile {
-                startOnboarding(for: connection)
+            let id = ObjectIdentifier(connection)
+            guard let memory = memories[id], let manager = memoryManagers[id] else {
+                // No active profile for this connection yet — the picker
+                // (choose_profile) replaces the old spoken onboarding; the
+                // user must pick an existing kid or create one via
+                // switch_profile before Nova appears.
+                let list = MemoryManager(profilesDir: Self.profilesDir(), slug: "").listProfiles()
+                send(.chooseProfile(list: list, kids: kidsInfo(for: list)), on: connection)
                 return
             }
-            let manager = memoryManagers[ObjectIdentifier(connection)]!
-            send(.profiles(list: manager.listProfiles(), active: manager.slug), on: connection)
+            send(.profiles(list: manager.listProfiles(), active: manager.slug, kids: kidsInfo(for: manager.listProfiles())), on: connection)
             send(.memoryLoaded(name: memory.profile.name, age: memory.profile.age, language: memory.profile.language, level: memory.profile.level), on: connection)
             send(.initMessage(level: memory.profile.level, language: memory.profile.language), on: connection)
             sendSettings(for: connection)
@@ -578,6 +584,10 @@ public final class NovaWebSocketServer: ObservableObject {
             send(.state(machine.state), on: connection)
             return
         case .start:
+            // No active profile yet (picker still showing) — nothing to
+            // greet, and no `state` frame either, matching every other
+            // profile-gated message below.
+            guard memories[ObjectIdentifier(connection)] != nil else { return }
             machine.start()
             let id = ObjectIdentifier(connection)
             // Port of app/server.py's `has_greeted` — the spoken greeting
@@ -589,56 +599,25 @@ public final class NovaWebSocketServer: ObservableObject {
                 sendGreeting(for: connection)
             }
         case .pttStart:
+            // No active profile yet — never start recording; `pttStop`
+            // mirrors this so a stray turn never captures or transcribes
+            // audio for a session that isn't tied to any child.
+            guard memories[ObjectIdentifier(connection)] != nil else { return }
             machine.pttStart()
             recorder.pttStart()
         case .pttStop:
+            guard memories[ObjectIdentifier(connection)] != nil else { return }
             // hasAudio mirrors app/pipeline/stt.py's MIN_DURATION_S floor
             // (STTConstants.hasEnoughAudio).
             let (hasAudio, samples) = recorder.pttStop()
-            if let step = onboardingSteps[ObjectIdentifier(connection)] {
-                // Onboarding has its own explicit state sends (matching the
-                // Python original's _one_ptt_turn) rather than routing
-                // through the general session state machine — which is
-                // exactly why this needs its own "thinking" send here: the
-                // machine's internal state was left at "listening" by
-                // .pttStart above and nothing else in this branch ever
-                // advances it, so without this the client stayed on
-                // "listening" for the entire whisper transcription (visible
-                // on-device as a hang after answering the first onboarding
-                // question), and the *next* PTT press silently no-op'd
-                // client-side since its own state-gating never saw "idle".
-                send(.state(.thinking), on: connection)
-                if hasAudio, let engine = whisperEngine {
-                    transcribeForOnboarding(samples: samples, engine: engine, step: step, connection: connection)
-                } else {
-                    // Runs synchronously (unlike transcribeForOnboarding's
-                    // async completion), so it returns *before* this dispatch
-                    // call does. On the .askingAge step specifically it
-                    // writes the freshly-completed machine straight into
-                    // stateMachines[id] (see continueOnboarding) — but
-                    // handle() still holds its own pre-dispatch snapshot in
-                    // `machine` and unconditionally overwrites
-                    // stateMachines[id] with it once dispatch returns. Same
-                    // clobber bug switchProfile hit below; resync `machine`
-                    // from what continueOnboarding just wrote so that
-                    // overwrite persists the right value instead of reverting
-                    // it back to stale "listening". Gated on .askingAge only
-                    // — continueOnboarding's .askingName branch never touches
-                    // stateMachines[id], so resyncing unconditionally would
-                    // instead overwrite `machine` (correctly "listening" from
-                    // pttStart() above) with whatever *older* value happened
-                    // to still be sitting in the dictionary from before this
-                    // handle() call even started.
-                    continueOnboarding(transcript: nil, step: step, connection: connection)
-                    if step == .askingAge {
-                        machine = stateMachines[ObjectIdentifier(connection)] ?? machine
-                    }
-                }
-                return
-            }
             machine.pttStop(hasAudio: hasAudio)
             if hasAudio, let engine = whisperEngine {
                 transcribeAndContinue(samples: samples, engine: engine, connection: connection)
+            } else if !hasAudio {
+                // Too little audio to even attempt STT — same "didn't catch
+                // that" feedback as an empty transcript, so the talk button
+                // never dies from a too-short tap (C3).
+                speakDidntCatch(for: connection)
             }
         case .stopSpeak:
             speechInterrupted = true
@@ -651,6 +630,7 @@ public final class NovaWebSocketServer: ObservableObject {
             // handler (_speak_interruptible): pure playback through the same
             // TTS router as a live reply, no transcript entry, no memory
             // extraction.
+            guard memories[ObjectIdentifier(connection)] != nil else { return }
             let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
             if !trimmed.isEmpty {
                 replay(trimmed, for: connection)
@@ -664,22 +644,42 @@ public final class NovaWebSocketServer: ObservableObject {
             let language = memory.profile.language
             guard Levels.levelsFor(language).contains(level) else { break }
             memory.profile.level = level
+            memory.profile.levelByLanguage[language] = level
             memories[id] = memory
             memoryManagers[id]?.save(memory)
         case .setLanguage(let language):
             // Port of app/server.py's `set_language`: reject an unknown
-            // language, else reset level + voice to that language's
-            // defaults (a level/voice picked for one language is
-            // meaningless in another) and resend `settings` so the UI's
-            // panel reflects the new language's level/voice catalog.
+            // language, else move to that language's own level — the last
+            // one used for it (I8), so a switch away and back doesn't lose
+            // progress, or its default when it has none yet — and reset
+            // voice (a voice picked for one language is meaningless in
+            // another) and resend `settings` so the UI's panel reflects the
+            // new language's level/voice catalog.
             let id = ObjectIdentifier(connection)
             guard var memory = memories[id] else { break }
             guard Levels.languages.contains(language) else { break }
+            let languageChanged = memory.profile.language != language
+            memory.profile.levelByLanguage[memory.profile.language] = memory.profile.level
             memory.profile.language = language
-            memory.profile.level = Levels.defaultLevel(for: language)
+            if let rememberedLevel = memory.profile.levelByLanguage[language], Levels.levelsFor(language).contains(rememberedLevel) {
+                memory.profile.level = rememberedLevel
+            } else {
+                memory.profile.level = Levels.defaultLevel(for: language)
+            }
             memory.profile.voice = ""
             memories[id] = memory
             memoryManagers[id]?.save(memory)
+            if languageChanged {
+                // Old-language history pulls a small model straight back to that language.
+                conversationHistories.removeValue(forKey: id)
+                generationGuard(for: connection).advance()
+                // A reply dropped by the guard never reaches finishSpeaking, so leave speaking here or the session wedges.
+                speechInterrupted = true
+                ttsEngine.stop()
+                kokoroPlayer.stop()
+                piperPlayer.stop()
+                machine.stopSpeak()
+            }
             sendSettings(for: connection)
         case .setVoice(let voice):
             // Port of app/server.py's `set_voice`: validate against the
@@ -704,6 +704,7 @@ public final class NovaWebSocketServer: ObservableObject {
             // id" only ever resolves to that language's own voice — this
             // still exercises the full protocol round-trip for when a real
             // multi-voice catalog exists.
+            guard memories[ObjectIdentifier(connection)] != nil else { break }
             guard let language = ["en", "ja"].first(where: { voiceCatalog(for: $0).contains { $0.id == voice } }) else { break }
             send(.previewStatus(state: "loading", voice: voice), on: connection)
             let sample = systemText("preview_sample", language: language, [:])
@@ -776,23 +777,26 @@ public final class NovaWebSocketServer: ObservableObject {
                     memories.removeValue(forKey: id)
                     memoryManagers.removeValue(forKey: id)
                     let remaining = manager.listProfiles()
-                    let fallback: ChildMemory
-                    if let nextSlug = remaining.first {
-                        let nextManager = MemoryManager(profilesDir: Self.profilesDir(), slug: nextSlug)
-                        fallback = nextManager.load() ?? ChildMemory(profile: ChildProfile(name: nextSlug))
-                        memoryManagers[id] = nextManager
-                        memories[id] = fallback
-                    } else {
-                        fallback = loadOrCreateDefaultProfile(for: connection).memory
+                    guard let nextSlug = remaining.first else {
+                        // Unreachable in practice (deleting the last profile
+                        // is refused above), but coherent: no profile left
+                        // for this connection, so fall back to the same
+                        // no-profile picker state avatarLoaded uses, rather
+                        // than resurrecting a "child" default.
+                        send(.chooseProfile(list: [], kids: []), on: connection)
+                        return
                     }
-                    let fallbackManager = memoryManagers[id]!
-                    send(.profiles(list: fallbackManager.listProfiles(), active: fallbackManager.slug), on: connection)
+                    let nextManager = MemoryManager(profilesDir: Self.profilesDir(), slug: nextSlug)
+                    let fallback = nextManager.load() ?? ChildMemory(profile: ChildProfile(name: nextSlug))
+                    memoryManagers[id] = nextManager
+                    memories[id] = fallback
+                    send(.profiles(list: nextManager.listProfiles(), active: nextManager.slug, kids: kidsInfo(for: nextManager.listProfiles())), on: connection)
                     send(.memoryLoaded(name: fallback.profile.name, age: fallback.profile.age, language: fallback.profile.language, level: fallback.profile.level), on: connection)
                     send(.initMessage(level: fallback.profile.level, language: fallback.profile.language), on: connection)
                     sendSettings(for: connection)
-                    loadTranscript(slug: fallbackManager.slug, for: connection)
+                    loadTranscript(slug: nextManager.slug, for: connection)
                 } else if let activeManager = memoryManagers[id] {
-                    send(.profiles(list: activeManager.listProfiles(), active: activeManager.slug), on: connection)
+                    send(.profiles(list: activeManager.listProfiles(), active: activeManager.slug, kids: kidsInfo(for: activeManager.listProfiles())), on: connection)
                 }
             }
             // No `default:` — every ClientMessage case is already handled
@@ -802,98 +806,14 @@ public final class NovaWebSocketServer: ObservableObject {
         send(.state(machine.state), on: connection)
     }
 
-    /// Loads the connection's active profile (creating one on first run) —
-    /// mirrors `app/server.py` loading the default child profile right after
-    /// connect. Returns whether a profile file already existed (`false`
-    /// means this is a brand-new profile that still needs spoken onboarding,
-    /// per `app/server.py`'s "no profile file exists" trigger).
-    private func loadOrCreateDefaultProfile(for connection: NWConnection) -> (memory: ChildMemory, isNew: Bool) {
-        let id = ObjectIdentifier(connection)
-        if let existing = memories[id] { return (existing, false) }
-
-        let manager = MemoryManager(profilesDir: Self.profilesDir(), slug: "child")
-        memoryManagers[id] = manager
-        if let existing = manager.load() {
-            memories[id] = existing
-            return (existing, false)
-        }
-        // Not saved yet — onboarding (startOnboarding) fills in the real
-        // name/age and saves once both turns complete, mirroring
-        // _run_onboarding's mem_mgr.save(memory) at the end, not before.
-        let placeholder = ChildMemory(profile: ChildProfile(name: "child"))
-        memories[id] = placeholder
-        return (placeholder, true)
-    }
-
-    /// Kicks off the two-turn spoken onboarding — port of `_run_onboarding`.
-    /// Speaks the "what's your name?" question directly via `ttsEngine`
-    /// (onboarding has its own explicit state sends in the Python original
-    /// rather than going through the general session state machine).
-    private func startOnboarding(for connection: NWConnection) {
-        let id = ObjectIdentifier(connection)
-        onboardingSteps[id] = .askingName
-        send(.onboardingStart, on: connection)
-        speakOnboardingPrompt(systemText("onboarding_ask_name", language: "en", ["avatar": "Nova"]), on: connection)
-    }
-
-    private func speakOnboardingPrompt(_ text: String, on connection: NWConnection) {
-        send(.state(.speaking), on: connection)
-        send(.sentence(text: text, textHtml: nil), on: connection)
-        ttsEngine.speak(text, language: "en") { [weak self] amplitude in
-            self?.send(.amplitude(value: amplitude), on: connection)
-        } onFinish: { [weak self] in
-            self?.send(.state(.idle), on: connection)
-        }
-    }
-
-    /// Handles one onboarding turn's transcript — advances from asking the
-    /// name to asking the age, or (after age) finalizes the real profile and
-    /// sends the normal post-connect profiles/memory_loaded/init sequence,
-    /// exactly mirroring `_run_onboarding`'s two `_one_ptt_turn` calls.
-    private func continueOnboarding(transcript: String?, step: OnboardingStep, connection: NWConnection) {
-        let id = ObjectIdentifier(connection)
-        switch step {
-        case .askingName:
-            let name = transcript.flatMap { extractName(from: $0) } ?? "Friend"
-            onboardingNames[id] = name
-            onboardingSteps[id] = .askingAge
-            speakOnboardingPrompt(systemText("onboarding_ask_age", language: "en", ["name": name]), on: connection)
-        case .askingAge:
-            let age = transcript.flatMap { extractAge(from: $0) }
-            let name = onboardingNames[id] ?? "Friend"
-            onboardingNames.removeValue(forKey: id)
-            onboardingSteps.removeValue(forKey: id)
-
-            let memory = ChildMemory(profile: ChildProfile(name: name, age: age))
-            memoryManagers[id]?.save(memory)
-            memories[id] = memory
-
-            guard let manager = memoryManagers[id] else { return }
-            send(.profiles(list: manager.listProfiles(), active: manager.slug), on: connection)
-            send(.memoryLoaded(name: memory.profile.name, age: memory.profile.age, language: memory.profile.language, level: memory.profile.level), on: connection)
-            send(.initMessage(level: memory.profile.level, language: memory.profile.language), on: connection)
-            sendSettings(for: connection)
-            loadTranscript(slug: manager.slug, for: connection)
-            // completeOnboarding() (NovaCore, TDD'd) unconditionally resets
-            // to .idle rather than reading the machine's *current* state —
-            // onboarding never routed through it (see .pttStop's onboarding
-            // branch), so it was sitting untouched at .listening since the
-            // very first .pttStart of this onboarding flow. Reading that
-            // stale value directly used to leave the client stuck showing
-            // "Listening…" forever, silently blocking every subsequent PTT
-            // press (its own state-gating never saw the "idle" it needed).
-            var freshMachine = stateMachines[id] ?? SessionStateMachine()
-            freshMachine.completeOnboarding()
-            stateMachines[id] = freshMachine
-            send(.state(freshMachine.state), on: connection)
-        }
-    }
-
     /// Handles `switch_profile` — loads an existing profile by slug, or (when
-    /// `language`/`level` are supplied, mirroring the "create from the modal"
-    /// path in app/server.py) creates a new one. Re-sanitizes the slug the
-    /// same way `MemoryManager` itself does, so a crafted slug can't escape
-    /// the profiles directory.
+    /// `language`/`level` are supplied, matching the profile-picker's "new
+    /// kid" form, or any missing language defaulting to "en") creates one.
+    /// Re-sanitizes the slug the same way `MemoryManager` itself does, so a
+    /// crafted slug can't escape the profiles directory. A name that
+    /// sanitizes to an empty slug (no ASCII letters/digits, e.g. "李明") is
+    /// rejected with `profile_error` rather than silently collapsing onto a
+    /// shared "child" profile — see the root CLAUDE.md's `name_to_slug` note.
     ///
     /// `machine` is `dispatch`'s own `inout` parameter, not a fresh
     /// `stateMachines[id]` lookup — this used to write straight to
@@ -909,21 +829,43 @@ public final class NovaWebSocketServer: ObservableObject {
     /// connect") — mutating the same `inout` the caller already sends from
     /// achieves the same thing without a second explicit send.
     private func switchProfile(slug rawSlug: String, language: String?, level: String?, machine: inout SessionStateMachine, for connection: NWConnection) {
+        // `profileSlug` (not plain `nameToSlug`) so a name with no ASCII
+        // letters/digits at all (e.g. "はな") still gets a real slug (C1)
+        // instead of being rejected outright — it only falls through to
+        // `nameToSlug`'s own empty-fallback rejection for genuinely empty or
+        // punctuation-only input.
+        guard let safeSlug = profileSlug(forName: rawSlug) else {
+            send(.profileError(message: "Please use letters or numbers in the name."), on: connection)
+            return
+        }
+        let manager = MemoryManager(profilesDir: Self.profilesDir(), slug: safeSlug)
+
+        // `language` present is the "create a new kid" intent (the picker's
+        // new-kid form / settings "+" flow); picking an existing kid sends
+        // only `slug`. A duplicate name under that intent must not silently
+        // open the existing kid (I2) — reject it and leave this connection's
+        // state untouched, rather than advancing past the checks below.
+        if language != nil, let existing = manager.load() {
+            send(.profileError(message: "There's already a kid called \(existing.profile.name). Tap their name to continue."), on: connection)
+            return
+        }
+
         let id = ObjectIdentifier(connection)
         generationGuard(for: connection).advance()
         hasGreeted.removeValue(forKey: id)
         conversationHistories.removeValue(forKey: id)
-        let safeSlug = nameToSlug(rawSlug, fallback: "child")
-        let manager = MemoryManager(profilesDir: Self.profilesDir(), slug: safeSlug)
 
         let memory: ChildMemory
         if let existing = manager.load() {
             memory = existing
-        } else if let language, let level {
-            memory = ChildMemory(profile: ChildProfile(name: safeSlug, language: language, level: level))
-            manager.save(memory)
         } else {
-            memory = ChildMemory(profile: ChildProfile(name: safeSlug))
+            let displayName = rawSlug.trimmingCharacters(in: .whitespacesAndNewlines)
+            let resolvedLanguage = language ?? "en"
+            let resolvedLevel = level ?? Levels.defaultLevel(for: resolvedLanguage)
+            memory = ChildMemory(profile: ChildProfile(
+                name: displayName.isEmpty ? safeSlug : displayName,
+                language: resolvedLanguage, level: resolvedLevel
+            ))
             manager.save(memory)
         }
 
@@ -931,23 +873,11 @@ public final class NovaWebSocketServer: ObservableObject {
         memories[id] = memory
         machine = SessionStateMachine()
 
-        send(.profiles(list: manager.listProfiles(), active: manager.slug), on: connection)
+        send(.profiles(list: manager.listProfiles(), active: manager.slug, kids: kidsInfo(for: manager.listProfiles())), on: connection)
         send(.memoryLoaded(name: memory.profile.name, age: memory.profile.age, language: memory.profile.language, level: memory.profile.level), on: connection)
         send(.initMessage(level: memory.profile.level, language: memory.profile.language), on: connection)
         sendSettings(for: connection)
         loadTranscript(slug: manager.slug, for: connection)
-    }
-
-    /// Onboarding counterpart to `transcribeAndContinue` — same off-main-actor
-    /// whisper_full call, but hands the result to `continueOnboarding`
-    /// instead of the LLM reply flow.
-    private func transcribeForOnboarding(samples: [Float], engine: WhisperEngine, step: OnboardingStep, connection: NWConnection) {
-        Task.detached {
-            let text = try? engine.transcribe(samples: samples, language: "en")
-            await MainActor.run { [weak self] in
-                self?.continueOnboarding(transcript: text, step: step, connection: connection)
-            }
-        }
     }
 
     /// Runs whisper_full off the main actor (it's a blocking C call) and,
@@ -965,7 +895,10 @@ public final class NovaWebSocketServer: ObservableObject {
                 let id = ObjectIdentifier(connection)
                 var machine = self.stateMachines[id] ?? SessionStateMachine()
                 let trimmed = text?.trimmingCharacters(in: .whitespaces)
-                let hasText = trimmed?.isEmpty == false
+                // Whisper emits annotations like "[Music]"/"(音楽)" on silence
+                // instead of an empty string (I5) — those must not be treated
+                // as something the child said.
+                let hasText = trimmed.map { !$0.isEmpty && !isNonSpeechTranscript($0) } ?? false
                 machine.transcribed(hasText ? trimmed : nil)
                 self.stateMachines[id] = machine
                 if hasText, let trimmed {
@@ -976,8 +909,36 @@ public final class NovaWebSocketServer: ObservableObject {
 
                 if hasText, let trimmed, let llama = self.llamaEngine {
                     self.replyAndContinue(userMessage: trimmed, engine: llama, connection: connection)
+                } else if !hasText {
+                    self.speakDidntCatch(for: connection)
                 }
             }
+        }
+    }
+
+    /// Speaks the "didn't catch that" line and returns the session to idle
+    /// once it finishes — port of app/server.py's empty-transcript path
+    /// (lines ~1179-1188). Reached both when STT returns nothing and when
+    /// `ptt_stop` had too little audio to even attempt STT
+    /// (`SessionStateMachine.pttStop`/`transcribed` already moved the state
+    /// to `.didntCatch` in both cases before this is called).
+    private func speakDidntCatch(for connection: NWConnection) {
+        let id = ObjectIdentifier(connection)
+        let language = memories[id]?.profile.language ?? "en"
+        let sorry = systemText("sorry", language: language, [:])
+        let textHtml = furiganaFormatter().annotateFor(sorry, language: language)
+        send(.sentence(text: sorry, textHtml: textHtml), on: connection)
+
+        speechInterrupted = false
+        speak(sorry, language: language) { [weak self] amplitude in
+            self?.send(.amplitude(value: amplitude), on: connection)
+        } onFinish: { [weak self] in
+            guard let self else { return }
+            self.send(.amplitude(value: 0.0), on: connection)
+            var machine = self.stateMachines[id] ?? SessionStateMachine()
+            machine.didntCatchAcknowledged()
+            self.stateMachines[id] = machine
+            self.send(.state(machine.state), on: connection)
         }
     }
 
@@ -1003,11 +964,12 @@ public final class NovaWebSocketServer: ObservableObject {
         let systemPrompt = builder.build()
         // Port of app/pipeline/llm.py's rolling `_history`: prior exchanges
         // (this session only — cross-session context is `ChildMemory`'s job)
-        // formatted ahead of the new turn's cue, so Nova can refer back to
-        // what was just said instead of starting fresh every single turn.
-        let historyText = conversationHistories[ObjectIdentifier(connection)]?.formatted() ?? ""
-        let historyBlock = historyText.isEmpty ? "" : "\(historyText)\n"
-        let prompt = "\(systemPrompt)\n\n\(historyBlock)Child: \(userMessage)\nNova:"
+        // sent as their own role-tagged messages ahead of the new turn, so
+        // Nova can refer back to what was just said instead of starting
+        // fresh every single turn. Real chat-template messages, not a flat
+        // string — see `buildChatMessages`/`LlamaBridge`.
+        let history = conversationHistories[ObjectIdentifier(connection)] ?? ConversationHistory()
+        let messages = buildChatMessages(systemPrompt: systemPrompt, history: history, userMessage: userMessage)
         let generationToken = generationGuard(for: connection).currentToken()
 
         Task.detached {
@@ -1019,14 +981,18 @@ public final class NovaWebSocketServer: ObservableObject {
             // `@escaping` (not `@Sendable`) closure that the compiler's
             // conservative concurrency checker can't prove is single-threaded.
             nonisolated(unsafe) var sentences: [String] = []
-            try? engine.generate(prompt: prompt) { sentence in sentences.append(sentence) }
+            do {
+                try engine.generate(messages: messages) { sentence in sentences.append(sentence) }
+            } catch {
+                Diagnostics.log("llm_generation_failed", ["caller": "reply"])
+            }
             await MainActor.run { [weak self] in
                 guard let self else { return }
                 self.generationGuard(for: connection).apply(generationToken) {
                     self.speechInterrupted = false
                     self.speakSentences(sentences, index: 0, language: language, connection: connection)
                     let turnId = self.recordTurn(transcript: userMessage, replySentences: sentences, language: language, connection: connection)
-                    self.extractMemory(transcript: userMessage, replySentences: sentences, engine: engine, connection: connection, token: generationToken, turnId: turnId)
+                    self.extractMemory(transcript: userMessage, replySentences: sentences, engine: engine, language: language, connection: connection, token: generationToken, turnId: turnId)
                     if !sentences.isEmpty {
                         let id = ObjectIdentifier(connection)
                         var history = self.conversationHistories[id] ?? ConversationHistory()
@@ -1078,11 +1044,11 @@ public final class NovaWebSocketServer: ObservableObject {
     /// not done here). Silent on any failure (no engine, empty reply) —
     /// matches the "never blocks the conversation" guarantee
     /// `MemoryExtractor.extract` provides on desktop.
-    private func extractMemory(transcript: String, replySentences: [String], engine: LlamaEngine, connection: NWConnection, token: GenerationGuard.Token, turnId: Int?) {
+    private func extractMemory(transcript: String, replySentences: [String], engine: LlamaEngine, language: String, connection: NWConnection, token: GenerationGuard.Token, turnId: Int?) {
         guard !replySentences.isEmpty else { return }
         let fullReply = replySentences.joined(separator: " ")
         Task.detached { [weak self] in
-            let result = MemoryExtractor.extract(transcript: transcript, reply: fullReply, engine: engine)
+            let result = MemoryExtractor.extract(transcript: transcript, reply: fullReply, engine: engine, language: language)
             await MainActor.run { [weak self] in
                 guard let self else { return }
                 // Re-checked after the extraction call itself (a second,
@@ -1127,11 +1093,19 @@ public final class NovaWebSocketServer: ObservableObject {
         let language = profile.language
         let ageNote = ageSuffix(profile.age, language: language)
         let text: String
-        if let recentTopic = memories[id]?.topics.max(by: { $0.lastMentioned < $1.lastMentioned })?.keyword {
+        let hasTalkedBefore = !(memories[id]?.topics.isEmpty ?? true) || (convTurnIds[id] ?? 0) > 0
+        if !hasTalkedBefore {
+            text = systemText("greeting_new", language: language, ["name": profile.name, "avatar": "Nova"])
+        } else if let recentTopic = memories[id]?.topics.max(by: { $0.lastMentioned < $1.lastMentioned })?.keyword {
             text = systemText("greeting_returning_topic", language: language, ["name": profile.name, "age_suffix": ageNote, "topic": recentTopic])
         } else {
             text = systemText("greeting_returning", language: language, ["name": profile.name, "age_suffix": ageNote])
         }
+        // Nova-only turn (you: "") so the greeting shows in the Conversation
+        // panel and survives reconnect via TranscriptStore, same as any other
+        // reply (I7). Recorded before speaking, using the pre-increment
+        // `hasTalkedBefore` computed above.
+        recordTurn(transcript: "", replySentences: [text], language: language, connection: connection)
         replay(text, for: connection)
     }
 

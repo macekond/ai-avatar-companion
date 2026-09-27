@@ -13,6 +13,8 @@ import './style.css'
 import * as THREE from 'three'
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'
 import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm'
+import { displayName, findKid, kidName, kidLabel, kidLanguage, languageName } from './kids.js'
+import { iosLabelsFor } from './ios-labels.js'
 
 // This same bundle is hosted by both the Tauri desktop shell and the iOS app
 // (over NovaSchemeHandler's custom `nova-app://` scheme, chosen specifically
@@ -39,9 +41,12 @@ const STATE_LABELS = {
 }
 // iOS has no Space key — #ptt-btn (see index.html/style.css) is the only
 // affordance there, so its own label already says what to do; overriding
-// just the 'idle' text avoids a leftover desktop-only instruction that
-// doesn't apply and would otherwise sit right above the mic button.
-const STATE_LABELS_IOS = { ...STATE_LABELS, idle: '' }
+// 'idle' avoids a leftover desktop-only instruction that doesn't apply.
+// listening/thinking/didnt_catch come from ios-labels.js, localised to the
+// ACTIVE KID's practice language (see setActiveLanguage / iosStateLabels).
+function iosStateLabels() {
+  return { ...STATE_LABELS, idle: '', ...iosLabelsFor(activeLanguage).state }
+}
 
 // Body classes applyState() toggles for background tint (see body.listening
 // etc. in style.css) — kept to just these, and removed/added individually,
@@ -235,7 +240,7 @@ function applyState(newState) {
   if (newState !== 'idle' && newState !== 'speaking') document.body.classList.add(newState)
 
   // State label
-  const labels = document.body.classList.contains('ios-native') ? STATE_LABELS_IOS : STATE_LABELS
+  const labels = document.body.classList.contains('ios-native') ? iosStateLabels() : STATE_LABELS
   labelEl.textContent = labels[newState] ?? ''
 
   // Start-button: visible only while parked in awaiting_start.
@@ -409,7 +414,7 @@ function pickSetupTip() {
   return tip
 }
 
-function showSetupOverlay(phase, detail) {
+function showSetupOverlay(phase, detail, progress) {
   const info = SETUP_MESSAGES[phase] || {
     title: 'Setting up…', body: detail || '', spinner: true,
   }
@@ -429,6 +434,9 @@ function showSetupOverlay(phase, detail) {
         <h2 style="margin:0 0 12px;font-size:1.4rem"></h2>
         <p style="margin:0;line-height:1.5"></p>
         <p class="setup-detail" style="margin-top:16px;font-size:0.85rem;opacity:0.7"></p>
+        <div class="setup-progress" style="display:none;margin:12px auto 0;max-width:320px;height:10px;border-radius:5px;background:#f0d9c8;overflow:hidden">
+          <div class="setup-progress-fill" style="height:100%;width:0;background:#d98a5f;transition:width 0.25s ease"></div>
+        </div>
         <div class="setup-tip" style="font-size:0.85rem;color:rgba(90,60,40,0.6);margin-top:20px;min-height:1.4em"></div>
         <div class="setup-credits" style="margin-top:36px;font-size:0.72rem;line-height:1.5;color:rgba(90,60,40,0.55)">
           Avatar: <em>VIPE Hero #2707</em> by
@@ -438,6 +446,8 @@ function showSetupOverlay(phase, detail) {
           Alt avatar: <em>Olivia</em> by Polygonal Mind, CC0.
         </div>
       </div>`
+    // Opaque on iOS: the profile picker sits right underneath and would ghost through.
+    if (document.body.classList.contains('ios-native')) setupOverlayEl.style.background = 'rgb(255,250,244)'
     document.body.appendChild(setupOverlayEl)
     setupTitleEl = setupOverlayEl.querySelector('h2')
     setupBodyEl = setupOverlayEl.querySelector('p')
@@ -450,9 +460,17 @@ function showSetupOverlay(phase, detail) {
       if (setupTipEl) setupTipEl.textContent = pickSetupTip()
     }, 4000)
   }
-  setupOverlayEl.querySelector('.setup-spinner').style.display = info.spinner ? '' : 'none'
+  // Only the iOS server sends a numeric progress (the current file's fraction); it replaces the spinner.
+  const hasProgress = typeof progress === 'number'
+  setupOverlayEl.querySelector('.setup-spinner').style.display = info.spinner && !hasProgress ? '' : 'none'
+  setupOverlayEl.querySelector('.setup-progress').style.display = hasProgress ? '' : 'none'
+  if (hasProgress) {
+    setupOverlayEl.querySelector('.setup-progress-fill').style.width = Math.round(Math.min(1, Math.max(0, progress)) * 100) + '%'
+  }
   setupTitleEl.innerHTML = info.title
-  setupBodyEl.innerHTML = info.body
+  setupBodyEl.innerHTML = (phase === 'downloading_models' && document.body.classList.contains('ios-native'))
+    ? 'The first run downloads about 2 GB of voice and language models. This only happens once.'
+    : info.body
   // Used to be gated to phase === 'ollama_missing' only, which meant the
   // server's own "42% · 210 / 500 MB" detail string for downloading_models
   // was computed and sent every time but never actually shown — the spinner
@@ -521,27 +539,47 @@ function connectWS() {
         markServerReady()
         break
       case 'profiles':
-        renderProfileSelector(msg.list, msg.active)
-        noteActiveKid(msg.active)
+        renderProfileSelector(msg.list, msg.active, msg.kids)
+        noteActiveKid(msg.active, msg.kids)
         // After '+' added a kid, open their detail once the server confirms
         // the profile file exists (i.e. the slug is now in the list).
         if (pendingOpenDetailForNewSlug && msg.list.includes(msg.active)) {
           pendingOpenDetailForNewSlug = false
+          // The iOS add-flow hid Settings to show the picker (see the '+'
+          // handler in renderProfileSelector) — bring it back now that the
+          // new kid's detail is ready. No-op on desktop, which never hid it.
+          if (document.body.classList.contains('ios-native')) toggleSettings(true)
           openKidDetail(msg.active)
         }
         break
       case 'profile_error':
         showToast(msg.message)
-        // A refused delete lands us back on the still-existing kid — reopen
-        // their detail so the user isn't left staring at the kids picker
-        // thinking "did that work?".
-        if (currentDetailSlug === null && knownActive) openKidDetail(knownActive)
+        // Also surface it inline in the picker form (invisible-toast bug:
+        // the toast used to render behind the full-screen picker on iOS) —
+        // impossible to miss whether or not the toast is visible.
+        if (profilePickerEl && !profilePickerEl.hidden) {
+          profilePickerEl._picker.showFormError(msg.message)
+        } else if (currentDetailSlug === null && knownActive) {
+          // A refused delete lands us back on the still-existing kid — reopen
+          // their detail so the user isn't left staring at the kids picker
+          // thinking "did that work?".
+          openKidDetail(knownActive)
+        }
+        break
+      case 'choose_profile':
+        // iOS-only: sent instead of auto-creating a profile when no kid is
+        // active yet for this connection (see NovaWebSocketServer). Desktop
+        // never sends this message.
+        showProfilePicker(msg.list, msg.kids)
         break
       case 'memory_loaded':
         // Real display name for the active kid — nicer than a Title-cased slug.
         lastMemoryName = msg.name
-        activeKidEl.textContent = msg.name
+        // previousActiveSlug was set by the 'profiles' broadcast that always
+        // precedes this message (see noteActiveKid) — it's the active slug.
+        activeKidEl.textContent = activeKidPillLabel(previousActiveSlug, msg.name)
         activeKidEl.hidden = false
+        hideProfilePicker()
         break
       case 'onboarding_start':
         applyState('idle')
@@ -563,7 +601,7 @@ function connectWS() {
         if (msg.phase === 'ready') {
           markServerReady()
         } else {
-          showSetupOverlay(msg.phase, msg.detail)
+          showSetupOverlay(msg.phase, msg.detail, msg.progress)
         }
         break
       case 'settings':
@@ -610,6 +648,204 @@ function wsSend(data) {
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify(data))
   }
+}
+
+// ── iOS profile picker (choose_profile) ─────────────────────────────────
+// Full-screen overlay shown instead of the old spoken onboarding whenever no
+// profile is active yet for this connection. Only ever triggered by the
+// 'choose_profile' message, which the desktop server never sends, so this
+// is iOS-only in effect even though the DOM/CSS aren't behind a runtime
+// platform check beyond the CSS being scoped to body.ios-native.
+let profilePickerEl = null
+
+function buildProfilePicker() {
+  const overlay = document.createElement('div')
+  overlay.id = 'profile-picker'
+  overlay.hidden = true
+
+  const card = document.createElement('div')
+  card.className = 'profile-picker-card'
+  overlay.appendChild(card)
+
+  const heading = document.createElement('h2')
+  heading.className = 'profile-picker-heading'
+  card.appendChild(heading)
+
+  const kidsList = document.createElement('div')
+  kidsList.className = 'profile-picker-kids'
+  card.appendChild(kidsList)
+
+  const addBtn = document.createElement('button')
+  addBtn.type = 'button'
+  addBtn.className = 'profile-picker-add'
+  addBtn.textContent = '＋ New kid'
+  card.appendChild(addBtn)
+
+  const form = document.createElement('div')
+  form.className = 'profile-picker-form'
+  form.hidden = true
+  card.appendChild(form)
+
+  // Shown while the picker is open, so an invalid/duplicate name
+  // (profile_error) is impossible to miss — see showFormError. The toast
+  // for the same message is also raised above the picker on iOS (style.css).
+  const errorEl = document.createElement('p')
+  errorEl.className = 'profile-picker-error'
+  errorEl.hidden = true
+  form.appendChild(errorEl)
+
+  const nameInput = document.createElement('input')
+  nameInput.type = 'text'
+  nameInput.placeholder = "Child's name"
+  nameInput.className = 'profile-picker-name'
+  // iOS autocorrect once offered to silently replace a kid's typed name
+  // ("Lily") with an unrelated dictionary word — a name isn't a typo to fix.
+  nameInput.autocomplete = 'off'
+  nameInput.autocorrect = 'off'
+  nameInput.autocapitalize = 'words'
+  nameInput.spellcheck = false
+  form.appendChild(nameInput)
+
+  const langRow = document.createElement('div')
+  langRow.className = 'profile-picker-langs'
+  form.appendChild(langRow)
+
+  const enBtn = document.createElement('button')
+  enBtn.type = 'button'
+  enBtn.className = 'profile-picker-lang'
+  enBtn.textContent = 'English'
+  enBtn.dataset.lang = 'en'
+  langRow.appendChild(enBtn)
+
+  const jaBtn = document.createElement('button')
+  jaBtn.type = 'button'
+  jaBtn.className = 'profile-picker-lang'
+  jaBtn.textContent = '日本語'
+  jaBtn.lang = 'ja'
+  jaBtn.dataset.lang = 'ja'
+  langRow.appendChild(jaBtn)
+
+  const langBtns = [enBtn, jaBtn]
+  let selectedLang = null
+  function selectLang(btn) {
+    selectedLang = btn.dataset.lang
+    langBtns.forEach(b => b.classList.toggle('active', b === btn))
+    updateStartEnabled()
+  }
+  enBtn.addEventListener('click', () => selectLang(enBtn))
+  jaBtn.addEventListener('click', () => selectLang(jaBtn))
+
+  const startBtn = document.createElement('button')
+  startBtn.type = 'button'
+  startBtn.className = 'profile-picker-start'
+  startBtn.textContent = 'Start'
+  startBtn.disabled = true
+  form.appendChild(startBtn)
+
+  // Only shown in 'add' mode (opened from the settings '+' — see
+  // renderProfileSelector) — returns to the app without sending anything.
+  // The mandatory 'choose' mode (from the server's choose_profile) has no
+  // way out, same as before.
+  const cancelBtn = document.createElement('button')
+  cancelBtn.type = 'button'
+  cancelBtn.className = 'profile-picker-cancel'
+  cancelBtn.textContent = '← Cancel'
+  cancelBtn.hidden = true
+  form.appendChild(cancelBtn)
+
+  function updateStartEnabled() {
+    startBtn.disabled = !(nameInput.value.trim() && selectedLang)
+  }
+  function hideFormError() {
+    errorEl.hidden = true
+    errorEl.textContent = ''
+  }
+  function showFormError(message) {
+    errorEl.textContent = message
+    errorEl.hidden = false
+  }
+  nameInput.addEventListener('input', () => { updateStartEnabled(); hideFormError() })
+
+  addBtn.addEventListener('click', () => {
+    addBtn.hidden = true
+    form.hidden = false
+    nameInput.focus()
+  })
+
+  startBtn.addEventListener('click', () => {
+    const name = nameInput.value.trim()
+    if (!name || !selectedLang) return
+    hideFormError()
+    wsSend({ type: 'switch_profile', slug: name, language: selectedLang })
+  })
+
+  let onCancel = null
+  cancelBtn.addEventListener('click', () => {
+    const cb = onCancel
+    hideProfilePicker()
+    if (cb) cb()
+  })
+
+  overlay._picker = {
+    heading, kidsList, addBtn, form, nameInput, langBtns, cancelBtn, errorEl,
+    resetSelection: () => { selectedLang = null; updateStartEnabled() },
+    hideFormError, showFormError,
+    setOnCancel: (cb) => { onCancel = cb },
+  }
+  document.body.appendChild(overlay)
+  return overlay
+}
+
+// mode: 'choose' (default) — the mandatory server-driven picker, no way out;
+// 'add' — opened from the settings '+' (iOS only), shows the form directly
+// with a Cancel button that runs `onCancel` (reopens Settings) instead of
+// sending anything.
+function showProfilePicker(list, kids, { mode = 'choose', onCancel = null } = {}) {
+  if (!profilePickerEl) profilePickerEl = buildProfilePicker()
+  const el = profilePickerEl
+  const { heading, kidsList, addBtn, form, nameInput, langBtns, cancelBtn,
+          resetSelection, hideFormError, setOnCancel } = el._picker
+
+  hideFormError()
+  setOnCancel(onCancel)
+
+  const isAdd = mode === 'add'
+  heading.textContent = isAdd ? 'Add a new kid' : 'Who’s practising today?'
+  cancelBtn.hidden = !isAdd
+
+  kidsList.textContent = ''
+  kidsList.hidden = isAdd
+  list.forEach(slug => {
+    const btn = document.createElement('button')
+    btn.type = 'button'
+    btn.className = 'profile-picker-kid'
+    btn.textContent = kidLabel(slug, kids)
+    btn.addEventListener('click', () => {
+      wsSend({ type: 'switch_profile', slug })
+    })
+    kidsList.appendChild(btn)
+  })
+
+  nameInput.value = ''
+  resetSelection()
+  langBtns.forEach(b => b.classList.remove('active'))
+  // No existing kids (choose mode), or add mode: skip '+ New kid' and show
+  // the form directly.
+  const hasKids = list.length > 0 && !isAdd
+  addBtn.hidden = !hasKids
+  form.hidden = hasKids
+
+  el.classList.remove('fade')
+  el.hidden = false
+  if (!hasKids) nameInput.focus()
+}
+
+function hideProfilePicker() {
+  if (!profilePickerEl) return
+  const el = profilePickerEl
+  profilePickerEl = null
+  el.classList.add('fade')
+  setTimeout(() => el.remove(), 400)
 }
 
 // ── Keyboard PTT ──────────────────────────────────────────────────────────
@@ -813,9 +1049,15 @@ function addConversationTurn(id, you, nova, youHtml, novaHtml) {
   const turn = document.createElement('div')
   turn.className = 'turn'
 
-  const youEl = document.createElement('div')
-  youEl.className = 'turn-you'
-  youEl.append(tag('You'), inlineTextNode(you, youHtml))
+  // A Nova-only turn (the opening greeting) arrives with an empty `you` —
+  // don't render an empty "You" line for it.
+  const hasYou = Boolean(you) || Boolean(youHtml)
+  let youEl = null
+  if (hasYou) {
+    youEl = document.createElement('div')
+    youEl.className = 'turn-you'
+    youEl.append(tag('You'), inlineTextNode(you, youHtml))
+  }
 
   const novaEl = document.createElement('div')
   novaEl.className = 'turn-nova'
@@ -823,7 +1065,8 @@ function addConversationTurn(id, you, nova, youHtml, novaHtml) {
   // do with <ruby> markup, and it would be spoken as literal characters.
   novaEl.append(tag('Nova'), inlineTextNode(nova, novaHtml), replayButton(nova))
 
-  turn.append(youEl, novaEl)
+  if (youEl) turn.append(youEl, novaEl)
+  else turn.append(novaEl)
   transcriptListEl.appendChild(turn)
   transcriptListEl.scrollTop = transcriptListEl.scrollHeight
 
@@ -883,12 +1126,24 @@ function applyContentLanguage(language) {
   })
 }
 
+// Localise the kid-facing controls to the active kid's practice language —
+// iOS only; desktop keeps the English copy baked into index.html. Simple
+// hiragana-first Japanese a beginner can read, not literal translation.
+function applyIosKidLabels(language) {
+  if (!document.body.classList.contains('ios-native')) return
+  const labels = iosLabelsFor(language)
+  startBtnEl.textContent = labels.start
+  pttBtnEl.textContent = labels.ptt
+  replayLastEl.textContent = labels.replay
+}
+
 function setActiveLanguage(language) {
   activeLanguage = language || 'en'
   languageBtns.forEach(btn => {
     btn.classList.toggle('active', btn.dataset.language === activeLanguage)
   })
   applyContentLanguage(activeLanguage)
+  applyIosKidLabels(activeLanguage)
 }
 
 languageBtns.forEach(btn => {
@@ -1165,27 +1420,38 @@ window.addEventListener('keydown', (e) => {
 // ── Profile selector ──────────────────────────────────────────────
 const profileSelectorEl = document.getElementById('profile-selector')
 
-function displayName(slug) {
-  // Capitalize slug (underscores → spaces): mia_rose → Mia Rose
-  return slug.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
-}
-
 // ── Active-kid pill (top chrome) ───────────────────────────────────
 const activeKidEl = document.getElementById('active-kid')
 let previousActiveSlug = null   // for detecting a real switch vs. first load
 let lastMemoryName = null       // most recent real name from 'memory_loaded'
 
+// "Hana · 日本語" on iOS (I9 — show the active language); plain `name` on
+// desktop, unchanged. `slug` looks up the kid's language in knownKids; falls
+// back to the app's current active language when kids don't carry one.
+function activeKidPillLabel(slug, name) {
+  if (!document.body.classList.contains('ios-native')) return name
+  const lang = kidLanguage(slug, knownKids) || activeLanguage
+  const langName = languageName(lang)
+  return langName ? `${name} · ${langName}` : name
+}
+
 // Called whenever a 'profiles' broadcast reveals the active slug. Fills in
 // the pill if 'memory_loaded' hasn't beaten us to it yet, and toasts on an
 // actual switch (never on the first-ever profile load).
-function noteActiveKid(slug) {
+function noteActiveKid(slug, kids) {
   if (!slug) return
+  const kid = findKid(slug, kids)
+  const name = kid ? kid.name : displayName(slug)
   if (activeKidEl.hidden) {
-    activeKidEl.textContent = displayName(slug)
+    activeKidEl.textContent = activeKidPillLabel(slug, name)
     activeKidEl.hidden = false
   }
   if (previousActiveSlug !== null && previousActiveSlug !== slug) {
-    showToast(`👋 Switched to ${lastMemoryName || displayName(slug)}`, { duration: 1800 })
+    // `kids` (iOS) gives the new kid's real name synchronously, fixing the
+    // long-standing bug where this toast showed the PREVIOUS kid's name
+    // (profiles arrives before memory_loaded). Without it (desktop), fall
+    // back to whatever memory_loaded last told us — same as before.
+    showToast(`👋 Switched to ${kid ? kid.name : (lastMemoryName || displayName(slug))}`, { duration: 1800 })
   }
   previousActiveSlug = slug
 }
@@ -1209,16 +1475,30 @@ let lastSettingsMsg = null
 // title the panel with the active kid's name.
 let knownProfiles = []
 let knownActive = null
+// The iOS server's optional per-kid {slug, name, language} list — see
+// ios-labels.js/kids.js. Empty on desktop, which never sends it.
+let knownKids = []
 
-function renderProfileSelector(profiles, activeSlug) {
+// Real name from knownKids on iOS (fixes unreadable slugs like kid1a2b3c4d
+// for Japanese-script names — see kids.js); the title-cased slug elsewhere.
+function kidDisplayName(slug) {
+  return document.body.classList.contains('ios-native')
+    ? kidName(slug, knownKids) : displayName(slug)
+}
+
+function renderProfileSelector(profiles, activeSlug, kids) {
   knownProfiles = profiles.slice()
   knownActive = activeSlug
+  knownKids = kids || []
   profileSelectorEl.innerHTML = ''
 
+  const isIos = document.body.classList.contains('ios-native')
   profiles.forEach(slug => {
     const btn = document.createElement('button')
     btn.className = 'chip' + (slug === activeSlug ? ' active' : '')
-    btn.textContent = displayName(slug)
+    // "Hana · 日本語" on iOS when kids data is available; plain title-cased
+    // slug otherwise (desktop, or a slug missing from `kids`).
+    btn.textContent = isIos ? kidLabel(slug, knownKids) : displayName(slug)
     btn.dataset.slug = slug
     // A kid chip is now the entry point to that kid's DETAIL view: clicking
     // switches to them (if they're not already active) AND opens the detail
@@ -1239,6 +1519,22 @@ function renderProfileSelector(profiles, activeSlug) {
   addBtn.textContent = '+'
   addBtn.title = 'Add a new child'
   addBtn.addEventListener('click', async () => {
+    // iOS: the modal chain below closes silently on an empty name or an OK
+    // tap with no language picked, losing the typed name (I3). Reuse the
+    // same validated picker form instead, in 'add' mode, with a Cancel that
+    // returns here without sending anything. Desktop keeps the modal chain.
+    if (isIos) {
+      toggleSettings(false)
+      pendingOpenDetailForNewSlug = true
+      showProfilePicker(knownProfiles, knownKids, {
+        mode: 'add',
+        onCancel: () => {
+          pendingOpenDetailForNewSlug = false
+          toggleSettings(true)
+        },
+      })
+      return
+    }
     const rawName = await openModal({
       message: "What's the new child's name?",
       input: true,
@@ -1320,14 +1616,14 @@ function openKidDetail(slug) {
   }
   kidsViewEl.hidden = true
   kidDetailViewEl.hidden = false
-  settingsTitleEl.textContent = displayName(slug)
+  settingsTitleEl.textContent = kidDisplayName(slug)
   // Delete disabled when this is the only kid — the app always needs an
   // active profile to fall back to (server enforces this too, with a
   // profile_error toast, but hiding the button avoids the dead-end tap).
   const canRemove = knownProfiles.length > 1
   kidDetailRemoveEl.disabled = !canRemove
   kidDetailRemoveEl.title = canRemove
-    ? `Remove ${displayName(slug)} — deletes their saved progress`
+    ? `Remove ${kidDisplayName(slug)} — deletes their saved progress`
     : `Can't remove the only kid`
 }
 
@@ -1337,7 +1633,7 @@ kidDetailRemoveEl.addEventListener('click', async () => {
   const slug = currentDetailSlug
   if (!slug) return
   const ok = await openModal({
-    message: `Remove ${displayName(slug)}? This permanently deletes their saved progress.`,
+    message: `Remove ${kidDisplayName(slug)}? This permanently deletes their saved progress.`,
     confirmLabel: 'Remove',
     danger: true,
   })

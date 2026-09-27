@@ -9,12 +9,21 @@ import Foundation
 /// `re.split`. Known Phase-1 limitation carried over verbatim: abbreviations
 /// ("Mr.", "Dr.") and ellipses will cause incorrect splits; not fixed here
 /// since the Python original documents the same limitation.
+///
+/// A second alternative handles Japanese `。！？`: unlike English, no
+/// whitespace ever follows Japanese sentence-final punctuation, so the
+/// Python regex's `\s+` requirement never matches and a Japanese reply was
+/// never split until generation finished — TTS only started after the whole
+/// reply was generated instead of streaming sentence-by-sentence. This
+/// alternative splits right after `。！？` (optionally followed by a closing
+/// bracket/quote) whether or not whitespace follows; the English alternative
+/// above is untouched, so English behavior stays identical.
 public struct SentenceSegmenter {
     private var buffer: String = ""
 
     private static let boundary: NSRegularExpression = {
-        // (?<=[.!?])["')»]?\s+ — kept identical to the Python original's character class.
-        try! NSRegularExpression(pattern: "(?<=[.!?])[\"')»]?\\s+")
+        // Japanese split point sits after a trailing closing bracket, so 「…！」 keeps its 」.
+        try! NSRegularExpression(pattern: "(?<=[.!?])[\"')»]?\\s+|(?:(?<=[。！？])(?![」』）\"'])|(?<=[。！？][」』）\"']))\\s*")
     }()
 
     public init() {}

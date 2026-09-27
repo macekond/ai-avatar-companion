@@ -27,10 +27,12 @@ final class SessionStateMachineTests: XCTestCase {
         XCTAssertEqual(machine.state, .thinking)
     }
 
-    func test_pttStop_withoutAudio_returnsToIdle() {
+    func test_pttStop_withoutAudio_goesToDidntCatch() {
         var machine = SessionStateMachine()
         machine.start(); machine.pttStart()
         machine.pttStop(hasAudio: false)
+        XCTAssertEqual(machine.state, .didntCatch)
+        machine.didntCatchAcknowledged()
         XCTAssertEqual(machine.state, .idle)
     }
 

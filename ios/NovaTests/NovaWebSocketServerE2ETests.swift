@@ -3,9 +3,9 @@ import XCTest
 /// End-to-end tests that drive the actual production `NovaWebSocketServer`
 /// (port 8765) `ContentView` starts for real on app launch — same
 /// `NWListener`/`NWConnection` loopback socket, `SessionStateMachine`,
-/// onboarding/profile flow the bundled `ui/src/main.js` talks to — over the
-/// wire with a second `URLSessionWebSocketTask` client. This is the
-/// "app-level integration test... that genuinely needs the iOS test host"
+/// profile-picker flow the bundled `ui/src/main.js` talks to — over the wire
+/// with a second `URLSessionWebSocketTask` client. This is the "app-level
+/// integration test... that genuinely needs the iOS test host"
 /// `NovaTests.swift`'s original placeholder comment called out as future
 /// work, distinct from `NovaCore`'s protocol/state-machine unit tests (which
 /// run offline via `swift test`, no simulator).
@@ -23,10 +23,10 @@ import XCTest
 /// about WKWebView reconnects) - only a second whole server instance isn't.
 ///
 /// Each test wipes `Application Support/{profiles,transcripts}` before
-/// connecting, so onboarding always starts from a clean, deterministic
-/// "no profile yet" state for *this test's own connection*, regardless of
-/// what the app's real WKWebView connection (already established before
-/// tests run) or a previous test left behind on disk.
+/// connecting, so a fresh connection always starts from a clean,
+/// deterministic "no profile yet" state for *this test's own connection*,
+/// regardless of what the app's real WKWebView connection (already
+/// established before tests run) or a previous test left behind on disk.
 final class NovaWebSocketServerE2ETests: XCTestCase {
     private static let port: UInt16 = 8765
 
@@ -40,6 +40,11 @@ final class NovaWebSocketServerE2ETests: XCTestCase {
         guard let support = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { return }
         try? fm.removeItem(at: support.appendingPathComponent("profiles"))
         try? fm.removeItem(at: support.appendingPathComponent("transcripts"))
+    }
+
+    private func profilesDir() -> URL {
+        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        return support.appendingPathComponent("profiles")
     }
 
     // MARK: - Minimal WebSocket test client
@@ -56,10 +61,10 @@ final class NovaWebSocketServerE2ETests: XCTestCase {
         try await task.send(.string(String(decoding: data, as: UTF8.self)))
     }
 
-    /// One turn of onboarding (or any ptt-gated turn): press-and-immediately
-    /// release. The simulator/test host has no real mic input, so the
-    /// recorded duration is ~0 and `hasAudio` comes back false - this is what
-    /// drives the server down its synchronous no-transcript branch.
+    /// One turn of a ptt-gated exchange: press-and-immediately release. The
+    /// simulator/test host has no real mic input, so the recorded duration is
+    /// ~0 and `hasAudio` comes back false - this is what drives the server
+    /// down its synchronous no-transcript branch.
     private func pttTurn(_ task: URLSessionWebSocketTask) async throws {
         try await send(task, ["type": "ptt_start"])
         try await send(task, ["type": "ptt_stop"])
@@ -123,87 +128,270 @@ final class NovaWebSocketServerE2ETests: XCTestCase {
         }
     }
 
-    /// Drives both onboarding turns to completion *without* ever waiting on
-    /// `state: idle` in between: that transition is only reachable through
-    /// `AVSpeechSynthesizer`'s `didFinish` delegate callback
-    /// (`SystemTTSEngine`/`speakOnboardingPrompt`), which real playback under
-    /// the iOS-test-host Simulator (no active audio route) never reliably
-    /// fires - confirmed by instrumenting a raw frame dump here, which showed
-    /// `amplitude` frames streaming indefinitely with no terminating `state:
-    /// idle`. The server itself doesn't require the client to wait for
-    /// speech to finish before answering the next question (`dispatch`
-    /// doesn't gate `ptt_start`/`ptt_stop` on the session being idle), so
-    /// this only waits on messages `dispatch` sends *synchronously* - the
-    /// same messages a real UI would already have on screen the instant each
-    /// question is asked, regardless of whether its audio has finished.
-    /// Returns the `profiles` message `continueOnboarding`'s `.askingAge`
-    /// branch sends *before* `memory_loaded`, in the same synchronous burst
-    /// - waiting for `memory_loaded` alone would drain and discard it
-    /// (`receiveUntil` only returns the first matching frame; every
-    /// non-matching frame before it is read off the socket and gone), so
-    /// callers that need it must capture it here, in the same pass.
-    @discardableResult
-    private func completeOnboarding(_ task: URLSessionWebSocketTask) async throws -> [String: Any] {
-        try await send(task, ["type": "avatar_loaded", "key": "test-avatar"])
-        _ = try await receiveUntil(task, timeout: 10) { $0["type"] as? String == "onboarding_start" }
-        _ = try await receiveUntil(task, timeout: 10) { $0["type"] as? String == "sentence" } // "what's your name?"
-        // Stop that prompt's never-finishing TTS (see above) before moving
-        // on, so its endless `amplitude` stream can't starve a later wait's
-        // timeout race.
-        try await send(task, ["type": "stop_speak"])
-        try await pttTurn(task) // name question
-        _ = try await receiveUntil(task, timeout: 10) { $0["type"] as? String == "sentence" } // "how old are you?"
-        try await send(task, ["type": "stop_speak"])
-        try await pttTurn(task) // age question -> finalizes the profile synchronously
+    // MARK: - Fresh connect, no profiles yet
+
+    /// A brand-new connection with no saved profiles must present the picker
+    /// (empty list) instead of auto-creating a default "child" profile and
+    /// running spoken onboarding - the behavior this whole flow replaces.
+    func test_freshConnect_noProfiles_receivesEmptyChooseProfile() async throws {
+        let client = connectClient()
+        defer { client.cancel(with: .goingAway, reason: nil) }
+
+        try await send(client, ["type": "avatar_loaded", "key": "test-avatar"])
+        let choose = try await receiveUntil(client, timeout: 10) { $0["type"] as? String == "choose_profile" }
+        XCTAssertEqual(choose["list"] as? [String], [])
+
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: profilesDir().path),
+            "no profile file should be created just by connecting and seeing the picker"
+        )
+    }
+
+    // MARK: - Creating a new kid via switch_profile
+
+    /// The picker's "new kid" form sends switch_profile with slug+language;
+    /// the server must create that profile (defaulting its level for the
+    /// language), make it active, and proceed exactly like a normal load.
+    func test_switchProfile_newSlugWithLanguage_createsAndActivatesProfile() async throws {
+        let client = connectClient()
+        defer { client.cancel(with: .goingAway, reason: nil) }
+
+        try await send(client, ["type": "avatar_loaded", "key": "test-avatar"])
+        _ = try await receiveUntil(client, timeout: 10) { $0["type"] as? String == "choose_profile" }
+
+        try await send(client, ["type": "switch_profile", "slug": "Hana", "language": "ja"])
         var profiles: [String: Any] = [:]
-        _ = try await receiveUntil(task, timeout: 10) { msg in
+        let memoryLoaded = try await receiveUntil(client, timeout: 10) { msg in
             if msg["type"] as? String == "profiles" { profiles = msg }
             return msg["type"] as? String == "memory_loaded"
         }
-        return profiles
+        XCTAssertEqual(memoryLoaded["name"] as? String, "Hana")
+        XCTAssertEqual(memoryLoaded["language"] as? String, "ja")
+        XCTAssertEqual(memoryLoaded["level"] as? String, "N5")
+        XCTAssertEqual(profiles["active"] as? String, "hana")
+
+        let state = try await receiveUntil(client, timeout: 10) { $0["type"] as? String == "state" }
+        XCTAssertEqual(state["state"] as? String, "awaiting_start")
     }
 
-    // MARK: - Happy path
-
-    /// Basic end-to-end sanity check: a fresh connection runs the full
-    /// two-turn spoken onboarding and ends up with a real, saved "child"
-    /// profile the server reports back as active - the same path every
-    /// first-run of the packaged app takes.
-    func test_freshConnect_completesOnboardingAndCreatesActiveProfile() async throws {
+    /// A kid just created from the picker has never met Nova, so "welcome
+    /// back" / "また会えてうれしい" would be wrong.
+    func test_newKid_isGreetedAsNew_notWelcomedBack() async throws {
         let client = connectClient()
         defer { client.cancel(with: .goingAway, reason: nil) }
 
-        let profiles = try await completeOnboarding(client)
-        XCTAssertEqual(profiles["active"] as? String, "child")
-        XCTAssertEqual(profiles["list"] as? [String], ["child"])
+        try await send(client, ["type": "avatar_loaded", "key": "test-avatar"])
+        _ = try await receiveUntil(client, timeout: 10) { $0["type"] as? String == "choose_profile" }
+        try await send(client, ["type": "switch_profile", "slug": "Hana", "language": "ja"])
+        _ = try await receiveUntil(client, timeout: 10) { $0["type"] as? String == "memory_loaded" }
+
+        try await send(client, ["type": "start"])
+        let greeting = try await receiveUntil(client, timeout: 10) { $0["type"] as? String == "sentence" }
+        let text = greeting["text"] as? String ?? ""
+        XCTAssertTrue(text.hasPrefix("はじめまして"), "expected the first-meeting greeting, got: \(text)")
     }
 
-    // MARK: - Regression: onboarding's synchronous no-audio path used to clobber session state
+    // MARK: - An existing kid is offered by choose_profile and can be picked
 
-    /// Regression test for the bug fixed alongside this test: `pttStop`'s
-    /// synchronous no-audio onboarding branch (`continueOnboarding`) wrote
-    /// the freshly-completed `SessionStateMachine` straight into
-    /// `stateMachines[id]`, but `handle()` still held a stale pre-dispatch
-    /// snapshot and unconditionally overwrote `stateMachines[id]` with it
-    /// right after - silently reverting the persisted state back to
-    /// "listening" even though the client had already correctly been told
-    /// "idle". `stop_speak` is the one transition that's conditional on the
-    /// *current* state (`SessionStateMachine.stopSpeak()` only acts from
-    /// `.thinking`/`.speaking`), so it's what makes the corrupted persisted
-    /// value externally observable: sent right after onboarding completes,
-    /// it must echo back `idle` (a no-op), not the stale `listening`.
-    func test_onboarding_stopSpeakRightAfterCompletion_reportsIdleNotListening() async throws {
+    func test_chooseProfile_offersAndCanSelectAnExistingKid() async throws {
+        let creator = connectClient()
+        try await send(creator, ["type": "avatar_loaded", "key": "test-avatar"])
+        _ = try await receiveUntil(creator, timeout: 10) { $0["type"] as? String == "choose_profile" }
+        try await send(creator, ["type": "switch_profile", "slug": "Lily", "language": "en"])
+        _ = try await receiveUntil(creator, timeout: 10) { $0["type"] as? String == "memory_loaded" }
+        creator.cancel(with: .goingAway, reason: nil)
+
+        let client = connectClient()
+        defer { client.cancel(with: .goingAway, reason: nil) }
+        try await send(client, ["type": "avatar_loaded", "key": "test-avatar"])
+        let choose = try await receiveUntil(client, timeout: 10) { $0["type"] as? String == "choose_profile" }
+        XCTAssertEqual(choose["list"] as? [String], ["lily"])
+
+        try await send(client, ["type": "switch_profile", "slug": "lily"])
+        let memoryLoaded = try await receiveUntil(client, timeout: 10) { $0["type"] as? String == "memory_loaded" }
+        XCTAssertEqual(memoryLoaded["name"] as? String, "Lily")
+    }
+
+    // MARK: - Profile-gated messages are ignored before a profile is picked
+
+    /// `ptt_start`/`ptt_stop` must not record, transcribe, or advance the
+    /// session state machine while no profile is active for the connection -
+    /// they must be silently ignored, not just no-ops that still echo a
+    /// `state` frame.
+    func test_pttBeforeProfilePicked_producesNoStateFrame() async throws {
         let client = connectClient()
         defer { client.cancel(with: .goingAway, reason: nil) }
 
-        try await completeOnboarding(client)
+        try await send(client, ["type": "avatar_loaded", "key": "test-avatar"])
+        _ = try await receiveUntil(client, timeout: 10) { $0["type"] as? String == "choose_profile" }
 
-        try await send(client, ["type": "stop_speak"])
-        let state = try await receiveUntil(client) { $0["type"] as? String == "state" }
-        XCTAssertEqual(
-            state["state"] as? String, "idle",
-            "session state must be idle right after onboarding completes, not a stale pre-dispatch value"
-        )
+        try await pttTurn(client)
+        do {
+            let unexpected = try await receiveUntil(client, timeout: 2) { $0["type"] as? String == "state" }
+            XCTFail("unexpected state frame arrived before a profile was picked: \(unexpected)")
+        } catch {
+            // Expected: no `state` frame arrives, so `receiveUntil` times out.
+        }
+    }
+
+    // MARK: - I1/I6/I9: choose_profile/profiles carry display names + languages
+
+    /// The slug list alone mangles "Zoë" into "Zo" client-side and carries no
+    /// language. `choose_profile`'s `kids` field must give the real display
+    /// name and language back for each slug, on a *fresh* connection (i.e.
+    /// read from disk, not just echoed from the creating connection's memory).
+    func test_reconnect_chooseProfileKids_hasDisplayNameAndLanguage() async throws {
+        let creator = connectClient()
+        try await send(creator, ["type": "avatar_loaded", "key": "test-avatar"])
+        _ = try await receiveUntil(creator, timeout: 10) { $0["type"] as? String == "choose_profile" }
+        try await send(creator, ["type": "switch_profile", "slug": "Zoë", "language": "en"])
+        _ = try await receiveUntil(creator, timeout: 10) { $0["type"] as? String == "memory_loaded" }
+        creator.cancel(with: .goingAway, reason: nil)
+
+        let client = connectClient()
+        defer { client.cancel(with: .goingAway, reason: nil) }
+        try await send(client, ["type": "avatar_loaded", "key": "test-avatar"])
+        let choose = try await receiveUntil(client, timeout: 10) { $0["type"] as? String == "choose_profile" }
+        XCTAssertEqual(choose["list"] as? [String], ["zo"])
+        let kids = choose["kids"] as? [[String: Any]]
+        XCTAssertEqual(kids?.count, 1)
+        XCTAssertEqual(kids?.first?["slug"] as? String, "zo")
+        XCTAssertEqual(kids?.first?["name"] as? String, "Zoë")
+        XCTAssertEqual(kids?.first?["language"] as? String, "en")
+    }
+
+    // MARK: - I2: creating a duplicate name must not silently open the existing kid
+
+    /// `switch_profile` WITH `language` is the "create a new kid" intent. If
+    /// that name already exists, it must be rejected with `profile_error`
+    /// rather than quietly loading the existing kid under a parent's nose.
+    func test_switchProfile_duplicateNameWithLanguage_isRejected() async throws {
+        let client = connectClient()
+        defer { client.cancel(with: .goingAway, reason: nil) }
+
+        try await send(client, ["type": "avatar_loaded", "key": "test-avatar"])
+        _ = try await receiveUntil(client, timeout: 10) { $0["type"] as? String == "choose_profile" }
+
+        try await send(client, ["type": "switch_profile", "slug": "Hana", "language": "en"])
+        _ = try await receiveUntil(client, timeout: 10) { $0["type"] as? String == "memory_loaded" }
+
+        try await send(client, ["type": "switch_profile", "slug": "hana", "language": "en"])
+        let error = try await receiveUntil(client, timeout: 10) { $0["type"] as? String == "profile_error" }
+        XCTAssertEqual(error["message"] as? String, "There's already a kid called Hana. Tap their name to continue.")
+
+        do {
+            let unexpected = try await receiveUntil(client, timeout: 2) { $0["type"] as? String == "memory_loaded" }
+            XCTFail("unexpected memory_loaded after a rejected duplicate create: \(unexpected)")
+        } catch {
+            // Expected: no memory_loaded arrives.
+        }
+    }
+
+    // MARK: - C1: a Japanese-script name must be able to create a kid
+
+    /// `nameToSlug` alone strips non-ASCII, so "はな" used to sanitise to ""
+    /// and profile creation was refused outright. `switch_profile` must now
+    /// resolve it through `profileSlug` and create the profile, keeping the
+    /// raw Japanese name as the display name.
+    func test_switchProfile_japaneseName_createsProfile() async throws {
+        let client = connectClient()
+        defer { client.cancel(with: .goingAway, reason: nil) }
+
+        try await send(client, ["type": "avatar_loaded", "key": "test-avatar"])
+        _ = try await receiveUntil(client, timeout: 10) { $0["type"] as? String == "choose_profile" }
+
+        try await send(client, ["type": "switch_profile", "slug": "はな", "language": "ja"])
+        let memoryLoaded = try await receiveUntil(client, timeout: 10) { $0["type"] as? String == "memory_loaded" }
+        XCTAssertEqual(memoryLoaded["name"] as? String, "はな")
+        XCTAssertEqual(memoryLoaded["language"] as? String, "ja")
+    }
+
+    // MARK: - C3: talk button must survive a too-short/empty recording
+
+    /// A `ptt_stop` with no usable audio (the simulator test host has no mic
+    /// input, so `hasAudio` is always false) must not leave the session stuck
+    /// — it must announce `didnt_catch` and speak the "didn't catch that"
+    /// line in the active profile's language, not just silently stay put.
+    func test_pttStopWithoutAudio_sendsDidntCatchAndSorrySentence() async throws {
+        let client = connectClient()
+        defer { client.cancel(with: .goingAway, reason: nil) }
+
+        try await send(client, ["type": "avatar_loaded", "key": "test-avatar"])
+        _ = try await receiveUntil(client, timeout: 10) { $0["type"] as? String == "choose_profile" }
+        try await send(client, ["type": "switch_profile", "slug": "Hana", "language": "ja"])
+        _ = try await receiveUntil(client, timeout: 10) { $0["type"] as? String == "memory_loaded" }
+
+        // The `sentence` for the sorry line is sent before the `didnt_catch`
+        // `state` frame (speakDidntCatch runs ahead of dispatch's trailing
+        // state send) — capture it in the same pass rather than a second
+        // receiveUntil call, which would discard it as an unmatched frame
+        // read past on the way to `state` (see this file's receiveUntil doc
+        // comment).
+        try await pttTurn(client)
+        var sentenceText: String?
+        let didntCatch = try await receiveUntil(client, timeout: 10) { msg in
+            if msg["type"] as? String == "sentence" { sentenceText = msg["text"] as? String }
+            return msg["type"] as? String == "state" && (msg["state"] as? String) == "didnt_catch"
+        }
+        XCTAssertEqual(didntCatch["state"] as? String, "didnt_catch")
+        XCTAssertEqual(sentenceText, "うまくきこえなかったよ、もう一度おしえて！")
+    }
+
+    // MARK: - I7: Nova's greeting must show in the Conversation panel
+
+    /// The spoken greeting from `sendGreeting` must also land as a
+    /// `conversation_turn` with an empty `you` (Nova spoke unprompted), so
+    /// the history panel — and a later reconnect's replay — shows it.
+    func test_start_greetingAppearsAsConversationTurn() async throws {
+        let client = connectClient()
+        defer { client.cancel(with: .goingAway, reason: nil) }
+
+        try await send(client, ["type": "avatar_loaded", "key": "test-avatar"])
+        _ = try await receiveUntil(client, timeout: 10) { $0["type"] as? String == "choose_profile" }
+        try await send(client, ["type": "switch_profile", "slug": "Hana", "language": "en"])
+        _ = try await receiveUntil(client, timeout: 10) { $0["type"] as? String == "memory_loaded" }
+
+        // conversation_turn is sent before the greeting's own `sentence`
+        // frame (recordTurn happens ahead of replay in sendGreeting) —
+        // capture it while waiting for `sentence` rather than a second
+        // receiveUntil call, which would discard it as an unmatched frame
+        // read past on the way to `sentence` (see this file's receiveUntil
+        // doc comment).
+        try await send(client, ["type": "start"])
+        var turn: [String: Any]?
+        let sentence = try await receiveUntil(client, timeout: 10) { msg in
+            if msg["type"] as? String == "conversation_turn" { turn = msg }
+            return msg["type"] as? String == "sentence"
+        }
+        XCTAssertEqual(turn?["you"] as? String, "")
+        XCTAssertEqual(turn?["nova"] as? String, sentence["text"] as? String)
+    }
+
+    // MARK: - I8: switching language and back restores the last level used
+
+    /// Levels are per-language taxonomies, so switching languages must reset
+    /// to a valid level for the new one — but switching back to a language
+    /// already visited this profile must restore the level last set for it,
+    /// not silently reset to the default every time (a regression the
+    /// picker's language toggle would otherwise hit constantly).
+    func test_switchLanguageAwayAndBack_restoresLastLevelForLanguage() async throws {
+        let client = connectClient()
+        defer { client.cancel(with: .goingAway, reason: nil) }
+
+        try await send(client, ["type": "avatar_loaded", "key": "test-avatar"])
+        _ = try await receiveUntil(client, timeout: 10) { $0["type"] as? String == "choose_profile" }
+        try await send(client, ["type": "switch_profile", "slug": "Hana", "language": "en"])
+        _ = try await receiveUntil(client, timeout: 10) { $0["type"] as? String == "memory_loaded" }
+
+        try await send(client, ["type": "set_level", "level": "B"])
+        _ = try await receiveUntil(client, timeout: 10) { $0["type"] as? String == "state" }
+
+        try await send(client, ["type": "set_language", "language": "ja"])
+        _ = try await receiveUntil(client, timeout: 10) { $0["type"] as? String == "settings" }
+
+        try await send(client, ["type": "set_language", "language": "en"])
+        let settings = try await receiveUntil(client, timeout: 10) { $0["type"] as? String == "settings" }
+        XCTAssertEqual(settings["level"] as? String, "B")
     }
 
     // MARK: - Regression: deleting an unrelated profile used to reset the active session
@@ -220,19 +408,22 @@ final class NovaWebSocketServerE2ETests: XCTestCase {
         let client = connectClient()
         defer { client.cancel(with: .goingAway, reason: nil) }
 
-        try await completeOnboarding(client) // creates + activates "child"
+        try await send(client, ["type": "avatar_loaded", "key": "test-avatar"])
+        _ = try await receiveUntil(client, timeout: 10) { $0["type"] as? String == "choose_profile" }
+
+        // Create + activate "child" via switch_profile (replaces onboarding).
+        try await send(client, ["type": "switch_profile", "slug": "child", "language": "en"])
+        _ = try await receiveUntil(client, timeout: 10) { $0["type"] as? String == "memory_loaded" }
 
         // Create a second profile ("buddy") via switch_profile with
-        // language+level present, which both creates it and makes it active.
+        // language present, which both creates it and makes it active.
         try await send(client, ["type": "switch_profile", "slug": "buddy", "language": "en", "level": "A"])
         let switched = try await receiveUntil(client, timeout: 10) { $0["type"] as? String == "profiles" }
         XCTAssertEqual(switched["active"] as? String, "buddy")
 
         // Greet once on "buddy" - hasGreeted[id] becomes true for this
-        // connection. Not waiting for the greeting's TTS to finish (see
-        // `completeOnboarding`'s comment) - `hasGreeted[id]` is already set
-        // the instant `sendGreeting` is called, synchronously, before TTS
-        // even starts.
+        // connection. Not waiting for the greeting's TTS to finish (it's
+        // synchronous the instant sendGreeting is called, before TTS starts).
         try await send(client, ["type": "start"])
         _ = try await receiveUntil(client, timeout: 10) { $0["type"] as? String == "sentence" }
 

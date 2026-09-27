@@ -16,6 +16,39 @@ public func nameToSlug(_ name: String, fallback: String = "child") -> String {
     return s.isEmpty ? fallback : s
 }
 
+/// Slug resolver for profile *creation*, unlike `nameToSlug`'s `fallback`
+/// which collapses anything that sanitises to nothing onto one shared
+/// default. A name with no ASCII letters/digits at all (e.g. "はな") still
+/// deserves its own profile, not a refusal or a shared "child" slug — so this
+/// falls back to a deterministic `"kid" + 8 hex digits` hash of the
+/// NFC-normalised name instead. Only `[a-z0-9]` come out of the hash branch,
+/// so feeding the result back through `nameToSlug` is a no-op (it survives
+/// its own sanitisation idempotently). Returns nil for input with no
+/// letters/digits at all (empty or punctuation-only) — nothing meaningful to
+/// hash or slugify.
+public func profileSlug(forName name: String) -> String? {
+    let sanitized = nameToSlug(name, fallback: "")
+    if !sanitized.isEmpty { return sanitized }
+    let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard trimmed.unicodeScalars.contains(where: CharacterSet.alphanumerics.contains) else { return nil }
+    let normalized = trimmed.precomposedStringWithCanonicalMapping
+    let hash = fnv1aHash32(Array(normalized.utf8))
+    return "kid" + String(format: "%08x", hash)
+}
+
+/// FNV-1a, 32-bit — a small, dependency-free, deterministic hash; good
+/// enough here since this only needs to disambiguate profile slugs, not
+/// resist adversarial collisions.
+private func fnv1aHash32(_ bytes: [UInt8]) -> UInt32 {
+    var hash: UInt32 = 0x811c_9dc5
+    let prime: UInt32 = 0x0100_0193
+    for byte in bytes {
+        hash ^= UInt32(byte)
+        hash = hash &* prime
+    }
+    return hash
+}
+
 private func isoDay(_ s: String) -> Date {
     let cal = isoCalendar
     let parts = s.split(separator: "-").compactMap { Int($0) }
@@ -78,6 +111,13 @@ public struct ChildProfile: Codable, Equatable {
     /// Chosen TTS voice id. Per-profile since voices are language-specific.
     /// Empty = use the language default.
     public var voice: String
+    /// The last level used for each language (I8) — `setLanguage` restores
+    /// from here instead of always resetting to the language's default, so
+    /// switching away and back doesn't lose progress. Absent from any profile
+    /// JSON written before this field existed, hence the explicit
+    /// `decodeIfPresent` below rather than relying on synthesized Decodable
+    /// (which has no default-value fallback for a missing key).
+    public var levelByLanguage: [String: String]
 
     public init(
         name: String,
@@ -85,7 +125,8 @@ public struct ChildProfile: Codable, Equatable {
         firstSessionDate: String = todayString(Date()),
         language: String = "en",
         level: String = "A",
-        voice: String = ""
+        voice: String = "",
+        levelByLanguage: [String: String] = [:]
     ) {
         self.name = name
         self.age = age
@@ -93,6 +134,22 @@ public struct ChildProfile: Codable, Equatable {
         self.language = language
         self.level = level
         self.voice = voice
+        self.levelByLanguage = levelByLanguage
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case name, age, firstSessionDate, language, level, voice, levelByLanguage
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        name = try c.decode(String.self, forKey: .name)
+        age = try c.decodeIfPresent(Int.self, forKey: .age)
+        firstSessionDate = try c.decode(String.self, forKey: .firstSessionDate)
+        language = try c.decode(String.self, forKey: .language)
+        level = try c.decode(String.self, forKey: .level)
+        voice = try c.decode(String.self, forKey: .voice)
+        levelByLanguage = try c.decodeIfPresent([String: String].self, forKey: .levelByLanguage) ?? [:]
     }
 }
 
