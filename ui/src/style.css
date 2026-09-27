@@ -285,6 +285,25 @@ rt {
 }
 #settings-close:hover { color: #4a3a2a; }
 
+/* M3: #transcript-close has no dedicated rule on desktop (it just inherits
+   the browser's default button box, ~12pt) — on iOS give it Apple's 44x44pt
+   minimum tap target without growing the ✕ glyph itself. Negative margin
+   keeps the panel's own layout/spacing unchanged. */
+body.ios-native #transcript-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  margin: -14px -14px -14px 0;
+  border: none;
+  background: transparent;
+  color: #a08a76;
+  font-size: 0.9rem;
+  cursor: pointer;
+}
+body.ios-native #transcript-close:active { color: #4a3a2a; }
+
 .settings-section { margin-bottom: 14px; }
 .settings-section:last-child { margin-bottom: 0; }
 .settings-section h3 {
@@ -595,7 +614,11 @@ body.ios-native #ptt-btn:not([hidden]) {
   align-items: center;
   justify-content: center;
   gap: 8px;
-  margin-top: 12px;
+  /* M5b: display:flex makes this a block-level box that #overlay's
+     text-align:center can't centre (that only centres inline content) —
+     centre the box itself explicitly instead of relying on the parent. */
+  margin: 12px auto 0;
+  width: fit-content;
   padding: 16px 32px;
   border: none;
   border-radius: 999px;
@@ -641,6 +664,18 @@ body.ios-native #active-kid {
   right: calc(env(safe-area-inset-right, 0px) + 64px);
 }
 body.ios-native #sentence-bubble { overflow-wrap: anywhere; }
+/* M4: a blank rounded bubble floats above the talk button before any
+   sentence has been shown — hide it while it's genuinely empty (no text or
+   furigana markup) and let it reappear the moment showSentence() fills it
+   in. The .fade class only dims content that's already there, so this is
+   independent of the existing fade behavior. */
+body.ios-native #sentence-bubble:empty {
+  display: none;
+  min-height: 0;
+  padding: 0;
+  background: transparent;
+  box-shadow: none;
+}
 body.ios-native #transcript-panel {
   overflow: hidden;
   top: calc(env(safe-area-inset-top, 0px) + 64px);
@@ -654,6 +689,13 @@ body.ios-native #overlay {
   left: calc(env(safe-area-inset-left, 0px));
   right: calc(env(safe-area-inset-right, 0px) + var(--stage-reserve, 0px));
   padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 32px);
+}
+/* M5c: state labels ("Listening…" etc.) at the desktop 0.9rem read as tiny
+   on a phone held at arm's length — bump size/weight for iOS only. */
+body.ios-native #state-label {
+  font-size: 1.1rem;
+  font-weight: 500;
+  color: #7a6252;
 }
 
 /* Phone portrait: the docked transcript mode never activates this narrow, so
@@ -777,6 +819,13 @@ body.ios-native .chip.active {
   transform: none;
   font-weight: 600;
 }
+/* M7b: plain-language description next to the bare level code. */
+body.ios-native .level-description {
+  margin-left: 6px;
+  color: #8a8a8e;
+  font-weight: 400;
+  font-size: 0.85em;
+}
 body.ios-native .chip.active::after {
   content: '✓';
   margin-left: auto;
@@ -825,6 +874,22 @@ body.ios-native #kid-detail-back {
 }
 body.ios-native #kid-detail-back::before { content: '‹ '; font-weight: 600; }
 body.ios-native #kid-detail-back:hover { background: transparent; color: #0060df; }
+/* The HTML text already carries its own "←" (desktop's arrow) — hide it on
+   iOS so the native "‹" from ::before above doesn't double up (M1). */
+body.ios-native #kid-detail-back .back-arrow { display: none; }
+
+/* M2: hints explaining a disabled control, since a touch device has no
+   hover tooltip to fall back on (desktop relies on the title attribute). */
+body.ios-native .profile-picker-start-hint,
+body.ios-native .detail-hint {
+  margin: 0;
+  font-size: 0.82rem;
+  color: #8a7460;
+  text-align: center;
+}
+body.ios-native .profile-picker-start-hint[hidden],
+body.ios-native .detail-hint[hidden] { display: none; }
+body.ios-native .detail-hint { margin-top: 6px; }
 
 /* Modal dialog reskinned as a native iOS alert: centered card, hairline
    button divider, blue action text instead of filled pill buttons. */
@@ -864,6 +929,17 @@ body.ios-native #modal-actions .chip.active {
   background: transparent;
 }
 body.ios-native #modal-actions .chip.active::after { content: none; }
+/* M9: the iOS reskin above resets every modal button to plain accent-blue
+   text, which swallowed the destructive styling openModal({danger:true})
+   already applies via the .danger class (e.g. delete confirmation) — call
+   it back out in red, matching the iOS destructive-action convention. */
+body.ios-native #modal-actions .chip.danger {
+  color: #ff3b30;
+}
+body.ios-native #modal-actions .chip.danger:active {
+  color: #ff3b30;
+  background: rgba(255, 59, 48, 0.08);
+}
 
 /* ── iOS profile picker (choose_profile) ─────────────────────────────────
    Full-screen overlay shown before any kid profile is active — replaces
@@ -877,7 +953,12 @@ body.ios-native #profile-picker {
   inset: 0;
   z-index: 900;
   display: flex;
-  align-items: center;
+  /* M6: was `align-items: center`, which re-centred the card vertically
+     every time the visible viewport height changed (keyboard/accessory bar
+     showing or hiding on focus) — the card visibly jumped ~70pt and taps
+     landed on the wrong button. Anchor to the top instead, below the safe
+     area (the existing top padding below), and let the form scroll if tall. */
+  align-items: flex-start;
   justify-content: center;
   overflow-y: auto;
   /* Opaque: Nova must not be visible until a kid is picked. */
@@ -896,7 +977,11 @@ body.ios-native #profile-picker.fade { opacity: 0; }
 body.ios-native .profile-picker-card {
   width: 100%;
   max-width: 360px;
-  margin: auto 0;
+  /* M6: no longer `margin: auto 0` — that vertically centred the card,
+     which is what made it jump when the keyboard changed the viewport
+     height. #profile-picker's own top padding (safe-area + 24px) now
+     provides the fixed anchor point instead. */
+  margin: 0;
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -928,6 +1013,12 @@ body.ios-native .profile-picker-add {
 }
 body.ios-native .profile-picker-kid:active,
 body.ios-native .profile-picker-add:active { background: rgba(217, 138, 95, 0.26); }
+/* M8: subtle highlight for the most recently picked kid, who orderKidsByLastPicked
+   (kid-order.js) already lists first. */
+body.ios-native .profile-picker-kid.last-picked {
+  border: 1.5px solid rgba(217, 138, 95, 0.55);
+  background: rgba(217, 138, 95, 0.2);
+}
 body.ios-native .profile-picker-form[hidden] { display: none; }
 body.ios-native .profile-picker-form:not([hidden]) {
   display: flex;

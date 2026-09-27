@@ -388,8 +388,8 @@ public final class NovaWebSocketServer: ObservableObject {
     /// placeholder to expand later without further model-download work.
     private func voiceCatalog(for language: String) -> [VoiceOption] {
         language == "ja"
-            ? [VoiceOption(id: "jf_alpha", label: "Alpha")]
-            : [VoiceOption(id: "ljspeech", label: "LJSpeech")]
+            ? [VoiceOption(id: "jf_alpha", label: "Japanese voice")]
+            : [VoiceOption(id: "ljspeech", label: "English voice")]
     }
 
     private func sendSettings(for connection: NWConnection) {
@@ -846,7 +846,7 @@ public final class NovaWebSocketServer: ObservableObject {
         // open the existing kid (I2) — reject it and leave this connection's
         // state untouched, rather than advancing past the checks below.
         if language != nil, let existing = manager.load() {
-            send(.profileError(message: "There's already a kid called \(existing.profile.name). Tap their name to continue."), on: connection)
+            send(.profileError(message: "There's already a kid called \(existing.profile.name). Pick them from the kids list instead."), on: connection)
             return
         }
 
