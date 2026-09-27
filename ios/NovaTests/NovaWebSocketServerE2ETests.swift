@@ -277,7 +277,7 @@ final class NovaWebSocketServerE2ETests: XCTestCase {
 
         try await send(client, ["type": "switch_profile", "slug": "hana", "language": "en"])
         let error = try await receiveUntil(client, timeout: 10) { $0["type"] as? String == "profile_error" }
-        XCTAssertEqual(error["message"] as? String, "There's already a kid called Hana. Tap their name to continue.")
+        XCTAssertEqual(error["message"] as? String, "There's already a kid called Hana. Pick them from the kids list instead.")
 
         do {
             let unexpected = try await receiveUntil(client, timeout: 2) { $0["type"] as? String == "memory_loaded" }

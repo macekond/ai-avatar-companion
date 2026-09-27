@@ -15,6 +15,9 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'
 import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm'
 import { displayName, findKid, kidName, kidLabel, kidLanguage, languageName } from './kids.js'
 import { iosLabelsFor } from './ios-labels.js'
+import { startHint, removeKidHint } from './picker-hints.js'
+import { levelDescription } from './level-descriptions.js'
+import { orderKidsByLastPicked } from './kid-order.js'
 
 // This same bundle is hosted by both the Tauri desktop shell and the iOS app
 // (over NovaSchemeHandler's custom `nova-app://` scheme, chosen specifically
@@ -101,8 +104,7 @@ function initThree() {
   // Upper-body portrait framing (VRM models stand at the origin, ~1.5 m tall)
   camera = new THREE.PerspectiveCamera(
     28, window.innerWidth / window.innerHeight, 0.1, 20)
-  camera.position.set(0.0, 1.32, 1.35)
-  camera.lookAt(0.0, 1.28, 0.0)
+  applyCameraFraming()
 
   const key = new THREE.DirectionalLight(0xffffff, Math.PI * 0.9)
   key.position.set(0.6, 1.8, 1.2)
@@ -114,9 +116,29 @@ function initThree() {
   window.addEventListener('resize', applyStageLayout)
 }
 
+// M5a: on an iOS phone in portrait, the default upper-body framing crops the
+// avatar's ears/top of head behind the status bar / Dynamic Island — pull
+// the camera back and lower the look-at target a touch so the whole head
+// clears the safe area while the face stays large. Desktop and iOS
+// landscape/iPad keep the original framing unchanged.
+function applyCameraFraming() {
+  if (!camera) return
+  const isIosPortrait = document.body.classList.contains('ios-native')
+    && window.innerHeight > window.innerWidth
+  if (isIosPortrait) {
+    // Pulled back and aimed a little higher so the ears clear the status bar and the kid pill.
+    camera.position.set(0.0, 1.35, 1.55)
+    camera.lookAt(0.0, 1.31, 0.0)
+  } else {
+    camera.position.set(0.0, 1.32, 1.35)
+    camera.lookAt(0.0, 1.28, 0.0)
+  }
+}
+
 function fitViewport() {
   // The avatar stage shrinks to the left when the transcript panel is docked
   // beside it, so the model stays fully visible instead of being covered.
+  applyCameraFraming()
   const w = Math.max(1, window.innerWidth - stageReservePx)
   camera.aspect = w / window.innerHeight
   camera.updateProjectionMatrix()
@@ -742,6 +764,12 @@ function buildProfilePicker() {
   startBtn.disabled = true
   form.appendChild(startBtn)
 
+  // M2a: explains why Start is disabled — iOS only (see updateStartEnabled).
+  const startHintEl = document.createElement('p')
+  startHintEl.className = 'profile-picker-start-hint'
+  startHintEl.hidden = true
+  form.appendChild(startHintEl)
+
   // Only shown in 'add' mode (opened from the settings '+' — see
   // renderProfileSelector) — returns to the app without sending anything.
   // The mandatory 'choose' mode (from the server's choose_profile) has no
@@ -755,6 +783,12 @@ function buildProfilePicker() {
 
   function updateStartEnabled() {
     startBtn.disabled = !(nameInput.value.trim() && selectedLang)
+    // Only iOS shows the hint — desktop never uses this picker in practice.
+    if (document.body.classList.contains('ios-native')) {
+      const hint = startHint(nameInput.value, selectedLang)
+      startHintEl.textContent = hint
+      startHintEl.hidden = !hint
+    }
   }
   function hideFormError() {
     errorEl.hidden = true
@@ -796,6 +830,17 @@ function buildProfilePicker() {
   return overlay
 }
 
+// M8: remember the last-picked kid across launches so the picker can list
+// them first with a highlight. localStorage can throw (private mode, blocked
+// site data) or simply be unavailable, so every access is wrapped.
+const LAST_KID_KEY = 'nova.lastPickedKid'
+function readLastPickedKid() {
+  try { return localStorage.getItem(LAST_KID_KEY) } catch { return null }
+}
+function writeLastPickedKid(slug) {
+  try { localStorage.setItem(LAST_KID_KEY, slug) } catch { /* unavailable */ }
+}
+
 // mode: 'choose' (default) — the mandatory server-driven picker, no way out;
 // 'add' — opened from the settings '+' (iOS only), shows the form directly
 // with a Cancel button that runs `onCancel` (reopens Settings) instead of
@@ -815,10 +860,14 @@ function showProfilePicker(list, kids, { mode = 'choose', onCancel = null } = {}
 
   kidsList.textContent = ''
   kidsList.hidden = isAdd
-  list.forEach(slug => {
+  const isIos = document.body.classList.contains('ios-native')
+  const lastSlug = isIos ? readLastPickedKid() : null
+  const orderedList = isIos ? orderKidsByLastPicked(list, lastSlug) : list
+  orderedList.forEach(slug => {
     const btn = document.createElement('button')
     btn.type = 'button'
     btn.className = 'profile-picker-kid'
+    if (isIos && slug === lastSlug) btn.classList.add('last-picked')
     btn.textContent = kidLabel(slug, kids)
     btn.addEventListener('click', () => {
       wsSend({ type: 'switch_profile', slug })
@@ -1164,11 +1213,23 @@ let activeLevel = null
 function renderLevelSelector(levels, current, language) {
   levelHeadingEl.textContent = LEVEL_HEADINGS[language] || 'Level'
   levelSelectorEl.innerHTML = ''
+  const isIos = document.body.classList.contains('ios-native')
   ;(levels || []).forEach(level => {
     const btn = document.createElement('button')
     btn.className = 'chip' + (level === current ? ' active' : '')
-    btn.textContent = level
     btn.dataset.level = level
+    // M7b: bare codes ("Pre A", "N5"...) mean nothing without CEFR/JLPT
+    // knowledge — add the plain-language description on iOS. Desktop keeps
+    // the bare code, since levelDescription() is untested UI copy there.
+    const description = isIos ? levelDescription(level) : ''
+    if (description) {
+      btn.append(
+        document.createTextNode(level + ' '),
+        span('level-description', description),
+      )
+    } else {
+      btn.textContent = level
+    }
     btn.addEventListener('click', () => {
       setActiveLevel(level)
       wsSend({ type: 'set_level', level })
@@ -1440,6 +1501,8 @@ function activeKidPillLabel(slug, name) {
 // actual switch (never on the first-ever profile load).
 function noteActiveKid(slug, kids) {
   if (!slug) return
+  // Any way a kid becomes active (picked, created, switched in Settings) counts as last used.
+  if (document.body.classList.contains('ios-native')) writeLastPickedKid(slug)
   const kid = findKid(slug, kids)
   const name = kid ? kid.name : displayName(slug)
   if (activeKidEl.hidden) {
@@ -1516,7 +1579,7 @@ function renderProfileSelector(profiles, activeSlug, kids) {
   // spoken onboarding. Language/level are fine-tuned afterwards in the detail.
   const addBtn = document.createElement('button')
   addBtn.className = 'chip'
-  addBtn.textContent = '+'
+  addBtn.textContent = isIos ? '＋ Add a kid' : '+'
   addBtn.title = 'Add a new child'
   addBtn.addEventListener('click', async () => {
     // iOS: the modal chain below closes silently on an empty name or an OK
@@ -1574,6 +1637,7 @@ const kidsViewEl        = document.getElementById('kids-view')
 const kidDetailViewEl   = document.getElementById('kid-detail-view')
 const kidDetailBackEl   = document.getElementById('kid-detail-back')
 const kidDetailRemoveEl = document.getElementById('kid-detail-remove')
+const kidDetailRemoveHintEl = document.getElementById('kid-detail-remove-hint')
 const settingsTitleEl   = document.getElementById('settings-title')
 let currentDetailSlug = null
 // Set when '+' adds a kid: the server hasn't confirmed yet, but once the
@@ -1625,6 +1689,13 @@ function openKidDetail(slug) {
   kidDetailRemoveEl.title = canRemove
     ? `Remove ${kidDisplayName(slug)} — deletes their saved progress`
     : `Can't remove the only kid`
+  // M2b: explain the disabled Remove button — iOS only (desktop relies on
+  // the title tooltip, which has no touch equivalent).
+  if (document.body.classList.contains('ios-native')) {
+    const hint = removeKidHint(knownProfiles.length)
+    kidDetailRemoveHintEl.textContent = hint
+    kidDetailRemoveHintEl.hidden = !hint
+  }
 }
 
 kidDetailBackEl.addEventListener('click', showKidsView)
