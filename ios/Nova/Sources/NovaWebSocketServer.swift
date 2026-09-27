@@ -132,7 +132,7 @@ public final class NovaWebSocketServer: ObservableObject {
     /// means onboarding isn't in progress (either finished, or not needed
     /// because the profile already existed). `onboardingNames` holds the
     /// name collected in step 1 until step 2 completes the profile.
-    private enum OnboardingStep {
+    private enum OnboardingStep: Equatable {
         case askingName
         case askingAge
     }
@@ -220,7 +220,13 @@ public final class NovaWebSocketServer: ObservableObject {
     /// `af_alloy` is the voice this engine's Kokoro integration has actually
     /// been verified against (see the spike README's real-voice-synthesis
     /// update) — arbitrary otherwise, no per-profile voice picker yet.
-    private static let kokoroVoiceName = "af_alloy"
+    /// `nonisolated` because it's read from inside `speak`'s `Task.detached`
+    /// Kokoro branch — a plain immutable constant is safe off the main
+    /// actor, but static members of a `@MainActor` type are actor-isolated
+    /// by default, which Swift 6's strict concurrency checking now enforces
+    /// (this compiled as an implicit warning, not an error, under this
+    /// project's current language mode, but is a real bug regardless).
+    private static nonisolated let kokoroVoiceName = "af_alloy"
 
     /// Set by `stopSpeak` (barge-in) so `speakSentences`'s recursion stops
     /// dead instead of continuing to the next sentence — stopping the active
@@ -605,7 +611,28 @@ public final class NovaWebSocketServer: ObservableObject {
                 if hasAudio, let engine = whisperEngine {
                     transcribeForOnboarding(samples: samples, engine: engine, step: step, connection: connection)
                 } else {
+                    // Runs synchronously (unlike transcribeForOnboarding's
+                    // async completion), so it returns *before* this dispatch
+                    // call does. On the .askingAge step specifically it
+                    // writes the freshly-completed machine straight into
+                    // stateMachines[id] (see continueOnboarding) — but
+                    // handle() still holds its own pre-dispatch snapshot in
+                    // `machine` and unconditionally overwrites
+                    // stateMachines[id] with it once dispatch returns. Same
+                    // clobber bug switchProfile hit below; resync `machine`
+                    // from what continueOnboarding just wrote so that
+                    // overwrite persists the right value instead of reverting
+                    // it back to stale "listening". Gated on .askingAge only
+                    // — continueOnboarding's .askingName branch never touches
+                    // stateMachines[id], so resyncing unconditionally would
+                    // instead overwrite `machine` (correctly "listening" from
+                    // pttStart() above) with whatever *older* value happened
+                    // to still be sitting in the dictionary from before this
+                    // handle() call even started.
                     continueOnboarding(transcript: nil, step: step, connection: connection)
+                    if step == .askingAge {
+                        machine = stateMachines[ObjectIdentifier(connection)] ?? machine
+                    }
                 }
                 return
             }
@@ -691,15 +718,12 @@ public final class NovaWebSocketServer: ObservableObject {
                 self.send(.previewStatus(state: "ready", voice: voice), on: connection)
             }
         case .switchProfile(let slug, let language, let level):
-            switchProfile(slug: slug, language: language, level: level, for: connection)
+            switchProfile(slug: slug, language: language, level: level, machine: &machine, for: connection)
         case .deleteProfile(let slug):
             // Refuses to delete the last remaining profile — mirrors
             // app/server.py's delete_profile guard (a parent must always
             // have at least one child profile to fall back to).
             let id = ObjectIdentifier(connection)
-            generationGuard(for: connection).advance()
-            hasGreeted.removeValue(forKey: id)
-            conversationHistories.removeValue(forKey: id)
             let safeSlug = nameToSlug(slug, fallback: "")
             let isActiveProfile = !safeSlug.isEmpty && memoryManagers[id]?.slug == safeSlug
             // Delete through the connection's own live manager instance when
@@ -730,7 +754,25 @@ public final class NovaWebSocketServer: ObservableObject {
                     // The active profile is gone — fall back to another
                     // remaining profile (or create a fresh default if
                     // somehow none exist) rather than leaving this
-                    // connection pointed at a deleted one.
+                    // connection pointed at a deleted one. app/server.py
+                    // does this same fallback via `_swap_profile`, which
+                    // resets state to awaiting_start for exactly this
+                    // reason — mirrored here rather than leaving whatever
+                    // state the connection was in before the deletion
+                    // (e.g. still "listening"/"speaking") incorrectly
+                    // carried over into the fallback profile's session.
+                    //
+                    // These three resets belong here, not above the
+                    // isActiveProfile check: app/server.py only resets this
+                    // session state in the `target == mem_mgr.slug` branch of
+                    // its delete_profile handler — deleting an unrelated,
+                    // inactive profile shouldn't wipe the greeting flag,
+                    // conversation history, or in-flight generation for a
+                    // completely different, still-active session.
+                    generationGuard(for: connection).advance()
+                    hasGreeted.removeValue(forKey: id)
+                    conversationHistories.removeValue(forKey: id)
+                    machine = SessionStateMachine()
                     memories.removeValue(forKey: id)
                     memoryManagers.removeValue(forKey: id)
                     let remaining = manager.listProfiles()
@@ -753,8 +795,9 @@ public final class NovaWebSocketServer: ObservableObject {
                     send(.profiles(list: activeManager.listProfiles(), active: activeManager.slug), on: connection)
                 }
             }
-        default:
-            break
+            // No `default:` — every ClientMessage case is already handled
+            // explicitly above (Xcode correctly flags an extra `default`
+            // here as dead code, since the switch is already exhaustive).
         }
         send(.state(machine.state), on: connection)
     }
@@ -851,7 +894,21 @@ public final class NovaWebSocketServer: ObservableObject {
     /// path in app/server.py) creates a new one. Re-sanitizes the slug the
     /// same way `MemoryManager` itself does, so a crafted slug can't escape
     /// the profiles directory.
-    private func switchProfile(slug rawSlug: String, language: String?, level: String?, for connection: NWConnection) {
+    ///
+    /// `machine` is `dispatch`'s own `inout` parameter, not a fresh
+    /// `stateMachines[id]` lookup — this used to write straight to
+    /// `stateMachines[id]` instead, which `handle()`'s post-dispatch
+    /// `stateMachines[id] = machine` then immediately clobbered with
+    /// whatever `machine` held from *before* the switch (`dispatch` sends
+    /// `machine.state` unconditionally at the end of its switch too), so a
+    /// switch silently reverted itself: the client was told the outgoing
+    /// profile's stale state, and the persisted machine was never actually
+    /// reset. The Python original explicitly sends `state: awaiting_start`
+    /// after `_swap_profile` for exactly this reason ("parks back in
+    /// awaiting_start rather than auto-greeting, consistent with the initial
+    /// connect") — mutating the same `inout` the caller already sends from
+    /// achieves the same thing without a second explicit send.
+    private func switchProfile(slug rawSlug: String, language: String?, level: String?, machine: inout SessionStateMachine, for connection: NWConnection) {
         let id = ObjectIdentifier(connection)
         generationGuard(for: connection).advance()
         hasGreeted.removeValue(forKey: id)
@@ -872,7 +929,7 @@ public final class NovaWebSocketServer: ObservableObject {
 
         memoryManagers[id] = manager
         memories[id] = memory
-        stateMachines[id] = SessionStateMachine()
+        machine = SessionStateMachine()
 
         send(.profiles(list: manager.listProfiles(), active: manager.slug), on: connection)
         send(.memoryLoaded(name: memory.profile.name, age: memory.profile.age, language: memory.profile.language, level: memory.profile.level), on: connection)
@@ -954,7 +1011,14 @@ public final class NovaWebSocketServer: ObservableObject {
         let generationToken = generationGuard(for: connection).currentToken()
 
         Task.detached {
-            var sentences: [String] = []
+            // Genuinely safe despite the warning Swift 6 would raise here:
+            // `engine.generate` calls its `onSentence` closure synchronously,
+            // one call at a time, entirely within this same detached task
+            // before the function returns — there's no real concurrent
+            // access to `sentences`, just a mutable local captured by an
+            // `@escaping` (not `@Sendable`) closure that the compiler's
+            // conservative concurrency checker can't prove is single-threaded.
+            nonisolated(unsafe) var sentences: [String] = []
             try? engine.generate(prompt: prompt) { sentence in sentences.append(sentence) }
             await MainActor.run { [weak self] in
                 guard let self else { return }
@@ -1019,7 +1083,7 @@ public final class NovaWebSocketServer: ObservableObject {
         let fullReply = replySentences.joined(separator: " ")
         Task.detached { [weak self] in
             let result = MemoryExtractor.extract(transcript: transcript, reply: fullReply, engine: engine)
-            await MainActor.run {
+            await MainActor.run { [weak self] in
                 guard let self else { return }
                 // Re-checked after the extraction call itself (a second,
                 // shorter async gap a profile swap could also land in) —

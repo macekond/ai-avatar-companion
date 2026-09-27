@@ -121,6 +121,14 @@ targets:
       base:
         GENERATE_INFOPLIST_FILE: YES
         SWIFT_VERSION: "5.9"
+        # `xcodebuild test` (unlike a plain `build`) scans the host app's
+        # bridging header as part of this target too, since `@testable
+        # import Nova` needs it - without this it fails dependency scanning
+        # on onnxruntime_c_api.h even though NovaTests never touches it
+        # directly. Same headers Nova/project.yml's own target needs.
+        HEADER_SEARCH_PATHS: "../NativeCores/onnxruntime/build-apple/Headers ../NativeCores/espeak-ng/build-apple/Headers"
+        SWIFT_OBJC_BRIDGING_HEADER: Nova/Sources/Nova-Bridging-Header.h
+        CLANG_CXX_LANGUAGE_STANDARD: "c++17"
 schemes:
   Nova:
     build:
