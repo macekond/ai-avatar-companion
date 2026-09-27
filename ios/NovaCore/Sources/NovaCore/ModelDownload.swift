@@ -22,33 +22,34 @@ public func modelsNeedingDownload(_ specs: [ModelSpec], existingFiles: Set<Strin
     specs.filter { !existingFiles.contains($0.filename) }
 }
 
-/// Tracks aggregate download progress across multiple files, so a UI can
-/// show one overall percentage rather than per-file numbers.
-public struct DownloadProgress {
-    private let totalFiles: Int
-    private var perFileFraction: [Int: Double] = [:]
-    private var perFileReceived: [Int: Int64] = [:]
-    private var perFileExpected: [Int: Int64] = [:]
+/// Progress of the one file currently downloading, for the setup overlay.
+public struct DownloadFileProgress: Equatable {
+    public let fileIndex: Int
+    public let fileCount: Int
+    public let receivedBytes: Int64
+    public let expectedBytes: Int64
 
-    public init(totalFiles: Int) {
-        self.totalFiles = totalFiles
+    public init(fileIndex: Int, fileCount: Int, receivedBytes: Int64, expectedBytes: Int64) {
+        self.fileIndex = fileIndex
+        self.fileCount = fileCount
+        self.receivedBytes = receivedBytes
+        self.expectedBytes = expectedBytes
     }
 
-    public mutating func recordBytes(received: Int64, expected: Int64, fileIndex: Int) {
-        perFileFraction[fileIndex] = expected > 0 ? Double(received) / Double(expected) : 0.0
-        perFileReceived[fileIndex] = received
-        perFileExpected[fileIndex] = expected
+    /// nil when the server didn't report a size (no Content-Length).
+    public var fraction: Double? {
+        guard expectedBytes > 0 else { return nil }
+        return min(1.0, Double(receivedBytes) / Double(expectedBytes))
     }
 
-    public var fractionComplete: Double {
-        guard totalFiles > 0 else { return 0.0 }
-        return perFileFraction.values.reduce(0, +) / Double(totalFiles)
+    public var detail: String {
+        let file = "File \(fileIndex + 1) of \(fileCount)"
+        guard let fraction else { return "\(file) · \(receivedBytes / 1_000_000) MB" }
+        if expectedBytes < 1_000_000 {
+            return "\(file) · \(Int(fraction * 100))% · \(Self.kilobytes(receivedBytes)) / \(Self.kilobytes(expectedBytes)) KB"
+        }
+        return "\(file) · \(Int(fraction * 100))% · \(receivedBytes / 1_000_000) / \(expectedBytes / 1_000_000) MB"
     }
 
-    /// Raw byte totals across every file touched so far — a UI can show
-    /// "210 MB / 500 MB" alongside (or instead of) a bare percentage, which
-    /// stays readable even early in a multi-gigabyte download where the
-    /// percentage itself rounds to 0% for a long time.
-    public var totalReceivedBytes: Int64 { perFileReceived.values.reduce(0, +) }
-    public var totalExpectedBytes: Int64 { perFileExpected.values.reduce(0, +) }
+    private static func kilobytes(_ bytes: Int64) -> Int64 { (bytes + 500) / 1_000 }
 }

@@ -46,9 +46,12 @@ public struct SessionStateMachine {
 
     /// `hasAudio` reflects whether the mic captured anything above the
     /// minimum-duration floor (`MIN_DURATION_S` in `app/pipeline/stt.py`) —
-    /// no audio means there's nothing to transcribe, so skip straight to idle.
+    /// no audio means there's nothing to transcribe, so this is the same
+    /// "didn't catch that" path as an empty transcript, not a silent skip to
+    /// idle (that used to leave the talk button dead: idle is only reached
+    /// again via `didntCatchAcknowledged()`).
     public mutating func pttStop(hasAudio: Bool) {
-        state = hasAudio ? .thinking : .idle
+        state = hasAudio ? .thinking : .didntCatch
     }
 
     /// `nil`/empty means STT produced nothing usable (dropped by VAD or the

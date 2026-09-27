@@ -34,13 +34,36 @@ public struct ConversationHistory: Equatable {
     public mutating func clear() {
         exchanges.removeAll()
     }
+}
 
-    /// Renders as alternating "Child: .../Nova: ..." blocks — for insertion
-    /// into a flat prompt string ahead of the new turn's cue, since
-    /// `LlamaEngine.generate` takes a single prompt string rather than a
-    /// structured chat-message array (unlike Ollama's `chat()` API on
-    /// desktop, which sends `_history` as separate role-tagged messages).
-    public func formatted() -> String {
-        exchanges.map { "Child: \($0.you)\nNova: \($0.nova)" }.joined(separator: "\n")
+/// One role-tagged turn for llama.cpp's chat-template API (`LlamaBridge`'s
+/// `NovaLlamaMessage`) — the structured equivalent of what `ollama.chat()`
+/// takes as `messages` on desktop (see `app/pipeline/llm.py`'s
+/// `_build_messages`).
+public struct ChatMessage: Equatable {
+    public enum Role: String, Equatable {
+        case system, user, assistant
     }
+
+    public let role: Role
+    public let content: String
+
+    public init(role: Role, content: String) {
+        self.role = role
+        self.content = content
+    }
+}
+
+/// Builds the `[system, user, assistant, user, assistant, …, user]` message
+/// list a reply's LLM call sends — `history`'s exchanges interleaved between
+/// the system prompt and the new turn, in place of folding everything into
+/// one flat prompt string.
+public func buildChatMessages(systemPrompt: String, history: ConversationHistory, userMessage: String) -> [ChatMessage] {
+    var messages: [ChatMessage] = [ChatMessage(role: .system, content: systemPrompt)]
+    for exchange in history.exchanges {
+        messages.append(ChatMessage(role: .user, content: exchange.you))
+        messages.append(ChatMessage(role: .assistant, content: exchange.nova))
+    }
+    messages.append(ChatMessage(role: .user, content: userMessage))
+    return messages
 }

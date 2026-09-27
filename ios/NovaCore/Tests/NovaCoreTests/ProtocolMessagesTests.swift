@@ -142,12 +142,49 @@ final class ServerMessageTests: XCTestCase {
         let json = try roundTrip(.setupStatus(phase: "downloading_models", detail: "42%"))
         XCTAssertTrue(json.contains(#""phase":"downloading_models""#))
         XCTAssertTrue(json.contains(#""detail":"42%""#))
+        XCTAssertFalse(json.contains("progress"))
+    }
+
+    func test_setupStatus_withProgress_encodesNumericProgress() throws {
+        let json = try roundTrip(.setupStatus(phase: "downloading_models", detail: "File 1 of 2", progress: 0.5))
+        XCTAssertTrue(json.contains(#""progress":0.5"#))
     }
 
     func test_profiles_encodesListAndActive() throws {
-        let json = try roundTrip(.profiles(list: ["lily", "mia"], active: "lily"))
+        let json = try roundTrip(.profiles(list: ["lily", "mia"], active: "lily", kids: nil))
         XCTAssertTrue(json.contains(#""list":["lily","mia"]"#))
         XCTAssertTrue(json.contains(#""active":"lily""#))
+        XCTAssertFalse(json.contains("kids"), "kids must be omitted when nil, not sent as an empty/null field")
+    }
+
+    func test_profiles_withKids_encodesSlugNameLanguagePerKid() throws {
+        let json = try roundTrip(.profiles(
+            list: ["zo", "mia_rose"], active: "zo",
+            kids: [KidInfo(slug: "zo", name: "Zoë", language: "en"), KidInfo(slug: "mia_rose", name: "Mia Rose", language: "ja")]
+        ))
+        XCTAssertTrue(json.contains(#""kids":["#))
+        XCTAssertTrue(json.contains(#""slug":"zo""#))
+        XCTAssertTrue(json.contains(#""name":"Zoë""#))
+        XCTAssertTrue(json.contains(#""language":"en""#))
+        XCTAssertTrue(json.contains(#""slug":"mia_rose""#))
+        XCTAssertTrue(json.contains(#""name":"Mia Rose""#))
+        XCTAssertTrue(json.contains(#""language":"ja""#))
+    }
+
+    func test_chooseProfile_encodesTypeAndList() throws {
+        let json = try roundTrip(.chooseProfile(list: ["lily", "mia"], kids: nil))
+        XCTAssertTrue(json.contains(#""type":"choose_profile""#))
+        XCTAssertTrue(json.contains(#""list":["lily","mia"]"#))
+        XCTAssertFalse(json.contains("kids"))
+    }
+
+    func test_chooseProfile_withKids_encodesPerKidFields() throws {
+        let json = try roundTrip(.chooseProfile(
+            list: ["zo"], kids: [KidInfo(slug: "zo", name: "Zoë", language: "en")]
+        ))
+        XCTAssertTrue(json.contains(#""slug":"zo""#))
+        XCTAssertTrue(json.contains(#""name":"Zoë""#))
+        XCTAssertTrue(json.contains(#""language":"en""#))
     }
 
     func test_settings_encodesFullShape() throws {

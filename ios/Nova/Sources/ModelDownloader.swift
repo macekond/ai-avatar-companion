@@ -8,26 +8,18 @@ import NovaCore
 /// live third-party fetch from a shipped App Store app is fragile).
 @MainActor
 final class ModelDownloader: NSObject {
-    static func modelsDirectory() -> URL {
+    nonisolated static func modelsDirectory() -> URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         return base.appendingPathComponent("models")
     }
 
-    /// Downloads every spec not already present, reporting aggregate
-    /// progress via `onProgress` (fraction 0...1, bytes received, bytes
-    /// expected) — `DownloadProgress` (NovaCore) does the fraction/byte math,
-    /// tested independent of any real network call.
+    /// Downloads every spec not already present, reporting the current file's
+    /// progress via `onProgress` (on the main actor, throttled).
     ///
     /// Returns `false` if any file failed to download after retries — the
-    /// caller must not treat setup as "ready" in that case. Every failure
-    /// used to be silently swallowed here (`try?` discarding the error, a
-    /// bare `return` with no signal at all), which meant a single stalled or
-    /// failed download left that model file simply never created — nothing
-    /// in the logs, nothing in the UI, and the app would sit on "ready" with
-    /// a permanently-nil engine, making the whole thing look randomly broken
-    /// rather than reporting an actual network failure.
+    /// caller must not treat setup as "ready" in that case.
     @discardableResult
-    func downloadMissing(_ specs: [ModelSpec], onProgress: @escaping (_ fraction: Double, _ receivedBytes: Int64, _ expectedBytes: Int64) -> Void) async -> Bool {
+    func downloadMissing(_ specs: [ModelSpec], onProgress: @escaping @MainActor (DownloadFileProgress) -> Void) async -> Bool {
         let dir = Self.modelsDirectory()
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
 
@@ -36,7 +28,6 @@ final class ModelDownloader: NSObject {
         let needed = modelsNeedingDownload(specs, existingFiles: existing)
         guard !needed.isEmpty else { return true }
 
-        var progress = DownloadProgress(totalFiles: needed.count)
         var allSucceeded = true
         for (index, spec) in needed.enumerated() {
             guard let url = spec.url else {
@@ -45,8 +36,7 @@ final class ModelDownloader: NSObject {
                 continue
             }
             let succeeded = await downloadOne(url: url, destination: dir.appendingPathComponent(spec.filename)) { received, expected in
-                progress.recordBytes(received: received, expected: expected, fileIndex: index)
-                onProgress(progress.fractionComplete, progress.totalReceivedBytes, progress.totalExpectedBytes)
+                onProgress(DownloadFileProgress(fileIndex: index, fileCount: needed.count, receivedBytes: received, expectedBytes: expected))
             }
             if !succeeded {
                 Diagnostics.log("model_download_failed", ["file": spec.filename])
@@ -56,36 +46,34 @@ final class ModelDownloader: NSObject {
         return allSucceeded
     }
 
-    /// A stalled (not merely slow) connection would otherwise hang for
-    /// `URLSessionConfiguration`'s default 7-day `timeoutIntervalForResource`
-    /// before ever failing — indistinguishable from the app just being
-    /// broken. 10 minutes per attempt, up to 3 attempts, is generous enough
-    /// for a real multi-hundred-MB model over a slow connection while still
-    /// failing in bounded time so the retry/error path actually runs.
+    /// `requestTimeout` is an idle timeout (no bytes for 30s), which is what
+    /// catches a genuinely stalled connection. The per-attempt resource cap
+    /// only guards against pathological cases, so it must comfortably exceed
+    /// a slow download of the ~1.1 GB LLM — a 10-minute cap aborted it (and
+    /// restarted from zero) on anything under ~1.9 MB/s.
     private static let requestTimeout: TimeInterval = 30
-    private static let resourceTimeout: TimeInterval = 600
+    private static let resourceTimeout: TimeInterval = 3 * 60 * 60
     private static let maxAttempts = 3
 
-    private func downloadOne(url: URL, destination: URL, onBytes: @escaping (Int64, Int64) -> Void) async -> Bool {
+    private func downloadOne(url: URL, destination: URL, onBytes: @escaping @MainActor (Int64, Int64) -> Void) async -> Bool {
         for attempt in 1...Self.maxAttempts {
             let config = URLSessionConfiguration.default
             config.timeoutIntervalForRequest = Self.requestTimeout
             config.timeoutIntervalForResource = Self.resourceTimeout
-            let delegate = ProgressDelegate(onBytes: onBytes)
-            let session = URLSession(configuration: config, delegate: delegate, delegateQueue: nil)
-            do {
-                let (tempURL, response) = try await session.download(from: url)
-                guard (response as? HTTPURLResponse)?.statusCode == 200 else {
-                    Diagnostics.log("model_download_retry", [
-                        "file": destination.lastPathComponent, "attempt": String(attempt),
-                        "reason": "http_\((response as? HTTPURLResponse)?.statusCode ?? -1)",
-                    ])
-                    continue
+            let result: Result<Void, Error> = await withCheckedContinuation { continuation in
+                let delegate = DownloadDelegate(destination: destination, onBytes: onBytes) { result in
+                    continuation.resume(returning: result)
                 }
-                try? FileManager.default.removeItem(at: destination)
-                try FileManager.default.moveItem(at: tempURL, to: destination)
+                // The async `session.download(from:)` convenience never calls the session
+                // delegate's didWriteData, so progress needs an explicit download task.
+                let session = URLSession(configuration: config, delegate: delegate, delegateQueue: nil)
+                session.downloadTask(with: url).resume()
+                session.finishTasksAndInvalidate()
+            }
+            switch result {
+            case .success:
                 return true
-            } catch {
+            case .failure(let error):
                 Diagnostics.log("model_download_retry", [
                     "file": destination.lastPathComponent, "attempt": String(attempt), "reason": String(describing: error),
                 ])
@@ -94,16 +82,56 @@ final class ModelDownloader: NSObject {
         return false
     }
 
-    private final class ProgressDelegate: NSObject, URLSessionDownloadDelegate {
-        let onBytes: (Int64, Int64) -> Void
-        init(onBytes: @escaping (Int64, Int64) -> Void) { self.onBytes = onBytes }
+    private struct HTTPStatusError: Error, CustomStringConvertible {
+        let code: Int
+        var description: String { "http_\(code)" }
+    }
+
+    /// Callbacks arrive on the session's own serial delegate queue, so the
+    /// mutable state below is only ever touched from that one queue.
+    private final class DownloadDelegate: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
+        private let destination: URL
+        private let onBytes: @MainActor (Int64, Int64) -> Void
+        private let completion: (Result<Void, Error>) -> Void
+        private var lastReport = Date.distantPast
+        private var fileResult: Result<Void, Error>?
+
+        init(destination: URL, onBytes: @escaping @MainActor (Int64, Int64) -> Void, completion: @escaping (Result<Void, Error>) -> Void) {
+            self.destination = destination
+            self.onBytes = onBytes
+            self.completion = completion
+        }
 
         func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData bytesWritten: Int64, totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
-            onBytes(totalBytesWritten, totalBytesExpectedToWrite)
+            let now = Date()
+            guard now.timeIntervalSince(lastReport) >= 0.25 else { return }
+            lastReport = now
+            let onBytes = self.onBytes
+            Task { @MainActor in onBytes(totalBytesWritten, totalBytesExpectedToWrite) }
         }
 
         func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
-            // Handled by the awaited `session.download(from:)` call itself.
+            // The temp file is deleted as soon as this returns, so it must be moved here.
+            let status = (downloadTask.response as? HTTPURLResponse)?.statusCode ?? -1
+            guard status == 200 else {
+                fileResult = .failure(HTTPStatusError(code: status))
+                return
+            }
+            do {
+                try? FileManager.default.removeItem(at: destination)
+                try FileManager.default.moveItem(at: location, to: destination)
+                fileResult = .success(())
+            } catch {
+                fileResult = .failure(error)
+            }
+        }
+
+        func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+            if let error {
+                completion(.failure(error))
+            } else {
+                completion(fileResult ?? .failure(URLError(.cannotCreateFile)))
+            }
         }
     }
 }

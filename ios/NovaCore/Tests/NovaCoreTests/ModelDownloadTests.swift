@@ -29,43 +29,28 @@ final class ModelSpecTests: XCTestCase {
     }
 }
 
-final class DownloadProgressTests: XCTestCase {
-    func test_fractionComplete_ofMultipleFiles() {
-        var progress = DownloadProgress(totalFiles: 2)
-        XCTAssertEqual(progress.fractionComplete, 0.0, accuracy: 0.001)
-
-        progress.recordBytes(received: 50, expected: 100, fileIndex: 0)
-        // First file half-done out of 2 total files = 0.25 overall.
-        XCTAssertEqual(progress.fractionComplete, 0.25, accuracy: 0.001)
-
-        progress.recordBytes(received: 100, expected: 100, fileIndex: 0)
-        progress.recordBytes(received: 100, expected: 100, fileIndex: 1)
-        XCTAssertEqual(progress.fractionComplete, 1.0, accuracy: 0.001)
+// Per-file, not averaged across files: averaging weighted a 1 KB config the
+// same as a 1.1 GB model, so the bar jumped and the MB total grew mid-download.
+final class DownloadFileProgressTests: XCTestCase {
+    func test_knownSize_reportsFileCountPercentAndMegabytes() {
+        let p = DownloadFileProgress(fileIndex: 1, fileCount: 5, receivedBytes: 460_000_000, expectedBytes: 1_117_000_000)
+        XCTAssertEqual(p.detail, "File 2 of 5 · 41% · 460 / 1117 MB")
+        XCTAssertEqual(p.fraction!, 0.4118, accuracy: 0.001)
     }
 
-    func test_zeroExpectedBytes_doesNotCrashOrDivideByZero() {
-        var progress = DownloadProgress(totalFiles: 1)
-        progress.recordBytes(received: 0, expected: 0, fileIndex: 0)
-        XCTAssertEqual(progress.fractionComplete, 0.0, accuracy: 0.001)
+    func test_unknownSize_omitsPercentAndHasNoFraction() {
+        let p = DownloadFileProgress(fileIndex: 0, fileCount: 3, receivedBytes: 12_000_000, expectedBytes: -1)
+        XCTAssertEqual(p.detail, "File 1 of 3 · 12 MB")
+        XCTAssertNil(p.fraction)
     }
 
-    // The UI wants "210 MB / 500 MB", not just a bare percentage — a
-    // multi-GB download that appears to sit at "0%" for a long time (small
-    // fraction, rounds to zero) reads as hung even when real bytes are
-    // moving; showing actual MB makes progress visible immediately.
-    func test_totalBytes_sumAcrossFiles() {
-        var progress = DownloadProgress(totalFiles: 2)
-        progress.recordBytes(received: 50, expected: 100, fileIndex: 0)
-        progress.recordBytes(received: 30, expected: 200, fileIndex: 1)
-        XCTAssertEqual(progress.totalReceivedBytes, 80)
-        XCTAssertEqual(progress.totalExpectedBytes, 300)
+    func test_subMegabyteFile_isShownInKilobytes() {
+        let p = DownloadFileProgress(fileIndex: 5, fileCount: 6, receivedBytes: 4_972, expectedBytes: 4_972)
+        XCTAssertEqual(p.detail, "File 6 of 6 · 100% · 5 / 5 KB")
     }
 
-    func test_totalBytes_updatesOnRepeatedCallsForSameFile() {
-        var progress = DownloadProgress(totalFiles: 1)
-        progress.recordBytes(received: 10, expected: 100, fileIndex: 0)
-        progress.recordBytes(received: 60, expected: 100, fileIndex: 0)
-        XCTAssertEqual(progress.totalReceivedBytes, 60)
-        XCTAssertEqual(progress.totalExpectedBytes, 100)
+    func test_fraction_isClampedToOne() {
+        let p = DownloadFileProgress(fileIndex: 0, fileCount: 1, receivedBytes: 150, expectedBytes: 100)
+        XCTAssertEqual(p.fraction, 1.0)
     }
 }

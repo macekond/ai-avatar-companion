@@ -64,6 +64,28 @@ final class HumanizeSinceTests: XCTestCase {
     }
 }
 
+final class ChildProfileTests: XCTestCase {
+    /// I8: levels are remembered per language so switching away and back
+    /// restores the last one used, rather than always resetting. Old profile
+    /// JSON on disk predates this field entirely, so decoding it must default
+    /// to empty rather than fail.
+    func test_decodesOldJSONWithoutLevelByLanguage_defaultsToEmpty() throws {
+        let oldJSON = """
+        {"name":"Lily","firstSessionDate":"2026-01-01","language":"en","level":"A","voice":""}
+        """
+        let profile = try JSONDecoder().decode(ChildProfile.self, from: Data(oldJSON.utf8))
+        XCTAssertEqual(profile.levelByLanguage, [:])
+    }
+
+    func test_levelByLanguage_roundTripsThroughEncodeDecode() throws {
+        var profile = ChildProfile(name: "Lily")
+        profile.levelByLanguage = ["en": "B", "ja": "N4"]
+        let data = try JSONEncoder().encode(profile)
+        let decoded = try JSONDecoder().decode(ChildProfile.self, from: data)
+        XCTAssertEqual(decoded.levelByLanguage, ["en": "B", "ja": "N4"])
+    }
+}
+
 final class MemoryManagerTests: XCTestCase {
     var tempDir: URL!
 

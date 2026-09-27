@@ -28,6 +28,18 @@ struct ContentView: View {
 }
 
 private struct WebView: UIViewRepresentable {
+    /// Locks pinch/double-tap zoom on the hosted page (C2) — rapid taps on
+    /// the talk button were triggering WKWebView's built-in double-tap-zoom,
+    /// and focusing a text input auto-zooms too, leaving a kid stuck zoomed
+    /// in with no way back out. `viewForZooming` returning nil is the
+    /// documented way to make a `UIScrollView` un-zoomable outright, on top
+    /// of pinning both scale bounds to 1.
+    final class ZoomLockDelegate: NSObject, UIScrollViewDelegate {
+        func viewForZooming(in scrollView: UIScrollView) -> UIView? { nil }
+    }
+
+    func makeCoordinator() -> ZoomLockDelegate { ZoomLockDelegate() }
+
     func makeUIView(context: Context) -> WKWebView {
         guard let schemeHandler = NovaSchemeHandler() else {
             assertionFailure("Bundled www/ not found — did the prebuild script run?")
@@ -37,6 +49,10 @@ private struct WebView: UIViewRepresentable {
         config.setURLSchemeHandler(schemeHandler, forURLScheme: NovaSchemeHandler.scheme)
 
         let webView = WKWebView(frame: .zero, configuration: config)
+        webView.scrollView.minimumZoomScale = 1
+        webView.scrollView.maximumZoomScale = 1
+        webView.scrollView.bouncesZoom = false
+        webView.scrollView.delegate = context.coordinator
         webView.load(URLRequest(url: NovaSchemeHandler.appURL))
         return webView
     }

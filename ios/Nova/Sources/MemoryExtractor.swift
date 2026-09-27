@@ -13,37 +13,22 @@ import NovaCore
 /// live replies — call this off the main actor too, same as everywhere else
 /// engine calls happen in this app.
 enum MemoryExtractor {
-    private static let promptTemplate = """
-    Analyze this English learning conversation turn.
-
-    Child said: "%@"
-    Avatar replied: "%@"
-
-    Reply in EXACTLY this format (3 lines, nothing else):
-    TOPIC: <main topic keyword 1-3 words, or none>
-    PROBLEM: <error_type: child_said -> correction, or none>
-    ENGAGED: <yes or no>
-
-    Examples:
-    TOPIC: football
-    PROBLEM: past_tense: goed -> went
-    ENGAGED: yes
-
-    TOPIC: none
-    PROBLEM: none
-    ENGAGED: no
-    """
-
     /// Returns safe defaults (`MemoryExtraction()` — no topic, no problem,
     /// `engaged: true`) on any failure, matching the Python original's
     /// silent-failure guarantee: extraction must never surface an error to
-    /// the conversation.
-    static func extract(transcript: String, reply: String, engine: LlamaEngine) -> MemoryExtraction {
-        let prompt = String(format: promptTemplate, transcript.trimmingCharacters(in: .whitespacesAndNewlines), reply.trimmingCharacters(in: .whitespacesAndNewlines))
+    /// the conversation. `language` picks the prompt framing (NovaCore's
+    /// `MemoryExtractionPrompt`) so a Japanese profile's topic keyword comes
+    /// back in Japanese instead of English.
+    static func extract(transcript: String, reply: String, engine: LlamaEngine, language: String) -> MemoryExtraction {
+        let prompt = MemoryExtractionPrompt.build(transcript: transcript, reply: reply, language: language)
+        let messages = [ChatMessage(role: .user, content: prompt)]
         var pieces: [String] = []
         // maxTokens: 40, matching the Python original's num_predict cap —
         // this response is always 3 short lines.
-        guard (try? engine.generate(prompt: prompt, maxTokens: 40, onSentence: { pieces.append($0) })) != nil else {
+        do {
+            try engine.generate(messages: messages, maxTokens: 40, onSentence: { pieces.append($0) })
+        } catch {
+            Diagnostics.log("llm_generation_failed", ["caller": "memory_extractor"])
             return MemoryExtraction()
         }
         // LlamaEngine.generate's only public API segments by sentence

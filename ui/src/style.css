@@ -443,6 +443,12 @@ rt {
 }
 #toast.visible { opacity: 1; transform: translateX(-50%) translateY(0); }
 
+/* On iOS the toast must stay visible above every full-screen overlay this
+   app can show while it's needed — the profile picker (z-index 900) chiefly,
+   since a profile_error toast rendering silently behind it was the bug (C1).
+   Desktop has no overlay above the base z-index: 60, so this is iOS-only. */
+body.ios-native #toast { z-index: 950; }
+
 .toast-spinner {
   width: 15px;
   height: 15px;
@@ -621,6 +627,47 @@ body.ios-native #ptt-btn.listening {
   50%      { box-shadow: 0 3px 22px rgba(200, 80, 50, 0.65); }
 }
 
+/* ── iOS safe-area insets (notch/Dynamic Island + home indicator) ─────────
+   The WKWebView host uses .ignoresSafeArea(), so top controls, panels and
+   the bottom overlay must offset themselves by env(safe-area-inset-*) or
+   they sit under the status bar / home indicator. viewport-fit=cover in
+   index.html is required for these env() values to be non-zero. */
+body.ios-native #transcript-btn {
+  top: calc(env(safe-area-inset-top, 0px) + 16px);
+  right: calc(env(safe-area-inset-right, 0px) + 16px);
+}
+body.ios-native #active-kid {
+  top: calc(env(safe-area-inset-top, 0px) + 16px);
+  right: calc(env(safe-area-inset-right, 0px) + 64px);
+}
+body.ios-native #sentence-bubble { overflow-wrap: anywhere; }
+body.ios-native #transcript-panel {
+  overflow: hidden;
+  top: calc(env(safe-area-inset-top, 0px) + 64px);
+  right: calc(env(safe-area-inset-right, 0px) + 16px);
+  max-height: calc(100vh - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px) - 96px);
+  max-height: calc(100dvh - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px) - 96px);
+}
+/* A flex-column child can't shrink below its content without min-height:0, so the list would push past the screen. */
+body.ios-native #transcript-list { flex: 1 1 auto; min-height: 0; }
+body.ios-native #overlay {
+  left: calc(env(safe-area-inset-left, 0px));
+  right: calc(env(safe-area-inset-right, 0px) + var(--stage-reserve, 0px));
+  padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 32px);
+}
+
+/* Phone portrait: the docked transcript mode never activates this narrow, so
+   turn the panel into a near-full-width sheet instead of a small card —
+   otherwise long conversations are unreadable in a 340px column. */
+@media (max-width: 600px) {
+  body.ios-native #transcript-panel {
+    left: calc(env(safe-area-inset-left, 0px) + 12px);
+    right: calc(env(safe-area-inset-right, 0px) + 12px);
+    width: auto;
+    max-width: none;
+  }
+}
+
 /* ── iOS-native settings panel (scoped to body.ios-native, set by main.js
    only when hosted over the iOS app's nova-app:// scheme — see the comment
    there). Everything above stays exactly as the desktop Tauri app renders
@@ -639,7 +686,8 @@ body.ios-native #settings-panel {
   right: calc(env(safe-area-inset-right, 0px) + 16px);
   width: 320px;
   max-width: calc(100vw - 24px);
-  max-height: calc(100vh - env(safe-area-inset-top, 0px) - 80px);
+  max-height: calc(100vh - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px) - 80px);
+  max-height: calc(100dvh - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px) - 80px);
   padding: 0;
   border-radius: 14px;
   background: rgba(242, 242, 247, 0.96);
@@ -792,6 +840,10 @@ body.ios-native #modal-input {
   border-radius: 8px;
   border-color: rgba(60, 60, 67, 0.2);
   text-align: center;
+  /* #modal-input's own ID rule sets 0.9rem (14.4px); an ID beats the general
+     `body.ios-native input[type="text"]` 16px rule below, so it needs its
+     own override here — iOS zooms the page on any input under 16px (C2). */
+  font-size: 16px;
 }
 body.ios-native #modal-actions {
   margin: 16px -16px 0;
@@ -812,3 +864,152 @@ body.ios-native #modal-actions .chip.active {
   background: transparent;
 }
 body.ios-native #modal-actions .chip.active::after { content: none; }
+
+/* ── iOS profile picker (choose_profile) ─────────────────────────────────
+   Full-screen overlay shown before any kid profile is active — replaces
+   the old spoken onboarding. Sits below #setup-overlay's inline z-index
+   1000 so model-download progress still shows on top of it. Only ever
+   built/shown by main.js on the 'choose_profile' message, which the
+   desktop server never sends, but scoped here regardless per the iOS-only
+   CSS rule. */
+body.ios-native #profile-picker {
+  position: fixed;
+  inset: 0;
+  z-index: 900;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow-y: auto;
+  /* Opaque: Nova must not be visible until a kid is picked. */
+  background: radial-gradient(ellipse at 50% 30%, #fff8ef 0%, #fdefd8 60%, #f5ddb0 100%);
+  padding:
+    calc(env(safe-area-inset-top, 0px) + 24px)
+    calc(env(safe-area-inset-right, 0px) + 20px)
+    calc(env(safe-area-inset-bottom, 0px) + 24px)
+    calc(env(safe-area-inset-left, 0px) + 20px);
+  font-family: -apple-system, 'SF Pro Text', system-ui, sans-serif;
+  color: #5a3a2a;
+  transition: opacity 0.4s ease;
+}
+body.ios-native #profile-picker[hidden] { display: none; }
+body.ios-native #profile-picker.fade { opacity: 0; }
+body.ios-native .profile-picker-card {
+  width: 100%;
+  max-width: 360px;
+  margin: auto 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+body.ios-native .profile-picker-heading {
+  margin: 0 0 8px;
+  text-align: center;
+  font-size: 1.3rem;
+  font-weight: 700;
+}
+/* :not([hidden]) so this doesn't beat the [hidden] attribute in 'add' mode
+   (see the identical #kid-detail-view comment above) — an ID-less class
+   selector still out-specifies the UA's [hidden]{display:none} on its own. */
+body.ios-native .profile-picker-kids:not([hidden]) {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+body.ios-native .profile-picker-kid,
+body.ios-native .profile-picker-add {
+  padding: 16px;
+  border-radius: 14px;
+  border: none;
+  background: rgba(217, 138, 95, 0.14);
+  color: #5a3a2a;
+  font-size: 1.05rem;
+  font-weight: 600;
+  text-align: center;
+}
+body.ios-native .profile-picker-kid:active,
+body.ios-native .profile-picker-add:active { background: rgba(217, 138, 95, 0.26); }
+body.ios-native .profile-picker-form[hidden] { display: none; }
+body.ios-native .profile-picker-form:not([hidden]) {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 4px;
+}
+body.ios-native .profile-picker-name {
+  padding: 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(90, 60, 40, 0.25);
+  font-size: 1rem;
+  text-align: center;
+  background: #fff;
+  color: #3a261a;
+}
+body.ios-native .profile-picker-langs { display: flex; gap: 10px; }
+body.ios-native .profile-picker-lang {
+  flex: 1;
+  padding: 14px 8px;
+  border-radius: 12px;
+  border: 2px solid rgba(90, 60, 40, 0.2);
+  background: #fff;
+  color: #5a3a2a;
+  font-size: 1rem;
+  font-weight: 600;
+}
+body.ios-native .profile-picker-lang.active {
+  border-color: #d98a5f;
+  background: rgba(217, 138, 95, 0.15);
+}
+body.ios-native .profile-picker-start {
+  padding: 14px;
+  border-radius: 12px;
+  border: none;
+  background: #d98a5f;
+  color: #fff;
+  font-size: 1.05rem;
+  font-weight: 700;
+}
+body.ios-native .profile-picker-start:active { background: #c67a50; }
+body.ios-native .profile-picker-start:disabled { background: #e8c7b2; }
+
+/* Inline profile_error text (C1) — shown right above the name field so a
+   duplicate/invalid name can't be missed even if the toast goes unnoticed. */
+body.ios-native .profile-picker-error {
+  margin: -4px 0 0;
+  padding: 8px 12px;
+  border-radius: 10px;
+  background: rgba(200, 70, 55, 0.12);
+  color: #a8382a;
+  font-size: 0.9rem;
+  font-weight: 600;
+  text-align: center;
+}
+body.ios-native .profile-picker-error[hidden] { display: none; }
+
+/* Cancel — 'add' mode only (opened from Settings '+', I3); the mandatory
+   choose_profile picker never shows this. Plain text link, not a filled pill,
+   so it doesn't compete with Start. */
+body.ios-native .profile-picker-cancel {
+  padding: 6px;
+  border: none;
+  background: transparent;
+  color: #8a6a52;
+  font-size: 0.95rem;
+  font-weight: 600;
+  text-align: center;
+}
+body.ios-native .profile-picker-cancel[hidden] { display: none; }
+body.ios-native .profile-picker-cancel:active { opacity: 0.6; }
+
+/* ── iOS touch tuning (C2) ─────────────────────────────────────────────
+   Rapid taps on the talk button were triggering double-tap-to-zoom, and
+   focusing a text input under 16px auto-zoomed the whole page — both iOS
+   Safari/WKWebView behaviors, both scoped to iOS only. */
+body.ios-native button,
+body.ios-native .chip,
+body.ios-native input {
+  touch-action: manipulation;
+}
+body.ios-native input[type="text"] {
+  font-size: 16px;
+}
+
