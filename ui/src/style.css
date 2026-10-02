@@ -37,6 +37,18 @@ html, body {
   pointer-events: none;
   z-index: 20;
   transition: right 0.25s ease;
+  /* Promote this to its own compositing layer. Without it, WKWebView's
+     raw touch hit-testing can resolve a tap/hold squarely inside #ptt-btn
+     to the WebGL #canvas underneath instead — confirmed in the iOS
+     Simulator by instrumenting pointerdown: its target was #canvas, while
+     the synthesized click (which gets extra hit-slop) correctly found
+     #ptt-btn. Since #ptt-btn only listens for pointerdown/up (needed for
+     real press-and-hold timing, which click can't give), that pointerdown
+     going to the canvas meant holding the button did nothing at all — the
+     exact "freezes, can't continue the conversation" symptom. z-index
+     alone governs paint order, not which layer WebKit's touch
+     hit-testing consults against the canvas's own GPU layer. */
+  transform: translateZ(0);
 }
 
 #sentence-bubble {
@@ -635,6 +647,14 @@ body.ios-native #ptt-btn:not([hidden]) {
   -webkit-touch-callout: none;
   -webkit-user-select: none;
   touch-action: none;
+  /* Without this, WKWebView's own long-press-to-drag gesture recognizer
+     wins arbitration over a sustained touch on this button: the browser
+     starts a native drag ("Drag session requested" / "missing staged drag
+     source" in the WebKit log) instead of delivering pointerdown, so
+     holding the button to talk does nothing and the child can't start a
+     turn at all. touch-action/-webkit-touch-callout above don't cover
+     this — the drag-lift gesture is governed separately. */
+  -webkit-user-drag: none;
 }
 /* Pressed state — the child's thumb is down and Nova is actively listening. */
 body.ios-native #ptt-btn.active {
