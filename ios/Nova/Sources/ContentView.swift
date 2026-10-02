@@ -34,11 +34,33 @@ private struct WebView: UIViewRepresentable {
     /// in with no way back out. `viewForZooming` returning nil is the
     /// documented way to make a `UIScrollView` un-zoomable outright, on top
     /// of pinning both scale bounds to 1.
-    final class ZoomLockDelegate: NSObject, UIScrollViewDelegate {
+    ///
+    /// Also removes WKWebView's built-in `UIDragInteraction` once the page
+    /// loads (see `disableDragInteractions`) — holding down `#ptt-btn` was
+    /// silently losing the gesture to it, which no amount of
+    /// `touch-action`/`-webkit-user-drag` CSS could prevent since the
+    /// interaction lives on WKWebView's native content view, not anything
+    /// CSS reaches. Reported as "hold to talk does nothing, conversation
+    /// can't continue" — the client-side cause the 20s PTT watchdog in
+    /// main.js was only ever a band-aid for.
+    final class Coordinator: NSObject, UIScrollViewDelegate, WKNavigationDelegate {
         func viewForZooming(in scrollView: UIScrollView) -> UIView? { nil }
+
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            Self.disableDragInteractions(in: webView)
+        }
+
+        static func disableDragInteractions(in view: UIView) {
+            for interaction in view.interactions where interaction is UIDragInteraction {
+                view.removeInteraction(interaction)
+            }
+            for subview in view.subviews {
+                disableDragInteractions(in: subview)
+            }
+        }
     }
 
-    func makeCoordinator() -> ZoomLockDelegate { ZoomLockDelegate() }
+    func makeCoordinator() -> Coordinator { Coordinator() }
 
     func makeUIView(context: Context) -> WKWebView {
         guard let schemeHandler = NovaSchemeHandler() else {
@@ -53,6 +75,7 @@ private struct WebView: UIViewRepresentable {
         webView.scrollView.maximumZoomScale = 1
         webView.scrollView.bouncesZoom = false
         webView.scrollView.delegate = context.coordinator
+        webView.navigationDelegate = context.coordinator
         webView.load(URLRequest(url: NovaSchemeHandler.appURL))
         return webView
     }
