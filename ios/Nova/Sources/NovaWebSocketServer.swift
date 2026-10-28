@@ -49,6 +49,41 @@ public final class NovaWebSocketServer: ObservableObject {
     private var listener: NWListener?
     private var connections: [ObjectIdentifier: NWConnection] = [:]
 
+    /// Dedicated serial queue for the *foreground* turn pipeline — STT,
+    /// the reply generation, and each sentence's TTS synthesis — all of it
+    /// a blocking, synchronous C call lasting anywhere from hundreds of ms
+    /// to several seconds. `Task.detached` used to run these, but Swift's
+    /// cooperative thread pool is sized for brief hops, not for parking a
+    /// worker thread mid-multi-second native call; stack more than a
+    /// handful of such tasks and a later one can sit queued behind an
+    /// earlier one with no free pool thread to run on — invisible in a
+    /// stack sample (it never started), indistinguishable from a true
+    /// hang, and the exact shape of "the app freezes, holding to talk
+    /// again does nothing" reproduced by driving several turns in a row.
+    /// A dedicated queue outside that pool can't be starved by it, and
+    /// serializing here also matches `WhisperEngine`/`LlamaEngine`'s own
+    /// single-instance-at-a-time assumption instead of leaving it to
+    /// accidentally hold given today's one-connection-at-a-time usage.
+    ///
+    /// Memory extraction deliberately does NOT share this queue (see
+    /// `memoryExtractionQueue`) — it's a fire-and-forget background call on
+    /// the same `LlamaEngine`, and queuing it here would sit it between two
+    /// sentences' TTS synth requests, turning its multi-second LLM call
+    /// into an audible gap mid-reply: the same class of bug this queue
+    /// exists to fix, just relocated instead of removed.
+    private let modelQueue = DispatchQueue(label: "cz.macek.nova.model-work", qos: .userInitiated)
+
+    /// Serial queue for memory extraction only — separate from `modelQueue`
+    /// so this fire-and-forget background call (see `extractMemory`'s doc
+    /// comment: "never blocks the conversation") can't delay a later
+    /// sentence's TTS synth sitting behind it in `modelQueue`. Still
+    /// serial, matching `LlamaEngine`'s single-instance-at-a-time
+    /// assumption — extraction calls `engine.generate` same as the reply
+    /// does, just never at the same time as a reply or another turn's STT
+    /// because those stay sequenced through `modelQueue` on the MainActor
+    /// hop between turns.
+    private let memoryExtractionQueue = DispatchQueue(label: "cz.macek.nova.memory-extraction", qos: .utility)
+
     /// One state machine per connection — each browser tab/session is
     /// independent, mirroring `app/server.py`'s per-connection `_session`.
     private var stateMachines: [ObjectIdentifier: SessionStateMachine] = [:]
@@ -206,7 +241,7 @@ public final class NovaWebSocketServer: ObservableObject {
     private let kokoroPlayer = KokoroPlayer()
     /// Kokoro is only used for Japanese here, so this is one of Kokoro's
     /// native Japanese voices (the English `af_*` voices mangle Japanese).
-    /// `nonisolated` because it's read from inside `speak`'s `Task.detached`
+    /// `nonisolated` because it's read from inside `speak`'s `modelQueue`
     /// Kokoro branch — a plain immutable constant is safe off the main
     /// actor, but static members of a `@MainActor` type are actor-isolated
     /// by default, which Swift 6's strict concurrency checking now enforces
@@ -888,9 +923,9 @@ public final class NovaWebSocketServer: ObservableObject {
     /// progress, same as before whisper.cpp was wired in.
     private func transcribeAndContinue(samples: [Float], engine: WhisperEngine, connection: NWConnection) {
         let language = memories[ObjectIdentifier(connection)]?.profile.language ?? "en"
-        Task.detached {
+        modelQueue.async { [weak self] in
             let text = try? engine.transcribe(samples: samples, language: language)
-            await MainActor.run { [weak self] in
+            Task { @MainActor in
                 guard let self else { return }
                 let id = ObjectIdentifier(connection)
                 var machine = self.stateMachines[id] ?? SessionStateMachine()
@@ -902,7 +937,7 @@ public final class NovaWebSocketServer: ObservableObject {
                 machine.transcribed(hasText ? trimmed : nil)
                 self.stateMachines[id] = machine
                 if hasText, let trimmed {
-                    let textHtml = furiganaFormatter().annotateFor(trimmed, language: language)
+                    let textHtml = self.furiganaFormatter().annotateFor(trimmed, language: language)
                     self.send(.transcript(text: trimmed, textHtml: textHtml), on: connection)
                 }
                 self.send(.state(machine.state), on: connection)
@@ -972,10 +1007,10 @@ public final class NovaWebSocketServer: ObservableObject {
         let messages = buildChatMessages(systemPrompt: systemPrompt, history: history, userMessage: userMessage)
         let generationToken = generationGuard(for: connection).currentToken()
 
-        Task.detached {
+        modelQueue.async { [weak self] in
             // Genuinely safe despite the warning Swift 6 would raise here:
             // `engine.generate` calls its `onSentence` closure synchronously,
-            // one call at a time, entirely within this same detached task
+            // one call at a time, entirely within this same queue hop
             // before the function returns — there's no real concurrent
             // access to `sentences`, just a mutable local captured by an
             // `@escaping` (not `@Sendable`) closure that the compiler's
@@ -986,7 +1021,7 @@ public final class NovaWebSocketServer: ObservableObject {
             } catch {
                 Diagnostics.log("llm_generation_failed", ["caller": "reply"])
             }
-            await MainActor.run { [weak self] in
+            Task { @MainActor in
                 guard let self else { return }
                 self.generationGuard(for: connection).apply(generationToken) {
                     self.speechInterrupted = false
@@ -1047,9 +1082,9 @@ public final class NovaWebSocketServer: ObservableObject {
     private func extractMemory(transcript: String, replySentences: [String], engine: LlamaEngine, language: String, connection: NWConnection, token: GenerationGuard.Token, turnId: Int?) {
         guard !replySentences.isEmpty else { return }
         let fullReply = replySentences.joined(separator: " ")
-        Task.detached { [weak self] in
+        memoryExtractionQueue.async { [weak self] in
             let result = MemoryExtractor.extract(transcript: transcript, reply: fullReply, engine: engine, language: language)
-            await MainActor.run { [weak self] in
+            Task { @MainActor in
                 guard let self else { return }
                 // Re-checked after the extraction call itself (a second,
                 // shorter async gap a profile swap could also land in) —
@@ -1172,9 +1207,9 @@ public final class NovaWebSocketServer: ObservableObject {
     /// `self.morphemeAnalyzer` — this must be `nonisolated` so `speak`'s
     /// Japanese branch can actually run open_jtalk's blocking native call
     /// off the main actor. A non-`nonisolated` method on this `@MainActor`
-    /// class still executes its body on the main actor even when called with
-    /// `await` from inside `Task.detached`, which silently defeated that
-    /// detached wrapper here — the same failure mode
+    /// class still executes its body on the main actor regardless of which
+    /// thread/queue the caller is on, which would silently defeat `speak`'s
+    /// dedicated queue hop here — the same failure mode
     /// `loadAvailableEngines`'s doc comment warns about ("engine construction
     /// on the main actor stalled ping/receive handling long enough that a
     /// connected client's socket timed out"), just reintroduced per-reply
@@ -1201,7 +1236,7 @@ public final class NovaWebSocketServer: ObservableObject {
             // comment on why a nonisolated method can't safely read
             // self.morphemeAnalyzer directly.
             let analyzer = morphemeAnalyzer
-            Task.detached { [weak self] in
+            modelQueue.async { [weak self] in
                 guard let self else { return }
                 do {
                     let hiragana = try self.japaneseReading(for: text, analyzer: analyzer)
@@ -1210,11 +1245,11 @@ public final class NovaWebSocketServer: ObservableObject {
                     let style = try kokoroVoiceStore.styleVector(voice: Self.kokoroVoiceName, tokenCount: tokenCount)
                     let (samples, elapsedMs) = try Diagnostics.measureMs { try kokoroEngine.synthesize(phonemes: phonemes, style: style) }
                     Diagnostics.log("tts_latency", ["engine": "kokoro", "ms": String(elapsedMs), "memory_mb": String(Diagnostics.memoryFootprintMB())])
-                    await MainActor.run {
+                    Task { @MainActor in
                         self.kokoroPlayer.play(samples: samples, sampleRate: KokoroEngine.sampleRate, onAmplitude: onAmplitude, onFinish: onFinish)
                     }
                 } catch {
-                    await MainActor.run {
+                    Task { @MainActor in
                         self.ttsEngine.speak(text, language: language, onAmplitude: onAmplitude, onFinish: onFinish)
                     }
                 }
@@ -1222,7 +1257,7 @@ public final class NovaWebSocketServer: ObservableObject {
             return
         }
         if language == "en", let espeakPhonemizer, let piperEngine, let piperConfig {
-            Task.detached { [weak self] in
+            modelQueue.async { [weak self] in
                 guard let self else { return }
                 do {
                     try espeakPhonemizer.setVoice(piperConfig.espeakVoice)
@@ -1233,11 +1268,11 @@ public final class NovaWebSocketServer: ObservableObject {
                     // ~1-sentence utterance.
                     let (samples, elapsedMs) = try Diagnostics.measureMs { try piperEngine.synthesize(phonemeIds: ids, config: piperConfig) }
                     Diagnostics.log("tts_latency", ["engine": "piper", "ms": String(elapsedMs), "memory_mb": String(Diagnostics.memoryFootprintMB())])
-                    await MainActor.run {
+                    Task { @MainActor in
                         self.piperPlayer.play(samples: samples, sampleRate: piperConfig.sampleRate, onAmplitude: onAmplitude, onFinish: onFinish)
                     }
                 } catch {
-                    await MainActor.run {
+                    Task { @MainActor in
                         self.ttsEngine.speak(text, language: language, onAmplitude: onAmplitude, onFinish: onFinish)
                     }
                 }
